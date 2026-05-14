@@ -23,7 +23,7 @@ dependencies = [
   "python-dateutil>=2.8.2",
   "litellm==1.81.6",
   "boto3>=1.35.0",
-  "uvicorn>=0.30.0",
+  "uvicorn>=0.47.0",
   "certifi>=2024.0.0",
   "sqlglot>=27.8.0",
   "ruff>=0.8.0",
