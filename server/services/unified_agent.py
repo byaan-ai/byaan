@@ -52,6 +52,7 @@ from server.tools.agentic import (
     search_datasets,
     start_html_generation,
 )
+from server.tools.databricks import get_databricks_tools
 from server.tools.dataframe import get_duckdb_tools
 from server.tools.dynamodb import get_dynamodb_tools
 from server.tools.filters import (
@@ -624,11 +625,14 @@ def _build_agent_tools(
             tools.extend(get_duckdb_tools())
         if "dynamodb" in db_types:
             tools.extend(get_dynamodb_tools())
+        if "databricks" in db_types:
+            tools.extend(get_databricks_tools())
     else:
         tools.extend(get_sql_tools())
         tools.extend(get_mongo_tools())
         tools.extend(get_duckdb_tools())
         tools.extend(get_dynamodb_tools())
+        tools.extend(get_databricks_tools())
 
     tools.extend(
         [

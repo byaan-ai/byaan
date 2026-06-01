@@ -90,6 +90,11 @@ export function DatabaseConnectionDialog({
     secretAccessKey: '',
     endpointUrl: '',
     queryMode: 'partiql' as 'partiql' | 'native',
+    serverHostname: '',
+    httpPath: '',
+    accessToken: '',
+    catalog: '',
+    databricksSchema: '',
   })
 
   // Upload files state
@@ -111,6 +116,7 @@ export function DatabaseConnectionDialog({
       case 'sqlite': return 'SQLite'
       case 'mssql': return 'SQL Server'
       case 'dynamodb': return 'DynamoDB'
+      case 'databricks': return 'Databricks'
       case 'csv': return 'CSV File'
       case 'excel': return 'Excel File'
       case 'parquet': return 'Parquet File'
@@ -169,6 +175,14 @@ export function DatabaseConnectionDialog({
         connectionConfig.region.trim().length > 0 &&
         connectionConfig.accessKeyId.trim().length > 0 &&
         connectionConfig.secretAccessKey.trim().length > 0
+      )
+    }
+
+    if (selectedType === 'databricks') {
+      return (
+        connectionConfig.serverHostname.trim().length > 0 &&
+        connectionConfig.httpPath.trim().length > 0 &&
+        connectionConfig.accessToken.trim().length > 0
       )
     }
 
@@ -324,6 +338,14 @@ export function DatabaseConnectionDialog({
           endpoint_url: connectionConfig.endpointUrl || '',
           query_mode: connectionConfig.queryMode,
         }
+      } else if (selectedType === 'databricks') {
+        connectionObj = {
+          server_hostname: connectionConfig.serverHostname,
+          http_path: connectionConfig.httpPath,
+          access_token: connectionConfig.accessToken,
+          catalog: connectionConfig.catalog || undefined,
+          schema: connectionConfig.databricksSchema || undefined,
+        }
       } else {
         connectionObj = {
           host: connectionConfig.host,
@@ -359,6 +381,11 @@ export function DatabaseConnectionDialog({
         secretAccessKey: '',
         endpointUrl: '',
         queryMode: 'partiql',
+        serverHostname: '',
+        httpPath: '',
+        accessToken: '',
+        catalog: '',
+        databricksSchema: '',
       })
       setUploadFiles([])
       setUploadFileAliases({})
@@ -578,6 +605,20 @@ export function DatabaseConnectionDialog({
                 >
                   <Cloud className="w-5 h-5 flex-shrink-0 text-amber-400" />
                   <span className="text-sm font-medium">DynamoDB</span>
+                </button>
+
+                {/* Databricks */}
+                <button
+                  onClick={() => handleTypeChange('databricks')}
+                  disabled={isLoading}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md transition-all text-left ${
+                    selectedType === 'databricks'
+                      ? 'bg-brand-orange/10 text-white border-l-3 border-brand-orange'
+                      : 'text-gray-400 hover:text-white hover:bg-[#2a2a2a]'
+                  } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  <Database className="w-5 h-5 flex-shrink-0 text-red-400" />
+                  <span className="text-sm font-medium">Databricks</span>
                 </button>
               </div>
             </div>
@@ -889,6 +930,68 @@ export function DatabaseConnectionDialog({
                           <option value="native">Native API (scan/query/get)</option>
                         </select>
                         <p className="text-xs text-gray-400 mt-1">PartiQL uses SQL-like syntax. Native API uses JSON-based operations.</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedType === 'databricks' && (
+                    <div className="space-y-4">
+                      <div>
+                        <Label htmlFor="serverHostname" className="text-white">Server Hostname <span className="text-red-400">*</span></Label>
+                        <Input
+                          id="serverHostname"
+                          placeholder="adb-1234.azuredatabricks.net"
+                          value={connectionConfig.serverHostname}
+                          onChange={(e) => setConnectionConfig(prev => ({ ...prev, serverHostname: e.target.value }))}
+                          disabled={isLoading}
+                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="httpPath" className="text-white">HTTP Path <span className="text-red-400">*</span></Label>
+                        <Input
+                          id="httpPath"
+                          placeholder="/sql/1.0/warehouses/abc123"
+                          value={connectionConfig.httpPath}
+                          onChange={(e) => setConnectionConfig(prev => ({ ...prev, httpPath: e.target.value }))}
+                          disabled={isLoading}
+                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
+                        />
+                        <p className="text-xs text-gray-400 mt-1">Find in Databricks: SQL Warehouse → Connection Details → HTTP Path</p>
+                      </div>
+                      <div>
+                        <Label htmlFor="accessToken" className="text-white">Access Token (PAT) <span className="text-red-400">*</span></Label>
+                        <Input
+                          id="accessToken"
+                          type="password"
+                          placeholder="dapi..."
+                          value={connectionConfig.accessToken}
+                          onChange={(e) => setConnectionConfig(prev => ({ ...prev, accessToken: e.target.value }))}
+                          disabled={isLoading}
+                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="catalog" className="text-white">Catalog <span className="text-gray-500">(optional)</span></Label>
+                        <Input
+                          id="catalog"
+                          placeholder="main"
+                          value={connectionConfig.catalog}
+                          onChange={(e) => setConnectionConfig(prev => ({ ...prev, catalog: e.target.value }))}
+                          disabled={isLoading}
+                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="databricksSchema" className="text-white">Schema <span className="text-gray-500">(optional)</span></Label>
+                        <Input
+                          id="databricksSchema"
+                          placeholder="default"
+                          value={connectionConfig.databricksSchema}
+                          onChange={(e) => setConnectionConfig(prev => ({ ...prev, databricksSchema: e.target.value }))}
+                          disabled={isLoading}
+                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
+                        />
                       </div>
                     </div>
                   )}

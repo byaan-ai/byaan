@@ -33,6 +33,8 @@ class ConnectionService:
                 schema = await DatabaseOperationsService.get_mongo_schema_async(connection_obj)
             elif connection.type == "dynamodb":
                 schema = await DatabaseOperationsService.get_dynamodb_schema_async(connection_obj)
+            elif connection.type == "databricks":
+                schema = await DatabaseOperationsService.get_databricks_schema_async(connection_obj)
             elif connection.type in ["pg", "mysql", "sqlite", "mssql"]:
                 # Use unified SQL schema method for all SQL databases
                 schema = await DatabaseOperationsService.get_sql_schema_async(connection_obj, db_type=connection.type)

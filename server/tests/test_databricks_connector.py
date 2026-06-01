@@ -1,0 +1,192 @@
+from __future__ import annotations
+
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from server.services.databricks_connector import AsyncDatabricksConnector
+
+
+@pytest.fixture
+def conn_obj():
+    return {
+        "server_hostname": "adb-1234.azuredatabricks.net",
+        "http_path": "/sql/1.0/warehouses/abc123",
+        "access_token": "dapi-fake-token",
+        "catalog": "main",
+        "schema": "default",
+    }
+
+
+def _fake_cursor(rows, description):
+    cursor = MagicMock()
+    cursor.fetchall.return_value = rows
+    cursor.description = description
+    cursor.__enter__ = lambda s: s
+    cursor.__exit__ = lambda *a: None
+    return cursor
+
+
+def _fake_connection(cursor):
+    conn = MagicMock()
+    conn.cursor.return_value = cursor
+    conn.__enter__ = lambda s: s
+    conn.__exit__ = lambda *a: None
+    return conn
+
+
+@pytest.mark.asyncio
+async def test_connect_validates_required_fields():
+    connector = AsyncDatabricksConnector({"server_hostname": "x"})
+    with pytest.raises(ValueError, match="http_path"):
+        await connector.connect()
+
+
+@pytest.mark.asyncio
+async def test_execute_query_returns_rows(conn_obj):
+    cursor = _fake_cursor(
+        rows=[(1, "alice"), (2, "bob")],
+        description=[
+            ("id", "INT", None, None, None, None, None),
+            ("name", "STRING", None, None, None, None, None),
+        ],
+    )
+    fake_conn = _fake_connection(cursor)
+    connector = AsyncDatabricksConnector(conn_obj)
+
+    with patch("server.services.databricks_connector.sql.connect", return_value=fake_conn):
+        await connector.connect()
+        result = await connector.execute_query("SELECT id, name FROM users", limit=10)
+
+    assert result["success"] is True
+    assert result["result"] == [{"id": 1, "name": "alice"}, {"id": 2, "name": "bob"}]
+    assert "execution_time_seconds" in result
+
+
+@pytest.mark.asyncio
+async def test_execute_query_applies_limit(conn_obj):
+    cursor = _fake_cursor(rows=[], description=[])
+    fake_conn = _fake_connection(cursor)
+    connector = AsyncDatabricksConnector(conn_obj)
+
+    with patch("server.services.databricks_connector.sql.connect", return_value=fake_conn):
+        await connector.connect()
+        await connector.execute_query("SELECT * FROM users", limit=5)
+
+    executed_sql = cursor.execute.call_args[0][0]
+    assert "LIMIT 5" in executed_sql.upper()
+
+
+@pytest.mark.asyncio
+async def test_execute_query_error_returns_failure(conn_obj):
+    cursor = MagicMock()
+    cursor.execute.side_effect = RuntimeError("syntax error")
+    cursor.__enter__ = lambda s: s
+    cursor.__exit__ = lambda *a: None
+    fake_conn = _fake_connection(cursor)
+    connector = AsyncDatabricksConnector(conn_obj)
+
+    with patch("server.services.databricks_connector.sql.connect", return_value=fake_conn):
+        result = await connector.execute_query("SELECT bad", limit=10)
+
+    assert result["success"] is False
+    assert "syntax error" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_get_schema_with_catalog_and_schema_returns_tables(conn_obj):
+    show_tables_cursor = _fake_cursor(
+        rows=[("default", "users", False), ("default", "orders", False)],
+        description=[
+            ("database", "STRING", None, None, None, None, None),
+            ("tableName", "STRING", None, None, None, None, None),
+            ("isTemporary", "BOOLEAN", None, None, None, None, None),
+        ],
+    )
+    describe_users = _fake_cursor(
+        rows=[("id", "INT", None), ("name", "STRING", None)],
+        description=[
+            ("col_name", "STRING", None, None, None, None, None),
+            ("data_type", "STRING", None, None, None, None, None),
+            ("comment", "STRING", None, None, None, None, None),
+        ],
+    )
+    describe_orders = _fake_cursor(
+        rows=[("id", "INT", None), ("amount", "DECIMAL", None)],
+        description=describe_users.description,
+    )
+
+    cursors = [show_tables_cursor, describe_users, describe_orders]
+    fake_conn = MagicMock()
+    fake_conn.cursor.side_effect = cursors
+    fake_conn.__enter__ = lambda s: s
+    fake_conn.__exit__ = lambda *a: None
+
+    connector = AsyncDatabricksConnector(conn_obj)
+    with patch("server.services.databricks_connector.sql.connect", return_value=fake_conn):
+        schema = await connector.get_schema()
+
+    table_names = [t["name"] for t in schema["tables"]]
+    assert "users" in table_names
+    assert "orders" in table_names
+
+
+@pytest.mark.asyncio
+async def test_get_schema_with_catalog_only_iterates_schemas():
+    obj = {
+        "server_hostname": "x",
+        "http_path": "/y",
+        "access_token": "z",
+        "catalog": "samples",
+    }
+    schemas_cursor = _fake_cursor(
+        rows=[("tpch",), ("information_schema",)],
+        description=[("schema", "STRING", None, None, None, None, None)],
+    )
+    tables_cursor = _fake_cursor(
+        rows=[("tpch", "customer", False)],
+        description=[
+            ("database", "STRING", None, None, None, None, None),
+            ("tableName", "STRING", None, None, None, None, None),
+            ("isTemporary", "BOOLEAN", None, None, None, None, None),
+        ],
+    )
+    describe_cursor = _fake_cursor(
+        rows=[("c_custkey", "INT", None)],
+        description=[
+            ("col_name", "STRING", None, None, None, None, None),
+            ("data_type", "STRING", None, None, None, None, None),
+            ("comment", "STRING", None, None, None, None, None),
+        ],
+    )
+
+    fake_conn = MagicMock()
+    fake_conn.cursor.side_effect = [schemas_cursor, tables_cursor, describe_cursor]
+    fake_conn.__enter__ = lambda s: s
+    fake_conn.__exit__ = lambda *a: None
+
+    connector = AsyncDatabricksConnector(obj)
+    with patch("server.services.databricks_connector.sql.connect", return_value=fake_conn):
+        schema = await connector.get_schema()
+
+    assert "tpch" in schema["schemas"]
+    assert "information_schema" not in schema["schemas"]
+    assert any(t["qualified_name"] == "samples.tpch.customer" for t in schema["tables"])
+
+
+@pytest.mark.asyncio
+async def test_async_database_service_caches_databricks_connector(conn_obj):
+    from server.services.database_operations import AsyncDatabaseService
+
+    cursor = _fake_cursor(
+        rows=[(1,)],
+        description=[("c", "INT", None, None, None, None, None)],
+    )
+    fake_conn = _fake_connection(cursor)
+
+    with patch("server.services.databricks_connector.sql.connect", return_value=fake_conn):
+        c1 = await AsyncDatabaseService.get_or_create_databricks_connector("test-conn-id", conn_obj)
+        c2 = await AsyncDatabaseService.get_or_create_databricks_connector("test-conn-id", conn_obj)
+
+    assert c1 is c2
+    await AsyncDatabaseService.close_connection("test-conn-id")

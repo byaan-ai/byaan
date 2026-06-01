@@ -1380,6 +1380,18 @@ class AsyncDatabaseService:
             return cls._connection_pools[connection_id]
 
     @classmethod
+    async def get_or_create_databricks_connector(cls, connection_id: str, connection_obj: dict[str, Any]):
+        """Get or create cached Databricks connector."""
+        from server.services.databricks_connector import AsyncDatabricksConnector
+
+        async with cls._pool_lock:
+            if connection_id not in cls._connection_pools:
+                connector = AsyncDatabricksConnector(connection_obj)
+                await connector.connect()
+                cls._connection_pools[connection_id] = connector
+            return cls._connection_pools[connection_id]
+
+    @classmethod
     async def get_or_create_postgres_connector(
         cls, connection_id: str, connection_obj: dict[str, Any]
     ) -> AsyncPostgresConnector:
@@ -3255,6 +3267,52 @@ class DatabaseOperationsService:
         except Exception as e:
             logger.error(f"Failed to get DynamoDB schema: {str(e)}", exc_info=True)
             raise ConnectionError(f"Cannot connect to DynamoDB: {str(e)}")
+
+    @staticmethod
+    async def get_databricks_schema_async(connection_obj: dict[str, Any]) -> dict[str, Any]:
+        """Get Databricks schema asynchronously. Returns schema shape matching SQL connectors."""
+        from server.services.databricks_connector import AsyncDatabricksConnector
+
+        connector = AsyncDatabricksConnector(connection_obj)
+        try:
+            await connector.connect()
+            raw = await connector.get_schema()
+            catalog = raw.get("catalog")
+            schema_name = raw.get("schema")
+
+            schema_dict: dict[str, Any] = {}
+            for tbl in raw.get("tables", []):
+                key = tbl.get("name")
+                if not key:
+                    continue
+                schema_dict[key] = {
+                    "columns": [
+                        {"name": c["name"], "type": c["type"], "nullable": True} for c in tbl.get("columns", [])
+                    ],
+                    "foreign_keys": [],
+                    "qualified_name": tbl.get("qualified_name", key),
+                    "catalog": tbl.get("catalog"),
+                    "schema_name": tbl.get("schema"),
+                }
+
+            db_name_parts = [p for p in [catalog, schema_name] if p]
+            db_name = ".".join(db_name_parts) if db_name_parts else "Databricks"
+
+            return {
+                "datasource_type": "databricks",
+                "database_type": "databricks",
+                "database_name": db_name,
+                "schema": schema_dict,
+                "catalogs": raw.get("catalogs", []),
+                "schemas": raw.get("schemas", []),
+                "catalog": catalog,
+                "default_schema": schema_name,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get Databricks schema: {str(e)}", exc_info=True)
+            raise ConnectionError(f"Cannot connect to Databricks: {str(e)}")
+        finally:
+            await connector.close()
 
     # ----------------------------
     # Nested schema inference utils

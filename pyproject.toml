@@ -36,6 +36,7 @@ dependencies = [
   "aioodbc>=0.5.0",
   "pyodbc>=5.2.0",
   "motor>=3.7.1",
+  "databricks-sql-connector>=3.0.0",
   "aiofiles>=24.1.0",
   "chardet>=5.0.0",
   "openpyxl>=3.1.0",

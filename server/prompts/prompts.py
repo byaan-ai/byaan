@@ -76,7 +76,7 @@ def get_unified_agent_prompt_compact(
 
     if not database_types:
         # No schemas provided, include all rules
-        db_names = ["SQL", "MongoDB", "DuckDB", "DynamoDB"]
+        db_names = ["SQL", "MongoDB", "DuckDB", "DynamoDB", "Databricks"]
         query_rules_sections.append(f"""<database_SQL_query_rules>
 {components["sql_rules"]}
 </database_SQL_query_rules>""")
@@ -89,6 +89,9 @@ def get_unified_agent_prompt_compact(
         query_rules_sections.append(f"""<database_DynamoDB_query_rules>
 {components["dynamodb_specific_rules"]}
 </database_DynamoDB_query_rules>""")
+        query_rules_sections.append(f"""<database_Databricks_query_rules>
+{components["databricks_specific_rules"]}
+</database_Databricks_query_rules>""")
     else:
         # Include rules only for connected database types
         if "mongo" in database_types:
@@ -115,6 +118,12 @@ def get_unified_agent_prompt_compact(
 {components["dynamodb_specific_rules"]}
 </database_DynamoDB_query_rules>""")
 
+        if "databricks" in database_types:
+            db_names.append("Databricks")
+            query_rules_sections.append(f"""<database_Databricks_query_rules>
+{components["databricks_specific_rules"]}
+</database_Databricks_query_rules>""")
+
     db_names_str = " and ".join(db_names) if db_names else "your databases"
     query_rules_combined = "\n\n".join(query_rules_sections)
 
@@ -137,6 +146,8 @@ def get_unified_agent_prompt_compact(
                 type_name = "MongoDB"
             elif db_type == "dynamodb":
                 type_name = "DynamoDB"
+            elif db_type == "databricks":
+                type_name = "Databricks"
             elif db_type in ["duckdb", "csv", "excel", "parquet", "json", "file"]:
                 type_name = "DuckDB"
             else:
@@ -163,6 +174,12 @@ def get_unified_agent_prompt_compact(
                     dynamo_schema = schema_summary.get("schema", {})
                     if dynamo_schema:
                         names = list(dynamo_schema.keys())
+                        schema_lines.append(f"    Tables: {', '.join(names)}")
+                elif db_type == "databricks":
+                    db_schema = schema_summary.get("schema", {})
+                    tables = db_schema.get("tables", []) if isinstance(db_schema, dict) else []
+                    if tables:
+                        names = [t.get("name", "") for t in tables if isinstance(t, dict)]
                         schema_lines.append(f"    Tables: {', '.join(names)}")
                 else:
                     tables = schema_summary.get("tables", {})
@@ -213,6 +230,7 @@ When working with multiple databases:
 2. **Use correct executor**: Each database type has its own query executor:
    - SQL databases (pg, mysql, sqlite, mssql) → execute_sql_query
    - MongoDB → execute_mongo_query
+   - Databricks → execute_databricks_query
    - File datasets (csv, excel, parquet, json) → execute_duckdb_query
 3. **Cross-database queries**: If user requests data from multiple databases:
    - Write separate queries for each database
