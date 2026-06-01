@@ -1877,6 +1877,8 @@ class DatabaseOperationsService:
 
                     if connection.type == "mongo":
                         schema = await DatabaseOperationsService.get_mongo_schema_async(connection_obj)
+                    elif connection.type == "databricks":
+                        schema = await DatabaseOperationsService.get_databricks_schema_async(connection_obj)
                     elif connection.type in ["pg", "mysql", "sqlite", "mssql"]:
                         schema = await DatabaseOperationsService.get_sql_schema_async(
                             connection_obj, db_type=connection.type
@@ -1950,6 +1952,8 @@ class DatabaseOperationsService:
 
                         if connection.type == "mongo":
                             schema = await DatabaseOperationsService.get_mongo_schema_async(connection_obj)
+                        elif connection.type == "databricks":
+                            schema = await DatabaseOperationsService.get_databricks_schema_async(connection_obj)
                         elif connection.type in ["pg", "mysql", "sqlite", "mssql"]:
                             schema = await DatabaseOperationsService.get_sql_schema_async(
                                 connection_obj, db_type=connection.type
