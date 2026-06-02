@@ -13,7 +13,7 @@
 # - Test the frozen executable to ensure files are accessible
 # - Check server/utils/migrations.py for path resolution logic
 
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 datas_with_metadata = [
     # Application-specific data files
@@ -29,6 +29,9 @@ datas_with_metadata = [
 # Add package metadata for packages that use importlib.metadata at runtime
 datas_with_metadata += copy_metadata('duckdb')
 datas_with_metadata += copy_metadata('fastmcp')
+
+# litellm reads model_prices_and_context_window_backup.json at import time; bundle data files
+datas_with_metadata += collect_data_files('litellm')
 
 a = Analysis(
     ['server/main.py'],
