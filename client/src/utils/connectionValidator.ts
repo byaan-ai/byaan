@@ -152,9 +152,9 @@ class ConnectionValidator {
 
     // Preferred models in order
     const preferredModels = [
+      'anthropic/claude-opus-4-8',
       'anthropic/claude-opus-4-7',
       'anthropic/claude-sonnet-4-6',
-      'anthropic/claude-opus-4-6',
     ]
 
     // First, try to find a connection with a preferred model
