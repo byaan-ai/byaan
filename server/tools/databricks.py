@@ -149,8 +149,12 @@ async def execute_databricks_query(
             for tree in sqlglot.parse(validated, dialect="databricks"):
                 for tbl in tree.find_all(exp.Table):
                     queried_tables.add(tbl.name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to extract queried tables for redaction check; continuing without table-level filtering: %s",
+                e,
+                exc_info=True,
+            )
 
         redacted_tables = set(conn_rules.get("tables", []))
         for tname in queried_tables:
