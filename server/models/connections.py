@@ -18,7 +18,7 @@ def generate_uuid() -> UUID:
     return uuid4()
 
 
-ALLOWED_CONN_TYPES = ("pg", "mysql", "mongo", "sqlite", "mssql", "dynamodb")
+ALLOWED_CONN_TYPES = ("pg", "mysql", "mongo", "sqlite", "mssql", "dynamodb", "databricks")
 
 
 class Connection(Base):

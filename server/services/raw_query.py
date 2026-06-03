@@ -141,6 +141,20 @@ class AsyncRawQueryService:
 
                 return result
 
+            elif db_type == "databricks":
+                from server.tools.databricks import validate_databricks_query
+
+                try:
+                    validated = validate_databricks_query(query)
+                except ValueError as e:
+                    return {"success": False, "error": str(e)}
+
+                async_connector = await AsyncDatabaseService.get_or_create_databricks_connector(
+                    connection_id, connection_obj
+                )
+                result = await async_connector.execute_query(validated, limit, timeout=timeout, params=params)
+                return result
+
             elif db_type in ["pg", "mysql", "sqlite", "mssql"]:
                 async_connector = await AsyncDatabaseService.get_or_create_sql_connector(
                     connection_id, connection_obj, db_type=db_type

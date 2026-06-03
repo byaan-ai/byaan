@@ -57,3 +57,18 @@ class ConnectionListItem(BaseModel):
 class ConnectionListSimpleResponse(BaseModel):
     items: list[ConnectionListItem]
     total: int
+
+
+class DatabricksDiscoverRequest(BaseModel):
+    server_hostname: str
+    http_path: str
+    access_token: str
+
+
+class DatabricksCatalog(BaseModel):
+    name: str
+    schemas: list[str]
+
+
+class DatabricksDiscoverResponse(BaseModel):
+    catalogs: list[DatabricksCatalog]

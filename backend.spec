@@ -13,7 +13,7 @@
 # - Test the frozen executable to ensure files are accessible
 # - Check server/utils/migrations.py for path resolution logic
 
-from PyInstaller.utils.hooks import collect_data_files, copy_metadata
+from PyInstaller.utils.hooks import copy_metadata
 
 datas_with_metadata = [
     # Application-specific data files
@@ -30,7 +30,8 @@ datas_with_metadata = [
 datas_with_metadata += copy_metadata('duckdb')
 datas_with_metadata += copy_metadata('fastmcp')
 
-# litellm reads model_prices_and_context_window_backup.json at import time; bundle data files
+# litellm ships JSON pricing/model data alongside its Python files; PyInstaller
+# misses these because they're loaded via pathlib at runtime, not imports.
 datas_with_metadata += collect_data_files('litellm')
 
 a = Analysis(

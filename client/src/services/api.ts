@@ -474,7 +474,7 @@ export interface ExecuteSavedQueryResponse {
 }
 
 // Connections - Only database connections now, files are handled by datasets
-export type ConnectionType = 'pg' | 'mongo' | 'mysql' | 'sqlite' | 'mssql' | 'dynamodb'
+export type ConnectionType = 'pg' | 'mongo' | 'mysql' | 'sqlite' | 'mssql' | 'dynamodb' | 'databricks'
 export type FileType = 'csv' | 'excel' | 'parquet' | 'json'
 export type DatasourceType = ConnectionType | FileType | 'duckdb'
 
@@ -547,6 +547,21 @@ export interface ConnectionListItem {
 export interface ConnectionListSimpleResponse {
   items: ConnectionListItem[]
   total: number
+}
+
+export interface DatabricksCatalog {
+  name: string
+  schemas: string[]
+}
+
+export interface DatabricksDiscoverResponse {
+  catalogs: DatabricksCatalog[]
+}
+
+export interface DatabricksDiscoverRequest {
+  server_hostname: string
+  http_path: string
+  access_token: string
 }
 
 
@@ -1383,6 +1398,25 @@ export class ApiService {
       return data.data
     } catch (error) {
       console.error('Error refreshing connection schema:', error)
+      throw error
+    }
+  }
+
+  static async discoverDatabricks(payload: DatabricksDiscoverRequest): Promise<DatabricksDiscoverResponse> {
+    try {
+      const response = await apiFetch(`${API_BASE_URL}/connections/databricks/discover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(extractErrorMessage(errorData) || `HTTP error! status: ${response.status}`)
+      }
+      const responseData = await response.json()
+      return extractData<DatabricksDiscoverResponse>(responseData)
+    } catch (error) {
+      console.error('Error discovering Databricks catalogs:', error)
       throw error
     }
   }
