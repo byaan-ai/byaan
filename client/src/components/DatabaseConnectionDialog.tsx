@@ -5,8 +5,12 @@ import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog'
-import { Loader2, Upload, FileText, X, Link as LinkIcon, Leaf, Cylinder, Server, HardDrive, Database, Cloud } from 'lucide-react'
-import type { ConnectionType, Datasource } from '../services/api'
+import { Loader2, Upload, FileText, X, Link as LinkIcon, Leaf, Cylinder, Server, HardDrive, Database, Cloud, ChevronDown, ChevronRight, CheckCircle2, AlertCircle, Search } from 'lucide-react'
+import { ApiService } from '../services/api'
+import type { ConnectionType, Datasource, DatabricksCatalog } from '../services/api'
+
+type DatabricksPair = { catalog: string; schema: string | null }
+const pairKey = (p: DatabricksPair) => `${p.catalog}::${p.schema ?? '*'}`
 
 export interface DatabaseConnectionDialogProps {
   open: boolean
@@ -41,6 +45,9 @@ export interface DatabaseConnectionDialogProps {
   // Callbacks
   onSwitchToCreate?: () => void
   onSwitchToSelect?: () => void
+
+  // Called after a successful Databricks batch-create. Receives count of created rows.
+  onDatabricksConnectionsCreated?: (count: number) => void
 }
 
 export function DatabaseConnectionDialog({
@@ -60,6 +67,7 @@ export function DatabaseConnectionDialog({
   onSwitchToCreate,
   onSwitchToSelect,
   multiSelect = false,
+  onDatabricksConnectionsCreated,
 }: DatabaseConnectionDialogProps) {
   // Handle dialog close - only close if in select mode or no previous connections
   const handleClose = () => {
@@ -107,6 +115,21 @@ export function DatabaseConnectionDialog({
   // URL upload state
   const [uploadURLs, setUploadURLs] = useState<string[]>([''])
 
+  // Databricks 2-step wizard state
+  const [databricksStep, setDatabricksStep] = useState<1 | 2>(1)
+  const [discoveredCatalogs, setDiscoveredCatalogs] = useState<DatabricksCatalog[] | null>(null)
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverError, setDiscoverError] = useState<string | null>(null)
+  const [selectedPairs, setSelectedPairs] = useState<DatabricksPair[]>([])
+  const [expandedCatalogs, setExpandedCatalogs] = useState<Set<string>>(new Set())
+  const [databricksNamePrefix, setDatabricksNamePrefix] = useState('')
+  const [batchProgress, setBatchProgress] = useState<{
+    done: number
+    total: number
+    failures: Array<{ pair: DatabricksPair; error: string }>
+  } | null>(null)
+  const [databricksCatalogFilter, setDatabricksCatalogFilter] = useState('')
+
   // Helper functions
   const formatDbType = (type: string): string => {
     switch (type) {
@@ -152,7 +175,7 @@ export function DatabaseConnectionDialog({
 
   // Form validation
   const isFormValid = useMemo(() => {
-    if (!connectionConfig.name.trim()) return false
+    if (selectedType !== 'databricks' && !connectionConfig.name.trim()) return false
 
     if (selectedType === 'upload') {
       return uploadFileType !== '' && uploadFiles.length > 0
@@ -179,11 +202,12 @@ export function DatabaseConnectionDialog({
     }
 
     if (selectedType === 'databricks') {
-      return (
+      const credsOk =
         connectionConfig.serverHostname.trim().length > 0 &&
         connectionConfig.httpPath.trim().length > 0 &&
         connectionConfig.accessToken.trim().length > 0
-      )
+      if (databricksStep === 1) return credsOk
+      return credsOk && selectedPairs.length > 0
     }
 
     // PostgreSQL, MySQL, MSSQL
@@ -194,10 +218,23 @@ export function DatabaseConnectionDialog({
       connectionConfig.user.trim().length > 0 &&
       connectionConfig.password.trim().length > 0
     )
-  }, [selectedType, connectionConfig, uploadFileType, uploadFiles, uploadURLs])
+  }, [selectedType, connectionConfig, uploadFileType, uploadFiles, uploadURLs, databricksStep, selectedPairs])
+
+  const resetDatabricksWizard = () => {
+    setDatabricksStep(1)
+    setDiscoveredCatalogs(null)
+    setDiscovering(false)
+    setDiscoverError(null)
+    setSelectedPairs([])
+    setExpandedCatalogs(new Set())
+    setDatabricksNamePrefix('')
+    setBatchProgress(null)
+    setDatabricksCatalogFilter('')
+  }
 
   // Handle type change
   const handleTypeChange = (newType: ConnectionType | 'upload' | 'url') => {
+    resetDatabricksWizard()
     setSelectedType(newType)
     const defaultPorts: Record<string, string> = {
       pg: '5432',
@@ -302,6 +339,82 @@ export function DatabaseConnectionDialog({
     setUploadFileAliases(prev => ({ ...prev, ...newAliases }))
   }
 
+  const togglePair = (pair: DatabricksPair) => {
+    setSelectedPairs(prev => {
+      const key = pairKey(pair)
+      const exists = prev.some(p => pairKey(p) === key)
+      if (exists) return prev.filter(p => pairKey(p) !== key)
+      // Selecting "all schemas" for a catalog clears any specific-schema picks for it
+      // Selecting a specific schema clears the "all" pick for that catalog
+      const cleaned = pair.schema === null
+        ? prev.filter(p => p.catalog !== pair.catalog)
+        : prev.filter(p => !(p.catalog === pair.catalog && p.schema === null))
+      return [...cleaned, pair]
+    })
+  }
+
+  const isPairSelected = (pair: DatabricksPair) =>
+    selectedPairs.some(p => pairKey(p) === pairKey(pair))
+
+  const handleDatabricksDiscover = async () => {
+    setDiscoverError(null)
+    setDiscovering(true)
+    try {
+      const res = await ApiService.discoverDatabricks({
+        server_hostname: connectionConfig.serverHostname,
+        http_path: connectionConfig.httpPath,
+        access_token: connectionConfig.accessToken,
+      })
+      setDiscoveredCatalogs(res.catalogs)
+      setDatabricksStep(2)
+    } catch (err: any) {
+      setDiscoverError(err?.message || 'Failed to discover Databricks catalogs')
+    } finally {
+      setDiscovering(false)
+    }
+  }
+
+  const handleDatabricksBatchCreate = async () => {
+    const pairs = selectedPairs
+    if (pairs.length === 0) return
+    const failures: Array<{ pair: DatabricksPair; error: string }> = []
+    let done = 0
+    setBatchProgress({ done: 0, total: pairs.length, failures: [] })
+
+    for (const pair of pairs) {
+      try {
+        const prefix = databricksNamePrefix.trim()
+        const suffix = `${pair.catalog}.${pair.schema ?? '*'}`
+        const name = prefix ? `${prefix} · ${suffix}` : ''
+        await ApiService.createConnection({
+          type: 'databricks',
+          name: name || undefined,
+          connection_obj: {
+            server_hostname: connectionConfig.serverHostname,
+            http_path: connectionConfig.httpPath,
+            access_token: connectionConfig.accessToken,
+            catalog: pair.catalog,
+            schema: pair.schema ?? undefined,
+          },
+        })
+      } catch (err: any) {
+        failures.push({ pair, error: err?.message || 'Unknown error' })
+      }
+      done += 1
+      setBatchProgress({ done, total: pairs.length, failures: [...failures] })
+    }
+
+    const succeededCount = pairs.length - failures.length
+    if (failures.length === 0) {
+      onDatabricksConnectionsCreated?.(succeededCount)
+      onOpenChange(false)
+    } else {
+      // Keep dialog open; reduce selection to failures so user can retry.
+      setSelectedPairs(failures.map(f => f.pair))
+      if (succeededCount > 0) onDatabricksConnectionsCreated?.(succeededCount)
+    }
+  }
+
   // Handle form submit
   const handleSubmit = async () => {
     if (!onCreateConnection) return
@@ -392,6 +505,7 @@ export function DatabaseConnectionDialog({
       setUploadFileType('')
       setUploadURLs([''])
       setIsDragging(false)
+      resetDatabricksWizard()
     }
   }, [open])
 
@@ -627,20 +741,22 @@ export function DatabaseConnectionDialog({
             <div className="flex-1 flex flex-col overflow-hidden">
               <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
                 <div className="space-y-4">
-                  {/* Connection/Datasource Name - Always shown */}
-                  <div>
-                    <Label htmlFor="connection-name" className="text-white">
-                      {selectedType === 'upload' || selectedType === 'url' ? 'Datasource Name' : 'Connection Name'} <span className="text-red-400">*</span>
-                    </Label>
-                    <Input
-                      id="connection-name"
-                      value={connectionConfig.name}
-                      onChange={(e) => setConnectionConfig(prev => ({ ...prev, name: e.target.value }))}
-                      placeholder={selectedType === 'upload' || selectedType === 'url' ? 'My File Datasource' : 'My Database Connection'}
-                      disabled={isLoading}
-                      className="mt-1 bg-[#1a1a1a] border-[#555555] text-white placeholder-[#888888]"
-                    />
-                  </div>
+                  {/* Connection/Datasource Name - Always shown (hidden for Databricks wizard) */}
+                  {selectedType !== 'databricks' && (
+                    <div>
+                      <Label htmlFor="connection-name" className="text-white">
+                        {selectedType === 'upload' || selectedType === 'url' ? 'Datasource Name' : 'Connection Name'} <span className="text-red-400">*</span>
+                      </Label>
+                      <Input
+                        id="connection-name"
+                        value={connectionConfig.name}
+                        onChange={(e) => setConnectionConfig(prev => ({ ...prev, name: e.target.value }))}
+                        placeholder={selectedType === 'upload' || selectedType === 'url' ? 'My File Datasource' : 'My Database Connection'}
+                        disabled={isLoading}
+                        className="mt-1 bg-[#1a1a1a] border-[#555555] text-white placeholder-[#888888]"
+                      />
+                    </div>
+                  )}
 
                   {/* Upload Files Form */}
                   {selectedType === 'upload' && (
@@ -935,7 +1051,24 @@ export function DatabaseConnectionDialog({
                   )}
 
                   {selectedType === 'databricks' && (
+                    <div className="mb-4 flex items-center gap-3">
+                      <div className="flex items-center gap-2 flex-1">
+                        <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${databricksStep === 1 ? 'bg-brand-orange text-white' : 'bg-green-600/20 text-green-400 border border-green-600/40'}`}>
+                          {databricksStep === 1 ? '1' : <CheckCircle2 className="w-4 h-4" />}
+                        </div>
+                        <span className={`text-sm font-medium ${databricksStep === 1 ? 'text-white' : 'text-gray-400'}`}>Credentials</span>
+                      </div>
+                      <div className={`h-px flex-1 ${databricksStep === 2 ? 'bg-brand-orange' : 'bg-[#444444]'}`} />
+                      <div className="flex items-center gap-2 flex-1 justify-end">
+                        <span className={`text-sm font-medium ${databricksStep === 2 ? 'text-white' : 'text-gray-500'}`}>Pick catalogs & schemas</span>
+                        <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${databricksStep === 2 ? 'bg-brand-orange text-white' : 'bg-[#2a2a2a] text-gray-500 border border-[#444444]'}`}>2</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedType === 'databricks' && databricksStep === 1 && (
                     <div className="space-y-4">
+                      <p className="text-xs text-gray-400">Enter your Databricks workspace credentials. Next, we'll list available catalogs and schemas to pick from.</p>
                       <div>
                         <Label htmlFor="serverHostname" className="text-white">Server Hostname <span className="text-red-400">*</span></Label>
                         <Input
@@ -943,7 +1076,7 @@ export function DatabaseConnectionDialog({
                           placeholder="adb-1234.azuredatabricks.net"
                           value={connectionConfig.serverHostname}
                           onChange={(e) => setConnectionConfig(prev => ({ ...prev, serverHostname: e.target.value }))}
-                          disabled={isLoading}
+                          disabled={isLoading || discovering}
                           className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
                         />
                       </div>
@@ -954,7 +1087,7 @@ export function DatabaseConnectionDialog({
                           placeholder="/sql/1.0/warehouses/abc123"
                           value={connectionConfig.httpPath}
                           onChange={(e) => setConnectionConfig(prev => ({ ...prev, httpPath: e.target.value }))}
-                          disabled={isLoading}
+                          disabled={isLoading || discovering}
                           className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
                         />
                         <p className="text-xs text-gray-400 mt-1">Find in Databricks: SQL Warehouse → Connection Details → HTTP Path</p>
@@ -967,32 +1100,172 @@ export function DatabaseConnectionDialog({
                           placeholder="dapi..."
                           value={connectionConfig.accessToken}
                           onChange={(e) => setConnectionConfig(prev => ({ ...prev, accessToken: e.target.value }))}
-                          disabled={isLoading}
+                          disabled={isLoading || discovering}
                           className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
                         />
                       </div>
-                      <div>
-                        <Label htmlFor="catalog" className="text-white">Catalog <span className="text-gray-500">(optional)</span></Label>
-                        <Input
-                          id="catalog"
-                          placeholder="main"
-                          value={connectionConfig.catalog}
-                          onChange={(e) => setConnectionConfig(prev => ({ ...prev, catalog: e.target.value }))}
-                          disabled={isLoading}
-                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
-                        />
-                      </div>
-                      <div>
-                        <Label htmlFor="databricksSchema" className="text-white">Schema <span className="text-gray-500">(optional)</span></Label>
-                        <Input
-                          id="databricksSchema"
-                          placeholder="default"
-                          value={connectionConfig.databricksSchema}
-                          onChange={(e) => setConnectionConfig(prev => ({ ...prev, databricksSchema: e.target.value }))}
-                          disabled={isLoading}
-                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
-                        />
-                      </div>
+                      {discoverError && (
+                        <div className="flex items-start gap-2 bg-red-900/20 border border-red-700/50 rounded-md p-3 text-sm text-red-200">
+                          <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                          <span>{discoverError}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {selectedType === 'databricks' && databricksStep === 2 && discoveredCatalogs && (
+                    <div className="space-y-4">
+                      {batchProgress ? (
+                        <div className="bg-[#1a1a1a] border border-[#444444] rounded-lg p-5 space-y-4">
+                          <div className="flex items-center gap-3">
+                            {batchProgress.done < batchProgress.total ? (
+                              <Loader2 className="w-5 h-5 animate-spin text-brand-orange" />
+                            ) : batchProgress.failures.length === 0 ? (
+                              <CheckCircle2 className="w-5 h-5 text-green-400" />
+                            ) : (
+                              <AlertCircle className="w-5 h-5 text-red-400" />
+                            )}
+                            <div className="flex-1">
+                              <div className="text-sm text-white font-medium">
+                                {batchProgress.done < batchProgress.total
+                                  ? 'Creating connections…'
+                                  : batchProgress.failures.length === 0
+                                    ? 'All connections created'
+                                    : `${batchProgress.total - batchProgress.failures.length} of ${batchProgress.total} created · ${batchProgress.failures.length} failed`}
+                              </div>
+                              <div className="text-xs text-gray-400 mt-0.5">{batchProgress.done} / {batchProgress.total} processed</div>
+                            </div>
+                          </div>
+                          <div className="w-full h-2 bg-[#333333] rounded overflow-hidden">
+                            <div
+                              className={`h-2 rounded transition-all ${batchProgress.failures.length > 0 && batchProgress.done === batchProgress.total ? 'bg-red-500' : 'bg-brand-orange'}`}
+                              style={{ width: `${(batchProgress.done / batchProgress.total) * 100}%` }}
+                            />
+                          </div>
+                          {batchProgress.failures.length > 0 && (
+                            <div className="space-y-1 max-h-[180px] overflow-y-auto custom-scrollbar pr-1">
+                              {batchProgress.failures.map((f, i) => (
+                                <div key={i} className="flex items-start gap-2 bg-red-900/20 border border-red-700/40 rounded px-2 py-1.5 text-xs">
+                                  <AlertCircle className="w-3 h-3 mt-0.5 text-red-400 flex-shrink-0" />
+                                  <div className="flex-1">
+                                    <div className="font-mono text-red-200">{f.pair.catalog}.{f.pair.schema ?? '*'}</div>
+                                    <div className="text-red-300/80">{f.error}</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <Label htmlFor="databricksNamePrefix" className="text-white text-sm">Name prefix <span className="text-gray-500">(optional)</span></Label>
+                              <Input
+                                id="databricksNamePrefix"
+                                placeholder="My Workspace"
+                                value={databricksNamePrefix}
+                                onChange={(e) => setDatabricksNamePrefix(e.target.value)}
+                                disabled={isLoading}
+                                className="mt-1 bg-[#1a1a1a] border-[#555555] text-white text-sm"
+                              />
+                            </div>
+                            <div>
+                              <Label htmlFor="databricksFilter" className="text-white text-sm">Filter catalogs</Label>
+                              <div className="relative mt-1">
+                                <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+                                <Input
+                                  id="databricksFilter"
+                                  placeholder="Search…"
+                                  value={databricksCatalogFilter}
+                                  onChange={(e) => setDatabricksCatalogFilter(e.target.value)}
+                                  className="bg-[#1a1a1a] border-[#555555] text-white text-sm pl-8"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                          <p className="text-xs text-gray-400 -mt-2">Each pick becomes its own connection sharing this access token. Rotate later by editing each.</p>
+
+                          <div className="border border-[#444444] rounded-md divide-y divide-[#3a3a3a] max-h-[300px] overflow-y-auto custom-scrollbar">
+                            {discoveredCatalogs.length === 0 && (
+                              <div className="p-6 text-sm text-gray-400 text-center">No catalogs visible to this token.</div>
+                            )}
+                            {discoveredCatalogs
+                              .filter(c => !databricksCatalogFilter.trim() || c.name.toLowerCase().includes(databricksCatalogFilter.toLowerCase().trim()))
+                              .map(cat => {
+                                const isExpanded = expandedCatalogs.has(cat.name)
+                                const allPair: DatabricksPair = { catalog: cat.name, schema: null }
+                                const allSelected = isPairSelected(allPair)
+                                const specificCount = selectedPairs.filter(p => p.catalog === cat.name && p.schema !== null).length
+                                const isCatalogActive = allSelected || specificCount > 0
+                                return (
+                                  <div key={cat.name} className={`${isCatalogActive ? 'bg-brand-orange/5' : 'bg-[#1a1a1a]'} transition-colors`}>
+                                    <div className="flex items-center gap-2 px-3 py-2.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => setExpandedCatalogs(prev => {
+                                          const next = new Set(prev)
+                                          if (next.has(cat.name)) next.delete(cat.name)
+                                          else next.add(cat.name)
+                                          return next
+                                        })}
+                                        className="text-gray-400 hover:text-white"
+                                      >
+                                        {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                                      </button>
+                                      <Database className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
+                                      <span className="text-white text-sm font-mono flex-1 truncate">{cat.name}</span>
+                                      {specificCount > 0 && !allSelected && (
+                                        <span className="text-[10px] uppercase tracking-wide bg-brand-orange/15 text-brand-orange px-1.5 py-0.5 rounded">{specificCount} picked</span>
+                                      )}
+                                      <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer hover:text-white">
+                                        <input
+                                          type="checkbox"
+                                          checked={allSelected}
+                                          onChange={() => togglePair(allPair)}
+                                          className="accent-brand-orange"
+                                        />
+                                        All ({cat.schemas.length})
+                                      </label>
+                                    </div>
+                                    {isExpanded && (
+                                      <div className="px-3 pb-2.5 pl-11 grid grid-cols-2 gap-x-3 gap-y-1">
+                                        {cat.schemas.length === 0 && <div className="text-xs text-gray-500 col-span-2">No accessible schemas.</div>}
+                                        {cat.schemas.map(s => {
+                                          const pair: DatabricksPair = { catalog: cat.name, schema: s }
+                                          const checked = isPairSelected(pair)
+                                          return (
+                                            <label key={s} className={`flex items-center gap-2 text-sm cursor-pointer py-0.5 ${allSelected ? 'text-gray-500' : checked ? 'text-brand-orange' : 'text-gray-200 hover:text-white'}`}>
+                                              <input
+                                                type="checkbox"
+                                                checked={checked}
+                                                disabled={allSelected}
+                                                onChange={() => togglePair(pair)}
+                                                className="accent-brand-orange"
+                                              />
+                                              <span className="font-mono truncate">{s}</span>
+                                            </label>
+                                          )
+                                        })}
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
+                          </div>
+
+                          <div className="flex items-center justify-between bg-[#1a1a1a] border border-[#444444] rounded-md px-3 py-2 text-sm">
+                            <span className="text-gray-300">
+                              {selectedPairs.length === 0
+                                ? <span className="text-gray-500">No selection yet — pick at least one catalog or schema</span>
+                                : <><span className="text-white font-semibold">{selectedPairs.length}</span> connection{selectedPairs.length !== 1 ? 's' : ''} will be created</>}
+                            </span>
+                            {selectedPairs.length > 0 && (
+                              <button type="button" onClick={() => setSelectedPairs([])} className="text-xs text-gray-400 hover:text-white">Clear</button>
+                            )}
+                          </div>
+                        </>
+                      )}
                     </div>
                   )}
 
@@ -1067,32 +1340,78 @@ export function DatabaseConnectionDialog({
 
               {/* Action Buttons */}
               <div className="border-t border-[#444444] p-6 flex justify-end gap-2">
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    if (showPreviousConnectionsOption && datasources.length > 0 && onSwitchToSelect) {
-                      onSwitchToSelect()
-                    } else {
-                      handleClose()
-                    }
-                  }}
-                  disabled={isLoading}
-                  className="border-[#555555] text-white hover:bg-[#3a3a3a]"
-                >
-                  {showPreviousConnectionsOption && datasources.length > 0 ? 'Back' : 'Cancel'}
-                </Button>
-                <Button
-                  onClick={handleSubmit}
-                  disabled={!isFormValid || isLoading}
-                  className={`${
-                    isFormValid && !isLoading
-                      ? 'bg-brand-orange hover:bg-brand-orange/90'
-                      : 'bg-gray-500 cursor-not-allowed'
-                  } flex items-center gap-2`}
-                >
-                  {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {submitButtonText || 'Create Datasource'}
-                </Button>
+                {selectedType === 'databricks' ? (
+                  <>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (batchProgress && batchProgress.done < batchProgress.total) return
+                        if (databricksStep === 2) {
+                          setDatabricksStep(1)
+                          setBatchProgress(null)
+                        } else if (showPreviousConnectionsOption && datasources.length > 0 && onSwitchToSelect) {
+                          onSwitchToSelect()
+                        } else {
+                          handleClose()
+                        }
+                      }}
+                      disabled={!!(batchProgress && batchProgress.done < batchProgress.total) || discovering}
+                      className="border-[#555555] text-white hover:bg-[#3a3a3a]"
+                    >
+                      {databricksStep === 2 ? 'Back' : (showPreviousConnectionsOption && datasources.length > 0 ? 'Back' : 'Cancel')}
+                    </Button>
+                    {databricksStep === 1 ? (
+                      <Button
+                        onClick={handleDatabricksDiscover}
+                        disabled={!isFormValid || discovering}
+                        className={`${isFormValid && !discovering ? 'bg-brand-orange hover:bg-brand-orange/90' : 'bg-gray-500 cursor-not-allowed'} flex items-center gap-2`}
+                      >
+                        {discovering && <Loader2 className="w-4 h-4 animate-spin" />}
+                        Next →
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={handleDatabricksBatchCreate}
+                        disabled={!isFormValid || !!(batchProgress && batchProgress.done < batchProgress.total)}
+                        className={`${isFormValid && !batchProgress ? 'bg-brand-orange hover:bg-brand-orange/90' : 'bg-gray-500 cursor-not-allowed'} flex items-center gap-2`}
+                      >
+                        {batchProgress && batchProgress.done < batchProgress.total && <Loader2 className="w-4 h-4 animate-spin" />}
+                        {batchProgress && batchProgress.failures.length > 0 && batchProgress.done === batchProgress.total
+                          ? `Retry ${batchProgress.failures.length} failed`
+                          : `Create ${selectedPairs.length} connection${selectedPairs.length !== 1 ? 's' : ''}`}
+                      </Button>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        if (showPreviousConnectionsOption && datasources.length > 0 && onSwitchToSelect) {
+                          onSwitchToSelect()
+                        } else {
+                          handleClose()
+                        }
+                      }}
+                      disabled={isLoading}
+                      className="border-[#555555] text-white hover:bg-[#3a3a3a]"
+                    >
+                      {showPreviousConnectionsOption && datasources.length > 0 ? 'Back' : 'Cancel'}
+                    </Button>
+                    <Button
+                      onClick={handleSubmit}
+                      disabled={!isFormValid || isLoading}
+                      className={`${
+                        isFormValid && !isLoading
+                          ? 'bg-brand-orange hover:bg-brand-orange/90'
+                          : 'bg-gray-500 cursor-not-allowed'
+                      } flex items-center gap-2`}
+                    >
+                      {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                      {submitButtonText || 'Create Datasource'}
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
           </div>

@@ -110,6 +110,11 @@ class ConnectionService:
         Returns: (connection, schema)
         Raises: ConnectionError, ValueError, or other exceptions on failure
         """
+        if not connection_name and connection_type == "databricks" and connection_obj.get("catalog"):
+            cat = connection_obj.get("catalog")
+            sch = connection_obj.get("schema") or "*"
+            connection_name = f"Databricks · {cat}.{sch}"
+
         try:
             # Create connection instance (not in DB yet)
             connection = Connection(

@@ -175,6 +175,41 @@ async def test_get_schema_with_catalog_only_iterates_schemas():
 
 
 @pytest.mark.asyncio
+async def test_list_catalog_tree_returns_tree_excluding_system():
+    obj = {"server_hostname": "x", "http_path": "/y", "access_token": "z"}
+
+    catalogs_cursor = _fake_cursor(
+        rows=[("main",), ("analytics",), ("system",)],
+        description=[("catalog", "STRING", None, None, None, None, None)],
+    )
+    main_schemas_cursor = _fake_cursor(
+        rows=[("default",), ("gold",), ("information_schema",)],
+        description=[("schema", "STRING", None, None, None, None, None)],
+    )
+    analytics_schemas_cursor = _fake_cursor(
+        rows=[("events",)],
+        description=[("schema", "STRING", None, None, None, None, None)],
+    )
+
+    fake_conn = MagicMock()
+    fake_conn.cursor.side_effect = [catalogs_cursor, main_schemas_cursor, analytics_schemas_cursor]
+    fake_conn.__enter__ = lambda s: s
+    fake_conn.__exit__ = lambda *a: None
+
+    connector = AsyncDatabricksConnector(obj)
+    with patch("server.services.databricks_connector.sql.connect", return_value=fake_conn):
+        tree = await connector.list_catalog_tree()
+
+    names = [c["name"] for c in tree]
+    assert "main" in names and "analytics" in names
+    assert "system" not in names
+    main = next(c for c in tree if c["name"] == "main")
+    assert "default" in main["schemas"]
+    assert "gold" in main["schemas"]
+    assert "information_schema" not in main["schemas"]
+
+
+@pytest.mark.asyncio
 async def test_async_database_service_caches_databricks_connector(conn_obj):
     from server.services.database_operations import AsyncDatabaseService
 

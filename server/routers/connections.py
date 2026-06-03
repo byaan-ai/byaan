@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,15 +14,68 @@ from server.schemas.connections import (
     ConnectionCreate,
     ConnectionListSimpleResponse,
     ConnectionUpdateResponse,
+    DatabricksDiscoverRequest,
+    DatabricksDiscoverResponse,
 )
 from server.schemas.standard_response import success_response
 from server.services.connections import ConnectionService
 from server.services.database_operations import DatabaseOperationsService
+from server.services.databricks_connector import AsyncDatabricksConnector
 from server.utils.custom_logger import get_logger
+
+DATABRICKS_DISCOVER_TIMEOUT_SECONDS = 60
 
 logger = get_logger(__name__)
 
 router = APIRouter()
+
+
+@router.post("/connections/databricks/discover")
+async def discover_databricks_endpoint(
+    payload: DatabricksDiscoverRequest,
+    auth: AuthContext = Depends(require_scope(Scope.CONNECTION_CREATE)),
+):
+    connector = AsyncDatabricksConnector(
+        {
+            "server_hostname": payload.server_hostname,
+            "http_path": payload.http_path,
+            "access_token": payload.access_token,
+        }
+    )
+    try:
+        catalogs = await asyncio.wait_for(connector.list_catalog_tree(), timeout=DATABRICKS_DISCOVER_TIMEOUT_SECONDS)
+    except TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail={
+                "error": "Databricks discovery timed out",
+                "message": f"Listing catalogs exceeded {DATABRICKS_DISCOVER_TIMEOUT_SECONDS}s. Try again or contact your Databricks admin.",
+                "type": "timeout_error",
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error(f"Databricks discover failed: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "error": "Databricks connection failed",
+                "message": str(e),
+                "type": "connection_error",
+            },
+        )
+    finally:
+        try:
+            await connector.close()
+        except Exception:
+            logger.debug("Ignoring close error after Databricks discover", exc_info=True)
+
+    response = DatabricksDiscoverResponse(catalogs=catalogs)
+    return success_response(
+        data=response.model_dump(),
+        message=f"Discovered {len(response.catalogs)} catalog(s)",
+    )
 
 
 @router.post("/connections", status_code=status.HTTP_201_CREATED)

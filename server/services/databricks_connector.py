@@ -132,44 +132,70 @@ class AsyncDatabricksConnector:
     SYSTEM_CATALOGS = ("system", "__databricks_internal")
     SYSTEM_SCHEMAS = ("information_schema",)
 
+    def _list_catalogs_sync(self, conn) -> list[str]:
+        with conn.cursor() as cur:
+            cur.execute("SHOW CATALOGS")
+            return [r[0] for r in cur.fetchall() if r[0] not in self.SYSTEM_CATALOGS]
+
+    def _list_schemas_sync(self, conn, cat: str) -> list[str]:
+        with conn.cursor() as cur:
+            cur.execute(f"SHOW SCHEMAS IN `{cat}`")
+            return [r[0] for r in cur.fetchall() if r[0] not in self.SYSTEM_SCHEMAS]
+
+    def _list_tables_sync(self, conn, cat: str, sch: str) -> list[str]:
+        with conn.cursor() as cur:
+            cur.execute(f"SHOW TABLES IN `{cat}`.`{sch}`")
+            rows = cur.fetchall()
+        if not rows:
+            return []
+        return [r[1] for r in rows] if len(rows[0]) >= 2 else [r[0] for r in rows]
+
+    def _describe_sync(self, conn, cat: str, sch: str, tbl: str) -> list[dict[str, str]]:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DESCRIBE TABLE `{cat}`.`{sch}`.`{tbl}`")
+                rows = cur.fetchall()
+            cols = []
+            for row in rows:
+                cname = row[0] if len(row) > 0 else ""
+                ctype = row[1] if len(row) > 1 else ""
+                if not cname or cname.startswith("#"):
+                    break
+                cols.append({"name": cname, "type": ctype})
+            return cols
+        except Exception as e:
+            logger.warning(f"DESCRIBE failed for {cat}.{sch}.{tbl}: {e}")
+            return []
+
+    async def list_catalog_tree(self) -> list[dict[str, Any]]:
+        """List non-system catalogs and their non-system schemas in one round-trip block.
+
+        Used by the add-connection wizard to populate a (catalog, schema) picker without
+        creating a Connection row.
+        """
+
+        def _walk():
+            conn = self._ensure_conn_sync()
+            try:
+                out: list[dict[str, Any]] = []
+                for cat in self._list_catalogs_sync(conn):
+                    try:
+                        schemas = self._list_schemas_sync(conn, cat)
+                    except Exception as e:
+                        logger.warning(f"SHOW SCHEMAS failed for catalog {cat}: {e}")
+                        schemas = []
+                    out.append({"name": cat, "schemas": schemas})
+                return out
+            except Exception:
+                self._reset_conn_sync()
+                raise
+
+        async with self._lock:
+            return await asyncio.to_thread(_walk)
+
     async def get_schema(self) -> dict[str, Any]:
         catalog = self.connection_obj.get("catalog")
         schema_name = self.connection_obj.get("schema")
-
-        def _list_catalogs(conn) -> list[str]:
-            with conn.cursor() as cur:
-                cur.execute("SHOW CATALOGS")
-                return [r[0] for r in cur.fetchall() if r[0] not in self.SYSTEM_CATALOGS]
-
-        def _list_schemas(conn, cat: str) -> list[str]:
-            with conn.cursor() as cur:
-                cur.execute(f"SHOW SCHEMAS IN `{cat}`")
-                return [r[0] for r in cur.fetchall() if r[0] not in self.SYSTEM_SCHEMAS]
-
-        def _list_tables(conn, cat: str, sch: str) -> list[str]:
-            with conn.cursor() as cur:
-                cur.execute(f"SHOW TABLES IN `{cat}`.`{sch}`")
-                rows = cur.fetchall()
-            if not rows:
-                return []
-            return [r[1] for r in rows] if len(rows[0]) >= 2 else [r[0] for r in rows]
-
-        def _describe(conn, cat: str, sch: str, tbl: str) -> list[dict[str, str]]:
-            try:
-                with conn.cursor() as cur:
-                    cur.execute(f"DESCRIBE TABLE `{cat}`.`{sch}`.`{tbl}`")
-                    rows = cur.fetchall()
-                cols = []
-                for row in rows:
-                    cname = row[0] if len(row) > 0 else ""
-                    ctype = row[1] if len(row) > 1 else ""
-                    if not cname or cname.startswith("#"):
-                        break
-                    cols.append({"name": cname, "type": ctype})
-                return cols
-            except Exception as e:
-                logger.warning(f"DESCRIBE failed for {cat}.{sch}.{tbl}: {e}")
-                return []
 
         def _fetch():
             conn = self._ensure_conn_sync()
@@ -182,7 +208,7 @@ class AsyncDatabricksConnector:
                 if catalog and schema_name:
                     catalogs_list = [catalog]
                     schemas_list = [schema_name]
-                    for tname in _list_tables(conn, catalog, schema_name):
+                    for tname in self._list_tables_sync(conn, catalog, schema_name):
                         if len(tables_out) >= self.MAX_TABLES:
                             truncated = True
                             break
@@ -192,18 +218,18 @@ class AsyncDatabricksConnector:
                                 "qualified_name": f"{catalog}.{schema_name}.{tname}",
                                 "catalog": catalog,
                                 "schema": schema_name,
-                                "columns": _describe(conn, catalog, schema_name, tname),
+                                "columns": self._describe_sync(conn, catalog, schema_name, tname),
                             }
                         )
 
                 elif catalog:
                     catalogs_list = [catalog]
-                    schemas_list = _list_schemas(conn, catalog)
+                    schemas_list = self._list_schemas_sync(conn, catalog)
                     for sch in schemas_list:
                         if len(tables_out) >= self.MAX_TABLES:
                             truncated = True
                             break
-                        for tname in _list_tables(conn, catalog, sch):
+                        for tname in self._list_tables_sync(conn, catalog, sch):
                             if len(tables_out) >= self.MAX_TABLES:
                                 truncated = True
                                 break
@@ -213,18 +239,18 @@ class AsyncDatabricksConnector:
                                     "qualified_name": f"{catalog}.{sch}.{tname}",
                                     "catalog": catalog,
                                     "schema": sch,
-                                    "columns": _describe(conn, catalog, sch, tname),
+                                    "columns": self._describe_sync(conn, catalog, sch, tname),
                                 }
                             )
 
                 else:
-                    catalogs_list = _list_catalogs(conn)
+                    catalogs_list = self._list_catalogs_sync(conn)
                     for cat in catalogs_list:
                         if len(tables_out) >= self.MAX_TABLES:
                             truncated = True
                             break
                         try:
-                            sub_schemas = _list_schemas(conn, cat)
+                            sub_schemas = self._list_schemas_sync(conn, cat)
                         except Exception as e:
                             logger.warning(f"SHOW SCHEMAS failed for catalog {cat}: {e}")
                             continue
@@ -234,7 +260,7 @@ class AsyncDatabricksConnector:
                                 truncated = True
                                 break
                             try:
-                                for tname in _list_tables(conn, cat, sch):
+                                for tname in self._list_tables_sync(conn, cat, sch):
                                     if len(tables_out) >= self.MAX_TABLES:
                                         truncated = True
                                         break
@@ -244,7 +270,7 @@ class AsyncDatabricksConnector:
                                             "qualified_name": f"{cat}.{sch}.{tname}",
                                             "catalog": cat,
                                             "schema": sch,
-                                            "columns": _describe(conn, cat, sch, tname),
+                                            "columns": self._describe_sync(conn, cat, sch, tname),
                                         }
                                     )
                             except Exception as e:
