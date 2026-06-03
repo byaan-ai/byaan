@@ -60,7 +60,7 @@ class AsyncDatabricksConnector:
             try:
                 self._conn.close()
             except Exception:
-                pass
+                logger.debug("Ignoring Databricks connection close error during reset", exc_info=True)
             self._conn = None
 
     async def connect(self) -> None:

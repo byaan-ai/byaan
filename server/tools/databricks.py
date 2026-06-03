@@ -86,9 +86,7 @@ def validate_databricks_query(query: str) -> str:
     for cmd in tree.find_all(exp.Command):
         kind = (cmd.name or "").upper()
         if kind not in ALLOWED_COMMAND_KEYWORDS:
-            raise ValueError(
-                f"🚨 Unsafe query detected: {kind or 'UNKNOWN'} command is not allowed."
-            )
+            raise ValueError(f"🚨 Unsafe query detected: {kind or 'UNKNOWN'} command is not allowed.")
         if cmd.expression and DISALLOWED_COMMAND_PATTERN.search(str(cmd.expression)):
             raise ValueError("🚨 Unsafe query detected: write-style keyword present in command body.")
 
