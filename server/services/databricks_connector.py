@@ -129,8 +129,21 @@ class AsyncDatabricksConnector:
         return {"success": True, "result": result, "execution_time_seconds": elapsed}
 
     MAX_TABLES = 200
+    MAX_TYPE_LEN = 120
     SYSTEM_CATALOGS = ("system", "__databricks_internal")
     SYSTEM_SCHEMAS = ("information_schema",)
+
+    @staticmethod
+    def _shorten_type(t: str, limit: int = 120) -> str:
+        """Trim deeply-nested STRUCT/ARRAY/MAP type strings so they don't bloat the agent prompt.
+
+        Databricks columns can carry types like `struct<a:int,b:struct<...>>` that run hundreds
+        of characters. The agent only needs the top-level shape; if it needs deeper detail it
+        can DESCRIBE on demand.
+        """
+        if not t or len(t) <= limit:
+            return t
+        return t[:limit] + "…"
 
     def _list_catalogs_sync(self, conn) -> list[str]:
         with conn.cursor() as cur:
@@ -161,7 +174,7 @@ class AsyncDatabricksConnector:
                 ctype = row[1] if len(row) > 1 else ""
                 if not cname or cname.startswith("#"):
                     break
-                cols.append({"name": cname, "type": ctype})
+                cols.append({"name": cname, "type": self._shorten_type(ctype, self.MAX_TYPE_LEN)})
             return cols
         except Exception as e:
             logger.warning(f"DESCRIBE failed for {cat}.{sch}.{tbl}: {e}")
@@ -208,7 +221,14 @@ class AsyncDatabricksConnector:
                 if catalog and schema_name:
                     catalogs_list = [catalog]
                     schemas_list = [schema_name]
-                    for tname in self._list_tables_sync(conn, catalog, schema_name):
+                    try:
+                        table_names = self._list_tables_sync(conn, catalog, schema_name)
+                    except Exception as e:
+                        logger.warning(f"SHOW TABLES failed for {catalog}.{schema_name}: {e}")
+                        table_names = []
+                    if not table_names:
+                        logger.info(f"No tables visible in {catalog}.{schema_name} (token may lack USE/SELECT)")
+                    for tname in table_names:
                         if len(tables_out) >= self.MAX_TABLES:
                             truncated = True
                             break
