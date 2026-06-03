@@ -175,16 +175,10 @@ def get_unified_agent_prompt_compact(
                     if dynamo_schema:
                         names = list(dynamo_schema.keys())
                         schema_lines.append(f"    Tables: {', '.join(names)}")
-                elif db_type == "databricks":
-                    db_schema = schema_summary.get("schema", {})
-                    tables = db_schema.get("tables", []) if isinstance(db_schema, dict) else []
-                    if tables:
-                        names = [t.get("name", "") for t in tables if isinstance(t, dict)]
-                        schema_lines.append(f"    Tables: {', '.join(names)}")
                 else:
                     tables = schema_summary.get("tables", {})
                     if tables:
-                        names = list(tables.keys())
+                        names = list(tables.keys()) if isinstance(tables, dict) else list(tables)
                         schema_lines.append(f"    Tables: {', '.join(names)}")
 
             schema_lines.append("")

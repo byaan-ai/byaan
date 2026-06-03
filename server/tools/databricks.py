@@ -28,8 +28,19 @@ DISALLOWED_NODES = (
     exp.Merge,
 )
 
-EXTRA_WRITE_PATTERN = re.compile(
-    r"^\s*(TRUNCATE|GRANT|REVOKE|COPY\s+INTO|REFRESH|VACUUM|OPTIMIZE|RESTORE|REPLACE)\b",
+ALLOWED_ROOT_NODES = (
+    exp.Select,
+    exp.Subquery,
+    exp.Union,
+    exp.Describe,
+    exp.Show,
+    exp.Pragma,
+)
+
+ALLOWED_COMMAND_KEYWORDS = {"EXPLAIN", "DESC", "DESCRIBE", "SHOW"}
+
+DISALLOWED_COMMAND_PATTERN = re.compile(
+    r"\b(TRUNCATE|GRANT|REVOKE|COPY\s+INTO|REFRESH|VACUUM|OPTIMIZE|RESTORE|REPLACE|SET|USE|ANALYZE|CACHE|UNCACHE|MSCK)\b",
     re.IGNORECASE,
 )
 
@@ -39,24 +50,47 @@ def validate_databricks_query(query: str) -> str:
     if processed.endswith(";"):
         processed = processed[:-1].strip()
 
-    if EXTRA_WRITE_PATTERN.match(processed):
-        keyword = EXTRA_WRITE_PATTERN.match(processed).group(1).upper()
-        raise ValueError(
-            f"🚨 Unsafe query detected: {keyword} is not allowed. Only read-only queries (SELECT) are permitted."
-        )
-
     try:
         expressions = sqlglot.parse(processed, dialect="databricks")
     except Exception as e:
         raise ValueError(f"❌ SQL parsing failed: {str(e)}")
 
-    for tree in expressions:
-        for disallowed in DISALLOWED_NODES:
-            if tree.find(disallowed):
-                raise ValueError(
-                    f"🚨 Unsafe query detected: {disallowed.__name__.upper()} is not allowed. "
-                    f"Only read-only queries (SELECT) are permitted."
-                )
+    expressions = [e for e in expressions if e is not None]
+    if len(expressions) == 0:
+        raise ValueError("❌ Empty query.")
+    if len(expressions) > 1:
+        raise ValueError("🚨 Multiple statements are not allowed. Submit a single SELECT query.")
+
+    tree = expressions[0]
+
+    if isinstance(tree, exp.Command):
+        kind = (tree.name or "").upper()
+        if kind not in ALLOWED_COMMAND_KEYWORDS:
+            raise ValueError(
+                f"🚨 Unsafe query detected: {kind or 'UNKNOWN'} is not allowed. "
+                f"Only read-only queries (SELECT/WITH/DESCRIBE/SHOW/EXPLAIN) are permitted."
+            )
+    elif not isinstance(tree, ALLOWED_ROOT_NODES):
+        raise ValueError(
+            f"🚨 Unsafe query detected: {type(tree).__name__.upper()} is not allowed. "
+            f"Only read-only queries (SELECT/WITH/DESCRIBE/SHOW/EXPLAIN) are permitted."
+        )
+
+    for disallowed in DISALLOWED_NODES:
+        if tree.find(disallowed):
+            raise ValueError(
+                f"🚨 Unsafe query detected: {disallowed.__name__.upper()} is not allowed. "
+                f"Only read-only queries (SELECT) are permitted."
+            )
+
+    for cmd in tree.find_all(exp.Command):
+        kind = (cmd.name or "").upper()
+        if kind not in ALLOWED_COMMAND_KEYWORDS:
+            raise ValueError(
+                f"🚨 Unsafe query detected: {kind or 'UNKNOWN'} command is not allowed."
+            )
+        if cmd.expression and DISALLOWED_COMMAND_PATTERN.search(str(cmd.expression)):
+            raise ValueError("🚨 Unsafe query detected: write-style keyword present in command body.")
 
     return processed
 

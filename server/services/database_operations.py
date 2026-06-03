@@ -1704,7 +1704,7 @@ class DatabaseOperationsService:
 
         if normalized_db_type in ("duckdb", "file"):
             return DatabaseOperationsService._format_duckdb_compact(schema_data)
-        elif normalized_db_type in ("sql", "pg", "mysql", "sqlite", "mssql", "postgresql"):
+        elif normalized_db_type in ("sql", "pg", "mysql", "sqlite", "mssql", "postgresql", "databricks"):
             return DatabaseOperationsService._format_sql_compact(schema_data)
         elif normalized_db_type == "mongo":
             return DatabaseOperationsService._format_mongo_compact(schema_data)

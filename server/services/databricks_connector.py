@@ -20,6 +20,8 @@ class AsyncDatabricksConnector:
     def __init__(self, connection_obj: dict[str, Any]):
         self.connection_obj = connection_obj
         self._connected = False
+        self._conn: Any = None
+        self._lock = asyncio.Lock()
 
     def _required(self) -> tuple[str, str, str]:
         host = self.connection_obj.get("server_hostname")
@@ -48,15 +50,33 @@ class AsyncDatabricksConnector:
             kwargs["schema"] = schema
         return sql.connect(**kwargs)
 
+    def _ensure_conn_sync(self):
+        if self._conn is None:
+            self._conn = self._open_sync()
+        return self._conn
+
+    def _reset_conn_sync(self):
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+
     async def connect(self) -> None:
         def _probe():
-            with self._open_sync() as conn:
+            conn = self._ensure_conn_sync()
+            try:
                 with conn.cursor() as cur:
                     cur.execute("SELECT 1")
                     cur.fetchall()
+            except Exception:
+                self._reset_conn_sync()
+                raise
 
-        await asyncio.to_thread(_probe)
-        self._connected = True
+        async with self._lock:
+            await asyncio.to_thread(_probe)
+            self._connected = True
 
     @staticmethod
     def _apply_limit(query: str, limit: int | None) -> str:
@@ -65,7 +85,8 @@ class AsyncDatabricksConnector:
         stripped = query.rstrip().rstrip(";")
         if _LIMIT_RE.search(stripped):
             return stripped
-        if stripped.lstrip().lower().startswith("select"):
+        leading = stripped.lstrip().lower()
+        if leading.startswith("select") or leading.startswith("with"):
             return f"{stripped} LIMIT {int(limit)}"
         return stripped
 
@@ -79,7 +100,8 @@ class AsyncDatabricksConnector:
         sql_text = self._apply_limit(query, limit)
 
         def _run():
-            with self._open_sync() as conn:
+            conn = self._ensure_conn_sync()
+            try:
                 with conn.cursor() as cur:
                     if params:
                         cur.execute(sql_text, params)
@@ -88,10 +110,14 @@ class AsyncDatabricksConnector:
                     rows = cur.fetchall()
                     cols = [d[0] for d in (cur.description or [])]
                     return cols, rows
+            except Exception:
+                self._reset_conn_sync()
+                raise
 
         start = time.perf_counter()
         try:
-            cols, rows = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout)
+            async with self._lock:
+                cols, rows = await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout)
         except TimeoutError:
             return {"success": False, "error": f"Query timed out after {timeout}s"}
         except Exception as e:
@@ -146,7 +172,8 @@ class AsyncDatabricksConnector:
                 return []
 
         def _fetch():
-            with self._open_sync() as conn:
+            conn = self._ensure_conn_sync()
+            try:
                 catalogs_list: list[str] = []
                 schemas_list: list[str] = []
                 tables_out: list[dict[str, Any]] = []
@@ -229,8 +256,12 @@ class AsyncDatabricksConnector:
                     "tables": tables_out,
                     "truncated": truncated,
                 }
+            except Exception:
+                self._reset_conn_sync()
+                raise
 
-        result = await asyncio.to_thread(_fetch)
+        async with self._lock:
+            result = await asyncio.to_thread(_fetch)
         return {
             "catalog": catalog,
             "schema": schema_name,
@@ -241,4 +272,6 @@ class AsyncDatabricksConnector:
         }
 
     async def close(self) -> None:
-        self._connected = False
+        async with self._lock:
+            await asyncio.to_thread(self._reset_conn_sync)
+            self._connected = False
