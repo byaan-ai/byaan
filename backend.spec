@@ -13,7 +13,7 @@
 # - Test the frozen executable to ensure files are accessible
 # - Check server/utils/migrations.py for path resolution logic
 
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata
 
 datas_with_metadata = [
     # Application-specific data files
