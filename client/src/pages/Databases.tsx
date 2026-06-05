@@ -17,7 +17,7 @@ import { useStore } from '../stores/useStore'
 import { useScopes } from '../hooks/useScopes'
 import { useAppConfig } from '../hooks/useAppConfig'
 import { DatabricksOAuthSettings } from '../components/databricks/DatabricksOAuthSettings'
-import { isTauriApp } from '../lib/tauri-api'
+import { isTauriApp, openExternalUrl } from '../lib/tauri-api'
 
 export default function DatabasesPage() {
   const queryClient = useQueryClient()
@@ -270,7 +270,7 @@ export default function DatabasesPage() {
     setOauthSigningIn(true)
     try {
       const { auth_url, state } = await ApiService.startDatabricksOAuth(connectionConfig.serverHostname.trim())
-      window.open(auth_url, '_blank', 'noopener,noreferrer')
+      await openExternalUrl(auth_url)
       const deadline = Date.now() + 5 * 60 * 1000
       while (Date.now() < deadline) {
         await new Promise(r => setTimeout(r, 2000))

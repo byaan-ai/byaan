@@ -10,6 +10,7 @@ import { ApiService } from '../services/api'
 import type { ConnectionType, Datasource, DatabricksCatalog, DatabricksOAuthTokens, DatabricksWarehouse } from '../services/api'
 import { DatabricksOAuthSettings } from './databricks/DatabricksOAuthSettings'
 import { useAppConfig } from '../hooks/useAppConfig'
+import { openExternalUrl } from '../lib/tauri-api'
 
 type DatabricksPair = { catalog: string; schema: string | null }
 const pairKey = (p: DatabricksPair) => `${p.catalog}::${p.schema ?? '*'}`
@@ -404,7 +405,7 @@ export function DatabaseConnectionDialog({
     try {
       const { auth_url, state } = await ApiService.startDatabricksOAuth(connectionConfig.serverHostname.trim())
       setOauthState(state)
-      window.open(auth_url, '_blank', 'noopener,noreferrer')
+      await openExternalUrl(auth_url)
 
       const deadline = Date.now() + 5 * 60 * 1000
       while (Date.now() < deadline) {
