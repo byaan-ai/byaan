@@ -138,7 +138,7 @@ export function DatabaseConnectionDialog({
   const [databricksOAuthCanConfigure, setDatabricksOAuthCanConfigure] = useState<boolean>(false)
   const [showManageDatabricksOAuth, setShowManageDatabricksOAuth] = useState<boolean>(false)
   const [oauthTokens, setOauthTokens] = useState<DatabricksOAuthTokens | null>(null)
-  const [oauthState, setOauthState] = useState<string | null>(null)
+  const [, setOauthState] = useState<string | null>(null)
   const [oauthSigningIn, setOauthSigningIn] = useState(false)
   const [oauthError, setOauthError] = useState<string | null>(null)
   const [warehouses, setWarehouses] = useState<DatabricksWarehouse[] | null>(null)

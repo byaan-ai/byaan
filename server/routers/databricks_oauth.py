@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import html
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -114,7 +116,7 @@ async def databricks_oauth_callback(
         databricks_oauth_service.store_result(state, tokens, stored)
     except Exception as e:
         logger.error(f"[DATABRICKS OAUTH] Callback failed: {e}", exc_info=True)
-        return HTMLResponse(_ERROR_HTML.format(message=str(e)), status_code=400)
+        return HTMLResponse(_ERROR_HTML.replace("{message}", html.escape(str(e))), status_code=400)
 
     return HTMLResponse(_CALLBACK_HTML)
 

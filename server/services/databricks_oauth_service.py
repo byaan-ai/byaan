@@ -259,8 +259,8 @@ async def _start_loopback_listener(state: str, client_id: str) -> None:
             try:
                 writer.close()
                 await writer.wait_closed()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[DATABRICKS OAUTH] Ignoring loopback writer close error: {e}", exc_info=True)
             if terminate:
                 done.set()
 
@@ -274,7 +274,9 @@ async def _start_loopback_listener(state: str, client_id: str) -> None:
         ) from e
 
     _active_loopback_servers[state] = server
-    logger.info(f"[DATABRICKS OAUTH] Loopback listener bound on 127.0.0.1:{DATABRICKS_LOOPBACK_PORT} state={state[:16]}...")
+    logger.info(
+        f"[DATABRICKS OAUTH] Loopback listener bound on 127.0.0.1:{DATABRICKS_LOOPBACK_PORT} state={state[:16]}..."
+    )
 
     async def _serve_until_done() -> None:
         try:
