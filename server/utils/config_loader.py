@@ -223,35 +223,6 @@ def get_github_oauth_config() -> dict[str, str | None]:
         }
 
 
-def get_databricks_oauth_config() -> dict[str, str | None]:
-    try:
-        import os
-
-        config = load_config()
-        databricks_config = config.get("databricks", {})
-        client_id = databricks_config.get("client_id")
-        client_secret = databricks_config.get("client_secret")
-
-        if not client_id:
-            client_id = os.getenv("DATABRICKS_OAUTH_CLIENT_ID")
-        if not client_secret:
-            client_secret = os.getenv("DATABRICKS_OAUTH_CLIENT_SECRET")
-
-        return {"client_id": client_id, "client_secret": client_secret}
-    except Exception as e:
-        import os
-
-        logger.error(
-            f"Failed to get Databricks OAuth config: {str(e)}",
-            exc_info=True,
-            posthog_context={"function": "get_databricks_oauth_config"},
-        )
-        return {
-            "client_id": os.getenv("DATABRICKS_OAUTH_CLIENT_ID"),
-            "client_secret": os.getenv("DATABRICKS_OAUTH_CLIENT_SECRET"),
-        }
-
-
 def get_deployment_config() -> dict[str, Any]:
     """
     Get deployment configuration from config.json.

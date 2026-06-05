@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import AuthContext, require_scope
@@ -19,6 +19,7 @@ from server.schemas.connections import (
 )
 from server.schemas.standard_response import success_response
 from server.services import databricks_oauth_service
+from server.utils.config_loader import is_self_hosted
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,6 +34,10 @@ _CALLBACK_HTML = """
 </head><body><div style="text-align:center">
 <h2 style="color:#ff7a00">Databricks connected</h2>
 <p>You can close this tab and return to Byaan.</p>
+<script>
+  try { window.close(); } catch (e) {}
+  setTimeout(function(){ try { window.close(); } catch (e) {} }, 300);
+</script>
 </div></body></html>
 """
 
@@ -53,11 +58,17 @@ async def databricks_oauth_start(
     auth: AuthContext = Depends(require_scope(Scope.CONNECTION_CREATE)),
     session: AsyncSession = Depends(get_async_session),
 ):
-    client_id, client_secret = await databricks_oauth_service.get_oauth_credentials(session)
-    if not client_id or not client_secret:
+    if is_self_hosted() and not await databricks_oauth_service.is_oauth_configured(session):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Databricks OAuth is not configured. Ask an admin to set client_id and client_secret in Settings.",
+            detail="Databricks OAuth is not configured. Ask an admin to register a custom OAuth app in the Databricks Account Console and paste the client_id and client_secret in Settings.",
+        )
+
+    client_id, _client_secret = await databricks_oauth_service.get_oauth_credentials(session)
+    if not client_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Databricks OAuth client_id missing.",
         )
 
     auth_url, state = await databricks_oauth_service.create_auth_url(
@@ -91,8 +102,8 @@ async def databricks_oauth_callback(
 
     try:
         client_id, client_secret = await databricks_oauth_service.get_oauth_credentials(session)
-        if not client_id or not client_secret:
-            raise ValueError("Databricks OAuth is not configured")
+        if not client_id:
+            raise ValueError("Databricks OAuth client_id missing")
 
         tokens = await databricks_oauth_service.exchange_code(
             code=code,
@@ -105,9 +116,6 @@ async def databricks_oauth_callback(
         logger.error(f"[DATABRICKS OAUTH] Callback failed: {e}", exc_info=True)
         return HTMLResponse(_ERROR_HTML.format(message=str(e)), status_code=400)
 
-    frontend_url = databricks_oauth_service._get_frontend_url()
-    if frontend_url:
-        return RedirectResponse(url=f"{frontend_url}/databases?databricks_oauth=success&state={state}")
     return HTMLResponse(_CALLBACK_HTML)
 
 
@@ -149,7 +157,33 @@ async def databricks_list_warehouses(
     return success_response(data={"warehouses": warehouses}, message=f"Found {len(warehouses)} warehouse(s)")
 
 
-# ----- admin config endpoints -----
+@router.get("/connections/databricks/auth/status")
+async def databricks_auth_status(
+    auth: AuthContext = Depends(require_scope(Scope.CONNECTION_CREATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    configured = await databricks_oauth_service.is_oauth_configured(session)
+    can_configure = is_self_hosted() and bool(getattr(auth, "is_admin", False))
+    return success_response(
+        data={
+            "configured": configured,
+            "can_configure": can_configure,
+            "redirect_uri": databricks_oauth_service.get_redirect_uri(),
+        }
+    )
+
+
+# ----- admin config endpoints (hosted mode only) -----
+
+
+def _require_hosted_admin(auth: AuthContext) -> None:
+    if not is_self_hosted():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Databricks OAuth admin configuration is only available in hosted deployments.",
+        )
+    if not getattr(auth, "is_admin", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
 
 
 @router.get("/connections/databricks/admin/oauth-config")
@@ -157,8 +191,7 @@ async def get_databricks_oauth_config(
     auth: AuthContext = Depends(require_scope(Scope.SETTINGS_UPDATE)),
     session: AsyncSession = Depends(get_async_session),
 ):
-    if not auth.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    _require_hosted_admin(auth)
 
     from server.services.settings import SettingsService
 
@@ -183,8 +216,7 @@ async def save_databricks_oauth_config(
     auth: AuthContext = Depends(require_scope(Scope.SETTINGS_UPDATE)),
     session: AsyncSession = Depends(get_async_session),
 ):
-    if not auth.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    _require_hosted_admin(auth)
 
     from server.services.crypto_service import CryptoService
     from server.services.settings import SettingsService
@@ -209,25 +241,10 @@ async def delete_databricks_oauth_config(
     auth: AuthContext = Depends(require_scope(Scope.SETTINGS_UPDATE)),
     session: AsyncSession = Depends(get_async_session),
 ):
-    if not auth.is_admin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    _require_hosted_admin(auth)
 
     from server.services.settings import SettingsService
 
     await SettingsService.delete_setting_by_key(session, databricks_oauth_service.DATABRICKS_OAUTH_CLIENT_ID_KEY)
     await SettingsService.delete_setting_by_key(session, databricks_oauth_service.DATABRICKS_OAUTH_CLIENT_SECRET_KEY)
     return success_response(message="Databricks OAuth configuration removed")
-
-
-@router.get("/connections/databricks/auth/status")
-async def databricks_auth_status(
-    auth: AuthContext = Depends(require_scope(Scope.CONNECTION_CREATE)),
-    session: AsyncSession = Depends(get_async_session),
-):
-    configured = await databricks_oauth_service.is_oauth_configured(session)
-    return success_response(
-        data={
-            "configured": configured,
-            "redirect_uri": databricks_oauth_service.get_redirect_uri(),
-        }
-    )

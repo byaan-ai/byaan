@@ -9,6 +9,7 @@ import { Loader2, Upload, FileText, X, Link as LinkIcon, Leaf, Cylinder, Server,
 import { ApiService } from '../services/api'
 import type { ConnectionType, Datasource, DatabricksCatalog, DatabricksOAuthTokens, DatabricksWarehouse } from '../services/api'
 import { DatabricksOAuthSettings } from './databricks/DatabricksOAuthSettings'
+import { useAppConfig } from '../hooks/useAppConfig'
 
 type DatabricksPair = { catalog: string; schema: string | null }
 const pairKey = (p: DatabricksPair) => `${p.catalog}::${p.schema ?? '*'}`
@@ -70,6 +71,7 @@ export function DatabaseConnectionDialog({
   multiSelect = false,
   onDatabricksConnectionsCreated,
 }: DatabaseConnectionDialogProps) {
+  const { isSelfHosted } = useAppConfig()
   // Handle dialog close - only close if in select mode or no previous connections
   const handleClose = () => {
     if (isLoading) return
@@ -131,7 +133,9 @@ export function DatabaseConnectionDialog({
   } | null>(null)
   const [databricksCatalogFilter, setDatabricksCatalogFilter] = useState('')
 
-  const [databricksOAuthConfigured, setDatabricksOAuthConfigured] = useState<boolean>(false)
+  const [databricksOAuthConfigured, setDatabricksOAuthConfigured] = useState<boolean>(!isSelfHosted)
+  const [databricksOAuthCanConfigure, setDatabricksOAuthCanConfigure] = useState<boolean>(false)
+  const [showManageDatabricksOAuth, setShowManageDatabricksOAuth] = useState<boolean>(false)
   const [oauthTokens, setOauthTokens] = useState<DatabricksOAuthTokens | null>(null)
   const [oauthState, setOauthState] = useState<string | null>(null)
   const [oauthSigningIn, setOauthSigningIn] = useState(false)
@@ -140,12 +144,24 @@ export function DatabaseConnectionDialog({
   const [selectedWarehouseId, setSelectedWarehouseId] = useState<string | null>(null)
   const [loadingWarehouses, setLoadingWarehouses] = useState(false)
 
-  useEffect(() => {
-    if (!open) return
+  const refreshDatabricksAuthStatus = () => {
     ApiService.getDatabricksAuthStatus()
-      .then(s => setDatabricksOAuthConfigured(!!s.configured))
-      .catch(() => setDatabricksOAuthConfigured(false))
+      .then(s => {
+        setDatabricksOAuthConfigured(!!s.configured)
+        setDatabricksOAuthCanConfigure(!!s.can_configure)
+      })
+      .catch(() => {
+        setDatabricksOAuthConfigured(!isSelfHosted)
+        setDatabricksOAuthCanConfigure(false)
+      })
+  }
+
+  useEffect(() => {
+    if (open) refreshDatabricksAuthStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
+
+  const databricksTileVisible = !isSelfHosted || databricksOAuthConfigured || databricksOAuthCanConfigure
 
   // Helper functions
   const formatDbType = (type: string): string => {
@@ -809,19 +825,21 @@ export function DatabaseConnectionDialog({
                   <span className="text-sm font-medium">DynamoDB</span>
                 </button>
 
-                {/* Databricks */}
-                <button
-                  onClick={() => handleTypeChange('databricks')}
-                  disabled={isLoading}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md transition-all text-left ${
-                    selectedType === 'databricks'
-                      ? 'bg-brand-orange/10 text-white border-l-3 border-brand-orange'
-                      : 'text-gray-400 hover:text-white hover:bg-[#2a2a2a]'
-                  } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
-                >
-                  <Database className="w-5 h-5 flex-shrink-0 text-red-400" />
-                  <span className="text-sm font-medium">Databricks</span>
-                </button>
+                {/* Databricks: hidden for non-admin team members until admin configures OAuth */}
+                {databricksTileVisible && (
+                  <button
+                    onClick={() => handleTypeChange('databricks')}
+                    disabled={isLoading}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md transition-all text-left ${
+                      selectedType === 'databricks'
+                        ? 'bg-brand-orange/10 text-white border-l-3 border-brand-orange'
+                        : 'text-gray-400 hover:text-white hover:bg-[#2a2a2a]'
+                    } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <Database className="w-5 h-5 flex-shrink-0 text-red-400" />
+                    <span className="text-sm font-medium">Databricks</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1154,24 +1172,40 @@ export function DatabaseConnectionDialog({
                     </div>
                   )}
 
-                  {selectedType === 'databricks' && databricksStep === 1 && !databricksOAuthConfigured && (
+                  {selectedType === 'databricks' && databricksStep === 1 && isSelfHosted && !databricksOAuthConfigured && !databricksOAuthCanConfigure && (
+                    <div className="bg-amber-900/20 border border-amber-700/40 rounded-md p-3 text-sm text-amber-200">
+                      Databricks OAuth isn't configured for this workspace. Ask your admin to register a custom OAuth app in the Databricks Account Console and add the credentials in Settings.
+                    </div>
+                  )}
+
+                  {selectedType === 'databricks' && databricksStep === 1 && isSelfHosted && !databricksOAuthConfigured && databricksOAuthCanConfigure && (
                     <div className="space-y-3">
                       <div className="bg-amber-900/20 border border-amber-700/40 rounded-md p-3 text-sm text-amber-200">
-                        Databricks OAuth isn't configured yet. An admin needs to register Byaan as a custom OAuth app in the Databricks Account Console and paste the credentials below. After saving, every user can sign in with Databricks.
+                        Databricks OAuth isn't configured yet. Register Byaan as a custom OAuth app in the Databricks Account Console and paste the credentials below. After saving, every user can sign in with Databricks.
                       </div>
-                      <DatabricksOAuthSettings onConfigChanged={() => {
-                        ApiService.getDatabricksAuthStatus()
-                          .then(s => setDatabricksOAuthConfigured(!!s.configured))
-                          .catch(() => {})
-                      }} />
+                      <DatabricksOAuthSettings onConfigChanged={refreshDatabricksAuthStatus} />
                     </div>
                   )}
 
                   {selectedType === 'databricks' && databricksStep === 1 && databricksOAuthConfigured && (
                     <div className="space-y-4">
-                      <p className="text-xs text-gray-400">
-                        Sign in with your Databricks account. Byaan will list available warehouses, then catalogs and schemas to pick from.
-                      </p>
+                      <div className="flex items-start justify-between gap-3">
+                        <p className="text-xs text-gray-400 flex-1">
+                          Sign in with your Databricks account. Byaan will list available warehouses, then catalogs and schemas to pick from.
+                        </p>
+                        {databricksOAuthCanConfigure && (
+                          <button
+                            type="button"
+                            onClick={() => setShowManageDatabricksOAuth(v => !v)}
+                            className="text-xs text-brand-orange hover:underline whitespace-nowrap"
+                          >
+                            {showManageDatabricksOAuth ? 'Hide OAuth settings' : 'Manage OAuth credentials'}
+                          </button>
+                        )}
+                      </div>
+                      {showManageDatabricksOAuth && databricksOAuthCanConfigure && (
+                        <DatabricksOAuthSettings onConfigChanged={refreshDatabricksAuthStatus} />
+                      )}
                       <div>
                         <Label htmlFor="serverHostname" className="text-white">Workspace URL <span className="text-red-400">*</span></Label>
                         <Input

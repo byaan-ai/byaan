@@ -598,7 +598,6 @@ export interface DatabricksOAuthSettings {
   redirect_uri: string
 }
 
-
 // LLM Connections
 export interface LLMConnection {
   id: string
@@ -1490,14 +1489,14 @@ export class ApiService {
     return extractData<{ warehouses: DatabricksWarehouse[] }>(data).warehouses
   }
 
-  static async getDatabricksAuthStatus(): Promise<{ configured: boolean; redirect_uri: string }> {
+  static async getDatabricksAuthStatus(): Promise<{ configured: boolean; can_configure: boolean; redirect_uri: string }> {
     try {
       const response = await apiFetch(`${API_BASE_URL}/connections/databricks/auth/status`)
-      if (!response.ok) return { configured: false, redirect_uri: '' }
+      if (!response.ok) return { configured: false, can_configure: false, redirect_uri: '' }
       const data = await response.json()
-      return extractData<{ configured: boolean; redirect_uri: string }>(data)
+      return extractData<{ configured: boolean; can_configure: boolean; redirect_uri: string }>(data)
     } catch {
-      return { configured: false, redirect_uri: '' }
+      return { configured: false, can_configure: false, redirect_uri: '' }
     }
   }
 
