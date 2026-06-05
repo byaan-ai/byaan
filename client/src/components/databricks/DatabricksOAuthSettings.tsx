@@ -22,23 +22,17 @@ function SetupStepsAccordion({ callbackUrl }: { callbackUrl: string }) {
           <li className="flex items-start gap-2">
             <span className="text-gray-500 mt-0.5">•</span>
             <span>
-              Open the Databricks{' '}
+              Open{' '}
               <a
-                href="https://accounts.cloud.databricks.com/"
+                href="https://accounts.cloud.databricks.com/settings/app-integrations"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-brand-orange hover:underline inline-flex items-center gap-1"
               >
-                Account Console
+                Databricks App integrations
                 <ExternalLink className="w-3 h-3" />
               </a>
-              {' '}as an account admin.
-            </span>
-          </li>
-          <li className="flex items-start gap-2">
-            <span className="text-gray-500 mt-0.5">•</span>
-            <span>
-              Go to <strong className="text-gray-300">Settings → App connections → Add connection</strong>.
+              {' '}as an account admin and click <strong className="text-gray-300">Add connection</strong>. One-time setup — all your users sign in through this app.
             </span>
           </li>
           <li className="flex items-start gap-2">
