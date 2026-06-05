@@ -554,14 +554,48 @@ export interface DatabricksCatalog {
   schemas: string[]
 }
 
+export interface DatabricksWarehouse {
+  id: string
+  name?: string | null
+  state?: string | null
+  size?: string | null
+  http_path: string
+}
+
 export interface DatabricksDiscoverResponse {
   catalogs: DatabricksCatalog[]
+  warehouses?: DatabricksWarehouse[]
 }
 
 export interface DatabricksDiscoverRequest {
   server_hostname: string
-  http_path: string
   access_token: string
+  http_path?: string
+}
+
+export interface DatabricksOAuthTokens {
+  access_token: string
+  refresh_token: string | null
+  expires_at: number
+  scope: string | null
+  server_hostname: string
+}
+
+export interface DatabricksOAuthStartResponse {
+  auth_url: string
+  state: string
+  redirect_uri: string
+}
+
+export interface DatabricksOAuthResultResponse {
+  status: 'pending' | 'success'
+  tokens?: DatabricksOAuthTokens
+}
+
+export interface DatabricksOAuthSettings {
+  client_id: string
+  client_secret_configured: boolean
+  redirect_uri: string
 }
 
 
@@ -1418,6 +1452,83 @@ export class ApiService {
     } catch (error) {
       console.error('Error discovering Databricks catalogs:', error)
       throw error
+    }
+  }
+
+  static async startDatabricksOAuth(server_hostname: string): Promise<DatabricksOAuthStartResponse> {
+    const response = await apiFetch(`${API_BASE_URL}/connections/databricks/oauth/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server_hostname }),
+    })
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(data) || `HTTP error! status: ${response.status}`)
+    }
+    return extractData<DatabricksOAuthStartResponse>(data)
+  }
+
+  static async pollDatabricksOAuthResult(state: string): Promise<DatabricksOAuthResultResponse> {
+    const response = await apiFetch(`${API_BASE_URL}/connections/databricks/oauth/result?state=${encodeURIComponent(state)}`)
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(data) || `HTTP error! status: ${response.status}`)
+    }
+    return extractData<DatabricksOAuthResultResponse>(data)
+  }
+
+  static async listDatabricksWarehouses(server_hostname: string, access_token: string): Promise<DatabricksWarehouse[]> {
+    const response = await apiFetch(`${API_BASE_URL}/connections/databricks/oauth/warehouses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ server_hostname, access_token }),
+    })
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(data) || `HTTP error! status: ${response.status}`)
+    }
+    return extractData<{ warehouses: DatabricksWarehouse[] }>(data).warehouses
+  }
+
+  static async getDatabricksAuthStatus(): Promise<{ configured: boolean; redirect_uri: string }> {
+    try {
+      const response = await apiFetch(`${API_BASE_URL}/connections/databricks/auth/status`)
+      if (!response.ok) return { configured: false, redirect_uri: '' }
+      const data = await response.json()
+      return extractData<{ configured: boolean; redirect_uri: string }>(data)
+    } catch {
+      return { configured: false, redirect_uri: '' }
+    }
+  }
+
+  static async getDatabricksOAuthSettings(): Promise<DatabricksOAuthSettings> {
+    const response = await apiFetch(`${API_BASE_URL}/connections/databricks/admin/oauth-config`)
+    const data = await response.json()
+    if (!response.ok) {
+      throw new Error(extractErrorMessage(data) || `HTTP error! status: ${response.status}`)
+    }
+    return extractData<DatabricksOAuthSettings>(data)
+  }
+
+  static async saveDatabricksOAuthSettings(client_id: string, client_secret: string): Promise<void> {
+    const response = await apiFetch(`${API_BASE_URL}/connections/databricks/admin/oauth-config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id, client_secret }),
+    })
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(extractErrorMessage(data) || `HTTP error! status: ${response.status}`)
+    }
+  }
+
+  static async deleteDatabricksOAuthSettings(): Promise<void> {
+    const response = await apiFetch(`${API_BASE_URL}/connections/databricks/admin/oauth-config`, {
+      method: 'DELETE',
+    })
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      throw new Error(extractErrorMessage(data) || `HTTP error! status: ${response.status}`)
     }
   }
 
