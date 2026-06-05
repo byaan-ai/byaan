@@ -284,15 +284,15 @@ async def _start_loopback_listener(state: str, client_id: str) -> None:
         except TimeoutError:
             logger.warning(f"[DATABRICKS OAUTH] Loopback listener timed out state={state[:16]}...")
         except asyncio.CancelledError:
-            pass
+            return
         except Exception:
             logger.exception("[DATABRICKS OAUTH] Loopback server crashed")
         finally:
             server.close()
             try:
                 await server.wait_closed()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[DATABRICKS OAUTH] Ignoring loopback wait_closed() error: {e}")
             _active_loopback_servers.pop(state, None)
             _oauth_state_store.pop(state, None)
 
