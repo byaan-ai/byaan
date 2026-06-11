@@ -93,6 +93,10 @@ class DatabricksOAuthStartResponse(BaseModel):
     redirect_uri: str
 
 
+class DatabricksOAuthCancelRequest(BaseModel):
+    state: str
+
+
 class DatabricksOAuthTokens(BaseModel):
     access_token: str
     refresh_token: str | None = None

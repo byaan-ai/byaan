@@ -1476,6 +1476,14 @@ export class ApiService {
     return extractData<DatabricksOAuthResultResponse>(data)
   }
 
+  static async cancelDatabricksOAuth(state: string): Promise<void> {
+    await apiFetch(`${API_BASE_URL}/connections/databricks/oauth/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state }),
+    })
+  }
+
   static async listDatabricksWarehouses(server_hostname: string, access_token: string): Promise<DatabricksWarehouse[]> {
     const response = await apiFetch(`${API_BASE_URL}/connections/databricks/oauth/warehouses`, {
       method: 'POST',
