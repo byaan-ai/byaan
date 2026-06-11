@@ -96,6 +96,8 @@ export default function DatabasesPage() {
   const [databricksOAuthCanConfigure, setDatabricksOAuthCanConfigure] = useState<boolean>(false)
   const [showManageDatabricksOAuth, setShowManageDatabricksOAuth] = useState<boolean>(false)
   const [oauthTokens, setOauthTokens] = useState<DatabricksOAuthTokens | null>(null)
+  const oauthStateRef = useRef<string | null>(null)
+  const oauthAbortRef = useRef<AbortController | null>(null)
   const [oauthSigningIn, setOauthSigningIn] = useState(false)
   const [oauthError, setOauthError] = useState<string | null>(null)
   const [warehouses, setWarehouses] = useState<DatabricksWarehouse[] | null>(null)
@@ -231,6 +233,15 @@ export default function DatabasesPage() {
   }, [selectedType, connectionConfig, databricksStep, selectedPairs, oauthTokens, selectedWarehouseId])
 
   const resetDatabricksWizard = () => {
+    if (oauthAbortRef.current) {
+      oauthAbortRef.current.abort()
+      oauthAbortRef.current = null
+    }
+    const pendingState = oauthStateRef.current
+    if (pendingState) {
+      ApiService.cancelDatabricksOAuth(pendingState).catch(() => {})
+    }
+    oauthStateRef.current = null
     setDatabricksStep(1)
     setDiscoveredCatalogs(null)
     setDiscovering(false)
@@ -248,6 +259,20 @@ export default function DatabasesPage() {
     setLoadingWarehouses(false)
   }
 
+  useEffect(() => {
+    return () => {
+      if (oauthAbortRef.current) {
+        oauthAbortRef.current.abort()
+        oauthAbortRef.current = null
+      }
+      const pendingState = oauthStateRef.current
+      if (pendingState) {
+        ApiService.cancelDatabricksOAuth(pendingState).catch(() => {})
+        oauthStateRef.current = null
+      }
+    }
+  }, [])
+
   const loadWarehouses = async (host: string, token: string) => {
     setLoadingWarehouses(true)
     try {
@@ -261,36 +286,94 @@ export default function DatabasesPage() {
     }
   }
 
+  const normalizeDatabricksHost = (raw: string): string => {
+    let h = raw.trim()
+    const schemeIdx = h.indexOf('://')
+    if (schemeIdx !== -1) h = h.slice(schemeIdx + 3)
+    h = h.split('/')[0].split('?')[0]
+    return h.trim().replace(/\.+$/, '')
+  }
+
+  const handleCancelDatabricksSignIn = () => {
+    const pendingState = oauthStateRef.current
+    if (oauthAbortRef.current) {
+      oauthAbortRef.current.abort()
+      oauthAbortRef.current = null
+    }
+    if (pendingState) {
+      ApiService.cancelDatabricksOAuth(pendingState).catch(() => {})
+    }
+    oauthStateRef.current = null
+    setOauthSigningIn(false)
+    setOauthError(null)
+  }
+
   const handleDatabricksSignIn = async () => {
-    if (!connectionConfig.serverHostname.trim()) {
+    const normalizedHost = normalizeDatabricksHost(connectionConfig.serverHostname)
+    if (!normalizedHost) {
       setOauthError('Enter your Databricks workspace URL first')
       return
     }
+    if (normalizedHost !== connectionConfig.serverHostname) {
+      setConnectionConfig(prev => ({ ...prev, serverHostname: normalizedHost }))
+    }
+    if (oauthAbortRef.current) {
+      oauthAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    oauthAbortRef.current = controller
+    const { signal } = controller
     setOauthError(null)
     setOauthSigningIn(true)
     try {
-      const { auth_url, state } = await ApiService.startDatabricksOAuth(connectionConfig.serverHostname.trim())
+      const { auth_url, state } = await ApiService.startDatabricksOAuth(normalizedHost)
+      if (signal.aborted) return
+      oauthStateRef.current = state
       await openExternalUrl(auth_url)
+      if (signal.aborted) return
+
+      const sleep = (ms: number) => new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        }, ms)
+        const onAbort = () => {
+          clearTimeout(timer)
+          reject(new DOMException('aborted', 'AbortError'))
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+
       const deadline = Date.now() + 5 * 60 * 1000
       while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 2000))
+        await sleep(2000)
+        if (signal.aborted) return
         try {
           const res = await ApiService.pollDatabricksOAuthResult(state)
+          if (signal.aborted) return
           if (res.status === 'success' && res.tokens) {
+            oauthStateRef.current = null
             setOauthTokens(res.tokens)
             setConnectionConfig(prev => ({ ...prev, serverHostname: res.tokens!.server_hostname }))
             await loadWarehouses(res.tokens.server_hostname, res.tokens.access_token)
             return
           }
         } catch (err: any) {
+          if (signal.aborted) return
           console.warn('OAuth poll failed:', err?.message)
         }
       }
-      setOauthError('Sign-in timed out. Please try again.')
+      if (!signal.aborted) setOauthError('Sign-in timed out. Please try again.')
     } catch (err: any) {
+      if (err?.name === 'AbortError' || signal.aborted) return
       setOauthError(err?.message || 'Failed to start Databricks sign-in')
     } finally {
-      setOauthSigningIn(false)
+      if (!signal.aborted) {
+        setOauthSigningIn(false)
+      }
+      if (oauthAbortRef.current === controller) {
+        oauthAbortRef.current = null
+      }
     }
   }
 
@@ -1626,21 +1709,37 @@ export default function DatabasesPage() {
                             disabled={oauthSigningIn || !!oauthTokens}
                             className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
                           />
-                          <p className="text-xs text-gray-400 mt-1">No scheme — just the host, e.g. <code>adb-1234.azuredatabricks.net</code>.</p>
+                          <p className="text-xs text-gray-400 mt-1">
+                            Enter the <strong>Server hostname</strong> only — no <code>https://</code>, no path. Example: <code>adb-1234.azuredatabricks.net</code>.
+                          </p>
                         </div>
 
                         {!oauthTokens ? (
-                          <Button
-                            onClick={handleDatabricksSignIn}
-                            disabled={oauthSigningIn || !connectionConfig.serverHostname.trim()}
-                            className="w-full bg-brand-orange hover:bg-brand-orange/90"
-                          >
-                            {oauthSigningIn ? (
-                              <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Waiting for sign-in…</>
-                            ) : (
-                              <>Sign in with Databricks</>
-                            )}
-                          </Button>
+                          oauthSigningIn ? (
+                            <div className="flex gap-2">
+                              <Button
+                                disabled
+                                className="flex-1 bg-brand-orange/70 hover:bg-brand-orange/70 cursor-default"
+                              >
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Waiting for sign-in…
+                              </Button>
+                              <Button
+                                type="button"
+                                onClick={handleCancelDatabricksSignIn}
+                                className="bg-[#2a2a2a] hover:bg-[#3a3a3a] border border-[#555555] text-white"
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          ) : (
+                            <Button
+                              onClick={handleDatabricksSignIn}
+                              disabled={!connectionConfig.serverHostname.trim()}
+                              className="w-full bg-brand-orange hover:bg-brand-orange/90"
+                            >
+                              Sign in with Databricks
+                            </Button>
+                          )
                         ) : (
                           <div className="flex items-start gap-2 bg-green-900/20 border border-green-700/50 rounded-md p-3 text-sm text-green-200">
                             <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />

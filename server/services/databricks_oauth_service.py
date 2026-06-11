@@ -77,9 +77,11 @@ def get_redirect_uri() -> str:
 
 def _normalize_host(server_hostname: str) -> str:
     host = server_hostname.strip()
-    if host.startswith("http://") or host.startswith("https://"):
+    if "://" in host:
         host = host.split("://", 1)[1]
-    return host.rstrip("/")
+    host = host.split("/", 1)[0]
+    host = host.split("?", 1)[0]
+    return host.strip().rstrip(".")
 
 
 def _authorize_url(host: str) -> str:
@@ -297,6 +299,26 @@ async def _start_loopback_listener(state: str, client_id: str) -> None:
             _oauth_state_store.pop(state, None)
 
     asyncio.create_task(_serve_until_done())
+
+
+def cancel_flow(state: str) -> bool:
+    """Abort an in-progress OAuth flow: close its loopback listener and drop
+    any state/result entries. Returns True if anything was found to cancel."""
+    found = False
+    server = _active_loopback_servers.pop(state, None)
+    if server is not None:
+        found = True
+        try:
+            server.close()
+        except Exception as e:
+            logger.debug(f"[DATABRICKS OAUTH] Ignoring cancel close error: {e}")
+    if _oauth_state_store.pop(state, None) is not None:
+        found = True
+    if _oauth_result_store.pop(state, None) is not None:
+        found = True
+    if found:
+        logger.info(f"[DATABRICKS OAUTH] Cancelled flow state={state[:16]}...")
+    return found
 
 
 def pop_state(state: str) -> dict[str, Any] | None:

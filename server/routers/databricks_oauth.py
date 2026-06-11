@@ -11,6 +11,7 @@ from server.auth.scopes import Scope
 from server.auth.tenant_context import set_tenant_id
 from server.db.session import get_async_session
 from server.schemas.connections import (
+    DatabricksOAuthCancelRequest,
     DatabricksOAuthResultResponse,
     DatabricksOAuthSettingsRequest,
     DatabricksOAuthSettingsResponse,
@@ -144,6 +145,18 @@ async def databricks_oauth_result(
             ),
         ).model_dump(),
         message="Databricks tokens retrieved",
+    )
+
+
+@router.post("/connections/databricks/oauth/cancel")
+async def databricks_oauth_cancel(
+    body: DatabricksOAuthCancelRequest,
+    auth: AuthContext = Depends(require_scope(Scope.CONNECTION_CREATE)),
+):
+    cancelled = databricks_oauth_service.cancel_flow(body.state)
+    return success_response(
+        data={"cancelled": cancelled},
+        message="Databricks OAuth flow cancelled" if cancelled else "No active flow found",
     )
 
 
