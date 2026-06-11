@@ -13,6 +13,9 @@ NC='\033[0m'
 IMAGE="byaan/self-hosted:stable"
 CONTAINER_NAME="byaan"
 
+# Minimum free disk space required (in GB) before starting/updating
+MIN_FREE_DISK_GB="${MIN_FREE_DISK_GB:-3}"
+
 # Script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$SCRIPT_DIR/.env"
@@ -258,6 +261,58 @@ abort_update_after_backup_failure() {
     return 0
 }
 
+# Check free disk space on the partition holding Docker's storage.
+# Returns 0 if there is at least MIN_FREE_DISK_GB free, 1 otherwise.
+check_disk_space() {
+    local required_gb="${1:-$MIN_FREE_DISK_GB}"
+    local docker_root
+    docker_root=$(run_docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "/var/lib/docker")
+    [ -d "$docker_root" ] || docker_root="/"
+
+    local avail_kb avail_gb
+    avail_kb=$(df -P "$docker_root" 2>/dev/null | awk 'NR==2 {print $4}')
+    [ -n "$avail_kb" ] || return 0
+    avail_gb=$(( avail_kb / 1024 / 1024 ))
+
+    if [ "$avail_gb" -lt "$required_gb" ]; then
+        print_error "Insufficient disk space on $docker_root: ${avail_gb}G free, need at least ${required_gb}G."
+        echo ""
+        echo "Free space, then retry. Common cleanups:"
+        echo "  ./start.sh prune        # remove unused Docker images and old snapshots"
+        echo "  df -h                   # see what's full"
+        echo "  docker system df        # see Docker disk usage"
+        return 1
+    fi
+
+    if [ "$avail_gb" -lt $(( required_gb * 2 )) ]; then
+        print_warning "Low disk space on $docker_root: ${avail_gb}G free. Consider './start.sh prune'."
+    fi
+
+    return 0
+}
+
+# Remove all byaan/self-hosted images except the one currently in use
+# by a running container. Safe to run any time; only touches our images.
+prune_old_images() {
+    local in_use
+    in_use=$(run_docker ps --filter "ancestor=byaan/self-hosted" --format '{{.Image}}' 2>/dev/null | sort -u)
+
+    local image_id current_id keep_ids=""
+    for img in $in_use; do
+        current_id=$(run_docker image inspect --format '{{.Id}}' "$img" 2>/dev/null || true)
+        [ -n "$current_id" ] && keep_ids="$keep_ids $current_id"
+    done
+
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        image_id="${line%% *}"
+        case " $keep_ids " in
+            *" $image_id "*) continue ;;
+        esac
+        run_docker rmi "$image_id" >/dev/null 2>&1 || true
+    done < <(run_docker images byaan/self-hosted --format '{{.ID}} {{.Repository}}:{{.Tag}}' 2>/dev/null)
+}
+
 prune_snapshots() {
     local max_valid_snapshots="${1:-2}"
     local valid_count=0
@@ -393,9 +448,11 @@ start() {
     fi
 
     if container_exists; then
+        check_disk_space || exit 1
         print_info "Starting existing container..."
         run_docker start "$CONTAINER_NAME"
     else
+        check_disk_space || exit 1
         print_info "Pulling latest image..."
         run_docker pull "$IMAGE"
 
@@ -489,6 +546,10 @@ update() {
     fi
 
     print_info "Update available: $CURRENT_VERSION -> $LATEST_STABLE_VERSION"
+
+    # Updates pull a new image, create a backup snapshot, and keep the old image
+    # around briefly for rollback. Require ~5G headroom (image + snapshot + slack).
+    check_disk_space 5 || return 1
 
     NEW_IMAGE="byaan/self-hosted:$LATEST_STABLE_VERSION"
 
@@ -619,6 +680,8 @@ update() {
     save_state "$ACTIVE" "$LATEST_STABLE_VERSION"
 
     prune_snapshots 2
+    print_info "Pruning old byaan images..."
+    prune_old_images
 
     echo ""
     print_success "Update complete! Now running $LATEST_STABLE_VERSION"
@@ -861,6 +924,29 @@ remove() {
     fi
 }
 
+# Reclaim disk: remove unused byaan images and old snapshots beyond the
+# 2 most recent valid ones. Does NOT touch the byaan_data volume.
+prune() {
+    check_docker
+
+    print_info "Disk usage before:"
+    df -h / 2>/dev/null | awk 'NR==1 || NR==2'
+
+    print_info "Pruning old byaan images..."
+    prune_old_images
+
+    print_info "Pruning old snapshots (keeping 2 most recent valid)..."
+    prune_snapshots 2
+
+    print_info "Pruning dangling Docker layers..."
+    run_docker image prune -f >/dev/null 2>&1 || true
+
+    print_success "Prune complete"
+    echo ""
+    print_info "Disk usage after:"
+    df -h / 2>/dev/null | awk 'NR==1 || NR==2'
+}
+
 # Sync start.sh from remote
 sync_script() {
     SCRIPT_URL="https://downloads.byaan.ai/docker/start.sh"
@@ -905,6 +991,7 @@ show_help() {
     echo "  logs postgres  Show database logs only"
     echo "  status         Show container status"
     echo "  sync           Update this script to the latest version"
+    echo "  prune          Free disk: remove unused byaan images and old snapshots"
     echo "  remove         Remove container (keeps data)"
     echo "  remove --data  Remove container and all data"
     echo "  help           Show this help message"
@@ -931,6 +1018,9 @@ case "${1:-}" in
         ;;
     sync)
         sync_script
+        ;;
+    prune)
+        prune
         ;;
     remove)
         remove "${2:-}"
