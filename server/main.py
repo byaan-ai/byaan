@@ -52,6 +52,7 @@ from server.routers import claude_oauth as claude_oauth_router
 from server.routers import codex_oauth as codex_oauth_router
 from server.routers import connections as connections_router
 from server.routers import custom_skills as custom_skills_router
+from server.routers import databricks_oauth as databricks_oauth_router
 from server.routers import datasets as datasets_router  # Dataset management
 from server.routers import (
     datasources as datasources_router,
@@ -599,6 +600,7 @@ app.include_router(tenant_router.router, prefix="/api", tags=["tenants"])
 app.include_router(folders_router.router, prefix="/api", tags=["folders"])
 
 app.include_router(github_router.router, prefix="/api", tags=["github"])
+app.include_router(databricks_oauth_router.router, prefix="/api", tags=["databricks-oauth"])
 
 app.include_router(local_repos_router.router, prefix="/api", tags=["local-repos"])
 

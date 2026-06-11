@@ -216,22 +216,25 @@ export default function Register() {
           )}
 
           {/* Google Sign-In Button */}
-          <div className={features.local_auth_enabled ? (isFromInvitation ? "mb-4" : "mb-6") : ""}>
-            <GoogleSignInButton
-              onSuccess={handleGoogleSuccess}
-              onError={handleGoogleError}
-              disabled={isLoading || isGoogleLoading}
-            />
-          </div>
+          {features.google_oauth_enabled && (
+            <div className={features.local_auth_enabled ? (isFromInvitation ? "mb-4" : "mb-6") : ""}>
+              <GoogleSignInButton
+                onSuccess={handleGoogleSuccess}
+                onError={handleGoogleError}
+                disabled={isLoading || isGoogleLoading}
+              />
+            </div>
+          )}
 
           {features.local_auth_enabled && (
             <>
-              {/* Divider */}
-              <div className={`flex items-center ${isFromInvitation ? "mb-4" : "mb-6"}`}>
-                <div className="flex-1 border-t border-gray-200"></div>
-                <span className="px-4 text-sm text-gray-500">or</span>
-                <div className="flex-1 border-t border-gray-200"></div>
-              </div>
+              {features.google_oauth_enabled && (
+                <div className={`flex items-center ${isFromInvitation ? "mb-4" : "mb-6"}`}>
+                  <div className="flex-1 border-t border-gray-200"></div>
+                  <span className="px-4 text-sm text-gray-500">or</span>
+                  <div className="flex-1 border-t border-gray-200"></div>
+                </div>
+              )}
 
               {/* Register form */}
               <form onSubmit={handleSubmit}>

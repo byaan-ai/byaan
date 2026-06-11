@@ -12,9 +12,14 @@ def conn_obj():
     return {
         "server_hostname": "adb-1234.azuredatabricks.net",
         "http_path": "/sql/1.0/warehouses/abc123",
-        "access_token": "dapi-fake-token",
         "catalog": "main",
         "schema": "default",
+        "oauth": {
+            "access_token": "dapi-oauth-fake",
+            "refresh_token": "rt-fake",
+            "expires_at": 2**31 - 1,
+            "server_hostname": "adb-1234.azuredatabricks.net",
+        },
     }
 
 
@@ -39,6 +44,13 @@ def _fake_connection(cursor):
 async def test_connect_validates_required_fields():
     connector = AsyncDatabricksConnector({"server_hostname": "x"})
     with pytest.raises(ValueError, match="http_path"):
+        await connector.connect()
+
+
+@pytest.mark.asyncio
+async def test_connect_requires_oauth_access_token():
+    connector = AsyncDatabricksConnector({"server_hostname": "x", "http_path": "/y"})
+    with pytest.raises(ValueError, match="OAuth access_token"):
         await connector.connect()
 
 
@@ -136,8 +148,13 @@ async def test_get_schema_with_catalog_only_iterates_schemas():
     obj = {
         "server_hostname": "x",
         "http_path": "/y",
-        "access_token": "z",
         "catalog": "samples",
+        "oauth": {
+            "access_token": "z",
+            "refresh_token": "rt",
+            "expires_at": 2**31 - 1,
+            "server_hostname": "x",
+        },
     }
     schemas_cursor = _fake_cursor(
         rows=[("tpch",), ("information_schema",)],
@@ -176,7 +193,16 @@ async def test_get_schema_with_catalog_only_iterates_schemas():
 
 @pytest.mark.asyncio
 async def test_list_catalog_tree_returns_tree_excluding_system():
-    obj = {"server_hostname": "x", "http_path": "/y", "access_token": "z"}
+    obj = {
+        "server_hostname": "x",
+        "http_path": "/y",
+        "oauth": {
+            "access_token": "z",
+            "refresh_token": "rt",
+            "expires_at": 2**31 - 1,
+            "server_hostname": "x",
+        },
+    }
 
     catalogs_cursor = _fake_cursor(
         rows=[("main",), ("analytics",), ("system",)],
@@ -207,6 +233,53 @@ async def test_list_catalog_tree_returns_tree_excluding_system():
     assert "default" in main["schemas"]
     assert "gold" in main["schemas"]
     assert "information_schema" not in main["schemas"]
+
+
+@pytest.mark.asyncio
+async def test_expired_oauth_triggers_refresh_and_callback(conn_obj):
+    """When access_token is near expiry, connector calls the OAuth refresh helper
+    and invokes the on_token_refresh callback with the new oauth block."""
+    conn_obj["oauth"]["expires_at"] = 0  # forces refresh
+
+    cursor = _fake_cursor(rows=[(1,)], description=[("c", "INT", None, None, None, None, None)])
+    fake_conn = _fake_connection(cursor)
+
+    captured: dict = {}
+
+    async def cb(new_oauth):
+        captured.update(new_oauth)
+
+    refreshed = {
+        "access_token": "fresh-token",
+        "refresh_token": "rotated-rt",
+        "expires_at": 2**31 - 1,
+        "scope": "sql offline_access",
+        "server_hostname": conn_obj["server_hostname"],
+    }
+
+    from unittest.mock import AsyncMock
+
+    connector = AsyncDatabricksConnector(conn_obj, on_token_refresh=cb)
+
+    with (
+        patch("server.services.databricks_connector.sql.connect", return_value=fake_conn),
+        patch(
+            "server.services.databricks_oauth_service.refresh_databricks_token",
+            new=AsyncMock(return_value=refreshed),
+        ),
+        patch(
+            "server.services.databricks_oauth_service.get_oauth_credentials",
+            new=AsyncMock(return_value=("client-id", "client-secret")),
+        ),
+        patch("server.db.session.AsyncSessionFactory") as factory_mock,
+    ):
+        factory_mock.return_value.__aenter__.return_value = MagicMock()
+        factory_mock.return_value.__aexit__.return_value = False
+        await connector.connect()
+
+    assert captured["access_token"] == "fresh-token"
+    assert captured["refresh_token"] == "rotated-rt"
+    assert connector.connection_obj["oauth"]["access_token"] == "fresh-token"
 
 
 @pytest.mark.asyncio

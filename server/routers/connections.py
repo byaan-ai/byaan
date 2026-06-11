@@ -18,6 +18,7 @@ from server.schemas.connections import (
     DatabricksDiscoverResponse,
 )
 from server.schemas.standard_response import success_response
+from server.services import databricks_oauth_service
 from server.services.connections import ConnectionService
 from server.services.database_operations import DatabaseOperationsService
 from server.services.databricks_connector import AsyncDatabricksConnector
@@ -35,11 +36,22 @@ async def discover_databricks_endpoint(
     payload: DatabricksDiscoverRequest,
     auth: AuthContext = Depends(require_scope(Scope.CONNECTION_CREATE)),
 ):
+    warehouses: list[dict] = []
+    if not payload.http_path:
+        try:
+            warehouses = await databricks_oauth_service.list_warehouses(payload.server_hostname, payload.access_token)
+        except ValueError as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
     connector = AsyncDatabricksConnector(
         {
             "server_hostname": payload.server_hostname,
-            "http_path": payload.http_path,
-            "access_token": payload.access_token,
+            "http_path": payload.http_path or (warehouses[0]["http_path"] if warehouses else ""),
+            "oauth": {
+                "access_token": payload.access_token,
+                "expires_at": 2**31 - 1,  # treat as non-expiring within discovery
+                "server_hostname": payload.server_hostname,
+            },
         }
     )
     try:
@@ -71,7 +83,7 @@ async def discover_databricks_endpoint(
         except Exception:
             logger.debug("Ignoring close error after Databricks discover", exc_info=True)
 
-    response = DatabricksDiscoverResponse(catalogs=catalogs)
+    response = DatabricksDiscoverResponse(catalogs=catalogs, warehouses=warehouses)
     return success_response(
         data=response.model_dump(),
         message=f"Discovered {len(response.catalogs)} catalog(s)",
@@ -99,6 +111,15 @@ async def create_connection_endpoint(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid connection type: {payload.type}. Allowed types: {', '.join(ALLOWED_CONN_TYPES)}",
         )
+
+    if payload.type == "databricks":
+        oauth = (payload.connection_obj or {}).get("oauth") or {}
+        if not oauth.get("access_token") or not oauth.get("refresh_token"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Databricks connections require an OAuth block with access_token and refresh_token. "
+                "Use the Sign in with Databricks flow.",
+            )
 
     try:
         connection, schema = await ConnectionService.create_connection_with_schema(

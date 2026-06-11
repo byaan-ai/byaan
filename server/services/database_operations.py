@@ -1381,12 +1381,35 @@ class AsyncDatabaseService:
 
     @classmethod
     async def get_or_create_databricks_connector(cls, connection_id: str, connection_obj: dict[str, Any]):
-        """Get or create cached Databricks connector."""
+        """Get or create cached Databricks connector.
+
+        Wires a token-refresh callback that re-encrypts the updated OAuth block back
+        into the connection row so the rotated refresh_token survives a process
+        restart. The callback is a no-op when ``connection_id`` is not a real DB id
+        (e.g. the transient discover endpoint).
+        """
         from server.services.databricks_connector import AsyncDatabricksConnector
+
+        async def _persist_refreshed_tokens(new_oauth: dict[str, Any]) -> None:
+            try:
+                from server.db.session import AsyncSessionFactory
+                from server.repositories.connections import ConnectionRepository
+
+                async with AsyncSessionFactory() as session:
+                    repo = ConnectionRepository(session)
+                    connection = await repo.get(connection_id)
+                    if not connection:
+                        return
+                    current = await connection.get_decrypted_connection_obj(session) or {}
+                    current["oauth"] = new_oauth
+                    await connection.set_encrypted_connection_obj(current, session)
+                    await session.commit()
+            except Exception:
+                logger.error("Failed to persist refreshed Databricks tokens", exc_info=True)
 
         async with cls._pool_lock:
             if connection_id not in cls._connection_pools:
-                connector = AsyncDatabricksConnector(connection_obj)
+                connector = AsyncDatabricksConnector(connection_obj, on_token_refresh=_persist_refreshed_tokens)
                 await connector.connect()
                 cls._connection_pools[connection_id] = connector
             return cls._connection_pools[connection_id]

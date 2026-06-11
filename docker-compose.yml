@@ -9,6 +9,7 @@ services:
       target: runtime
     ports:
       - "${BACKEND_PORT:-17433}:8000"
+      - "8020:8020"
     volumes:
       - .:/app
       - /app/.venv

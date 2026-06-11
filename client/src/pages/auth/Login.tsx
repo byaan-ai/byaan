@@ -267,22 +267,25 @@ export default function Login() {
           )}
 
           {/* Google Sign-In Button */}
-          <div className={features.local_auth_enabled ? "mb-6" : ""}>
-            <GoogleSignInButton
-              onSuccess={handleGoogleSuccess}
-              onError={handleGoogleError}
-              disabled={isSubmitting || isGoogleLoading}
-            />
-          </div>
+          {features.google_oauth_enabled && (
+            <div className={features.local_auth_enabled ? "mb-6" : ""}>
+              <GoogleSignInButton
+                onSuccess={handleGoogleSuccess}
+                onError={handleGoogleError}
+                disabled={isSubmitting || isGoogleLoading}
+              />
+            </div>
+          )}
 
           {features.local_auth_enabled && (
             <>
-              {/* Divider */}
-              <div className="flex items-center mb-6">
-                <div className="flex-1 border-t border-gray-200"></div>
-                <span className="px-4 text-sm text-gray-500">or</span>
-                <div className="flex-1 border-t border-gray-200"></div>
-              </div>
+              {features.google_oauth_enabled && (
+                <div className="flex items-center mb-6">
+                  <div className="flex-1 border-t border-gray-200"></div>
+                  <span className="px-4 text-sm text-gray-500">or</span>
+                  <div className="flex-1 border-t border-gray-200"></div>
+                </div>
+              )}
 
               {/* Login form */}
               <form onSubmit={handleSubmit}>
