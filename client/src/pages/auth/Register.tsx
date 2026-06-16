@@ -9,7 +9,7 @@ export default function Register() {
   const navigate = useNavigate()
   const location = useLocation()
   const [searchParams] = useSearchParams()
-  const { register, login, googleLogin, authError, setAuthError, isLoading, isAuthenticated, fetchTenants, switchTenant } = useStore()
+  const { register, googleLogin, authError, setAuthError, isLoading, isAuthenticated, fetchTenants, switchTenant } = useStore()
 
   // Check if user is coming from an invitation
   const isFromInvitation = searchParams.get('from') === 'invitation'
