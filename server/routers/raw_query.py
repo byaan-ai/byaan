@@ -170,6 +170,14 @@ async def execute_raw_query(
                     connection_obj=connection_obj,
                     limit=request.limit,
                 )
+            elif db_type == "databricks":
+                result = await AsyncRawQueryService.execute_raw_query(
+                    query=request.query,
+                    db_type="databricks",
+                    connection_id=connection.id,
+                    connection_obj=connection_obj,
+                    limit=request.limit,
+                )
             elif db_type in DIALECT_MAP:
                 dialect = DIALECT_MAP.get(db_type)
                 safe_query = validate_sql_query(request.query, dialect=dialect)
@@ -307,6 +315,13 @@ async def export_raw_query_csv(
                     result = await AsyncRawQueryService.execute_raw_query(
                         query=request.query,
                         db_type="dynamodb",
+                        connection_id=connection.id,
+                        connection_obj=connection_obj,
+                    )
+                elif db_type == "databricks":
+                    result = await AsyncRawQueryService.execute_raw_query(
+                        query=request.query,
+                        db_type="databricks",
                         connection_id=connection.id,
                         connection_obj=connection_obj,
                     )

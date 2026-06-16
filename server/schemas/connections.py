@@ -57,3 +57,70 @@ class ConnectionListItem(BaseModel):
 class ConnectionListSimpleResponse(BaseModel):
     items: list[ConnectionListItem]
     total: int
+
+
+class DatabricksDiscoverRequest(BaseModel):
+    server_hostname: str
+    access_token: str
+    http_path: str | None = None
+
+
+class DatabricksCatalog(BaseModel):
+    name: str
+    schemas: list[str]
+
+
+class DatabricksWarehouse(BaseModel):
+    id: str
+    name: str | None = None
+    state: str | None = None
+    size: str | None = None
+    http_path: str
+
+
+class DatabricksDiscoverResponse(BaseModel):
+    catalogs: list[DatabricksCatalog]
+    warehouses: list[DatabricksWarehouse] = []
+
+
+class DatabricksOAuthStartRequest(BaseModel):
+    server_hostname: str
+
+
+class DatabricksOAuthStartResponse(BaseModel):
+    auth_url: str
+    state: str
+    redirect_uri: str
+
+
+class DatabricksOAuthCancelRequest(BaseModel):
+    state: str
+
+
+class DatabricksOAuthTokens(BaseModel):
+    access_token: str
+    refresh_token: str | None = None
+    expires_at: int
+    scope: str | None = None
+    server_hostname: str
+
+
+class DatabricksOAuthResultResponse(BaseModel):
+    status: str
+    tokens: DatabricksOAuthTokens | None = None
+
+
+class DatabricksWarehousesRequest(BaseModel):
+    server_hostname: str
+    access_token: str
+
+
+class DatabricksOAuthSettingsRequest(BaseModel):
+    client_id: str
+    client_secret: str
+
+
+class DatabricksOAuthSettingsResponse(BaseModel):
+    client_id: str
+    client_secret_configured: bool
+    redirect_uri: str

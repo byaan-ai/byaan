@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from 'react'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '../components/ui/button'
 import { Badge } from '../components/ui/badge'
@@ -6,14 +6,18 @@ import { Card } from '../components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
-import { Trash2, Loader2, Database, Pencil, Upload, FileText, X, Search, Link as LinkIcon, Leaf, Cylinder, Server, HardDrive, Users, Lock, Cloud } from 'lucide-react'
-import { ApiService, type ConnectionCreateRequest, type ConnectionType, type Datasource } from '../services/api'
+import { Trash2, Loader2, Database, Pencil, Upload, FileText, X, Search, Link as LinkIcon, Leaf, Cylinder, Server, HardDrive, Users, Lock, Cloud, ChevronDown, ChevronRight, CheckCircle2, AlertCircle } from 'lucide-react'
+import { ApiService, type ConnectionCreateRequest, type ConnectionType, type Datasource, type DatabricksCatalog, type DatabricksOAuthTokens, type DatabricksWarehouse } from '../services/api'
+
+type DatabricksPair = { catalog: string; schema: string | null }
+const pairKey = (p: DatabricksPair) => `${p.catalog}::${p.schema ?? '*'}`
 import { useDatasources, useCreateDBConnection, useDeleteDBConnection, useUploadMultipleFiles, useUploadFromURL } from '../hooks/useDBConnections'
 import { showToast } from '../utils/toast'
 import { useStore } from '../stores/useStore'
 import { useScopes } from '../hooks/useScopes'
 import { useAppConfig } from '../hooks/useAppConfig'
-import { isTauriApp } from '../lib/tauri-api'
+import { DatabricksOAuthSettings } from '../components/databricks/DatabricksOAuthSettings'
+import { isTauriApp, openExternalUrl } from '../lib/tauri-api'
 
 export default function DatabasesPage() {
   const queryClient = useQueryClient()
@@ -64,9 +68,60 @@ export default function DatabasesPage() {
     secretAccessKey: '',
     endpointUrl: '',
     queryMode: 'partiql' as 'partiql' | 'native',
+    serverHostname: '',
+    httpPath: '',
+    accessToken: '',
+    catalog: '',
+    databricksSchema: '',
   })
 
   const [togglingVisibility, setTogglingVisibility] = useState<string | null>(null)
+
+  // Databricks 2-step wizard state
+  const [databricksStep, setDatabricksStep] = useState<1 | 2>(1)
+  const [discoveredCatalogs, setDiscoveredCatalogs] = useState<DatabricksCatalog[] | null>(null)
+  const [discovering, setDiscovering] = useState(false)
+  const [discoverError, setDiscoverError] = useState<string | null>(null)
+  const [selectedPairs, setSelectedPairs] = useState<DatabricksPair[]>([])
+  const [expandedCatalogs, setExpandedCatalogs] = useState<Set<string>>(new Set())
+  const [databricksNamePrefix, setDatabricksNamePrefix] = useState('')
+  const [batchProgress, setBatchProgress] = useState<{
+    done: number
+    total: number
+    failures: Array<{ pair: DatabricksPair; error: string }>
+  } | null>(null)
+  const [databricksCatalogFilter, setDatabricksCatalogFilter] = useState('')
+
+  const [databricksOAuthConfigured, setDatabricksOAuthConfigured] = useState<boolean>(!isSelfHosted)
+  const [databricksOAuthCanConfigure, setDatabricksOAuthCanConfigure] = useState<boolean>(false)
+  const [showManageDatabricksOAuth, setShowManageDatabricksOAuth] = useState<boolean>(false)
+  const [oauthTokens, setOauthTokens] = useState<DatabricksOAuthTokens | null>(null)
+  const oauthStateRef = useRef<string | null>(null)
+  const oauthAbortRef = useRef<AbortController | null>(null)
+  const [oauthSigningIn, setOauthSigningIn] = useState(false)
+  const [oauthError, setOauthError] = useState<string | null>(null)
+  const [warehouses, setWarehouses] = useState<DatabricksWarehouse[] | null>(null)
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState<string | null>(null)
+  const [loadingWarehouses, setLoadingWarehouses] = useState(false)
+
+  const refreshDatabricksAuthStatus = () => {
+    ApiService.getDatabricksAuthStatus()
+      .then(s => {
+        setDatabricksOAuthConfigured(!!s.configured)
+        setDatabricksOAuthCanConfigure(!!s.can_configure)
+      })
+      .catch(() => {
+        setDatabricksOAuthConfigured(!isSelfHosted)
+        setDatabricksOAuthCanConfigure(false)
+      })
+  }
+
+  useEffect(() => {
+    refreshDatabricksAuthStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const databricksTileVisible = !isSelfHosted || databricksOAuthConfigured || databricksOAuthCanConfigure
 
   // Use React Query hooks
   const { data: datasourcesResponse, isLoading: loading, error } = useDatasources()
@@ -89,6 +144,8 @@ export default function DatabasesPage() {
         return 'SQL Server'
       case 'dynamodb':
         return 'DynamoDB'
+      case 'databricks':
+        return 'Databricks'
       case 'csv':
         return 'CSV File'
       case 'excel':
@@ -141,6 +198,14 @@ export default function DatabasesPage() {
 
   // Validation for create form
   const isCreateFormValid = useMemo(() => {
+    // Databricks wizard uses its own validation (name is auto-generated server-side).
+    if (selectedType === 'databricks') {
+      const signedIn = !!oauthTokens?.access_token
+      const warehousePicked = !!selectedWarehouseId
+      if (databricksStep === 1) return signedIn && warehousePicked
+      return signedIn && warehousePicked && selectedPairs.length > 0
+    }
+
     // Connection name is always required
     if (!connectionConfig.name.trim()) return false
 
@@ -165,7 +230,240 @@ export default function DatabasesPage() {
         connectionConfig.password.trim().length > 0
       )
     }
-  }, [selectedType, connectionConfig])
+  }, [selectedType, connectionConfig, databricksStep, selectedPairs, oauthTokens, selectedWarehouseId])
+
+  const resetDatabricksWizard = () => {
+    if (oauthAbortRef.current) {
+      oauthAbortRef.current.abort()
+      oauthAbortRef.current = null
+    }
+    const pendingState = oauthStateRef.current
+    if (pendingState) {
+      ApiService.cancelDatabricksOAuth(pendingState).catch(() => {})
+    }
+    oauthStateRef.current = null
+    setDatabricksStep(1)
+    setDiscoveredCatalogs(null)
+    setDiscovering(false)
+    setDiscoverError(null)
+    setSelectedPairs([])
+    setExpandedCatalogs(new Set())
+    setDatabricksNamePrefix('')
+    setBatchProgress(null)
+    setDatabricksCatalogFilter('')
+    setOauthTokens(null)
+    setOauthError(null)
+    setOauthSigningIn(false)
+    setWarehouses(null)
+    setSelectedWarehouseId(null)
+    setLoadingWarehouses(false)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (oauthAbortRef.current) {
+        oauthAbortRef.current.abort()
+        oauthAbortRef.current = null
+      }
+      const pendingState = oauthStateRef.current
+      if (pendingState) {
+        ApiService.cancelDatabricksOAuth(pendingState).catch(() => {})
+        oauthStateRef.current = null
+      }
+    }
+  }, [])
+
+  const loadWarehouses = async (host: string, token: string) => {
+    setLoadingWarehouses(true)
+    try {
+      const ws = await ApiService.listDatabricksWarehouses(host, token)
+      setWarehouses(ws)
+      if (ws.length === 1) setSelectedWarehouseId(ws[0].id)
+    } catch (err: any) {
+      setOauthError(err?.message || 'Failed to list warehouses')
+    } finally {
+      setLoadingWarehouses(false)
+    }
+  }
+
+  const normalizeDatabricksHost = (raw: string): string => {
+    let h = raw.trim()
+    const schemeIdx = h.indexOf('://')
+    if (schemeIdx !== -1) h = h.slice(schemeIdx + 3)
+    h = h.split('/')[0].split('?')[0]
+    return h.trim().replace(/\.+$/, '')
+  }
+
+  const handleCancelDatabricksSignIn = () => {
+    const pendingState = oauthStateRef.current
+    if (oauthAbortRef.current) {
+      oauthAbortRef.current.abort()
+      oauthAbortRef.current = null
+    }
+    if (pendingState) {
+      ApiService.cancelDatabricksOAuth(pendingState).catch(() => {})
+    }
+    oauthStateRef.current = null
+    setOauthSigningIn(false)
+    setOauthError(null)
+  }
+
+  const handleDatabricksSignIn = async () => {
+    const normalizedHost = normalizeDatabricksHost(connectionConfig.serverHostname)
+    if (!normalizedHost) {
+      setOauthError('Enter your Databricks workspace URL first')
+      return
+    }
+    if (normalizedHost !== connectionConfig.serverHostname) {
+      setConnectionConfig(prev => ({ ...prev, serverHostname: normalizedHost }))
+    }
+    if (oauthAbortRef.current) {
+      oauthAbortRef.current.abort()
+    }
+    const controller = new AbortController()
+    oauthAbortRef.current = controller
+    const { signal } = controller
+    setOauthError(null)
+    setOauthSigningIn(true)
+    try {
+      const { auth_url, state } = await ApiService.startDatabricksOAuth(normalizedHost)
+      if (signal.aborted) return
+      oauthStateRef.current = state
+      await openExternalUrl(auth_url)
+      if (signal.aborted) return
+
+      const sleep = (ms: number) => new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signal.removeEventListener('abort', onAbort)
+          resolve()
+        }, ms)
+        const onAbort = () => {
+          clearTimeout(timer)
+          reject(new DOMException('aborted', 'AbortError'))
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+      })
+
+      const deadline = Date.now() + 5 * 60 * 1000
+      while (Date.now() < deadline) {
+        await sleep(2000)
+        if (signal.aborted) return
+        try {
+          const res = await ApiService.pollDatabricksOAuthResult(state)
+          if (signal.aborted) return
+          if (res.status === 'success' && res.tokens) {
+            oauthStateRef.current = null
+            setOauthTokens(res.tokens)
+            setConnectionConfig(prev => ({ ...prev, serverHostname: res.tokens!.server_hostname }))
+            await loadWarehouses(res.tokens.server_hostname, res.tokens.access_token)
+            return
+          }
+        } catch (err: any) {
+          if (signal.aborted) return
+          console.warn('OAuth poll failed:', err?.message)
+        }
+      }
+      if (!signal.aborted) setOauthError('Sign-in timed out. Please try again.')
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || signal.aborted) return
+      setOauthError(err?.message || 'Failed to start Databricks sign-in')
+    } finally {
+      if (!signal.aborted) {
+        setOauthSigningIn(false)
+      }
+      if (oauthAbortRef.current === controller) {
+        oauthAbortRef.current = null
+      }
+    }
+  }
+
+  const togglePair = (pair: DatabricksPair) => {
+    setSelectedPairs(prev => {
+      const key = pairKey(pair)
+      const exists = prev.some(p => pairKey(p) === key)
+      if (exists) return prev.filter(p => pairKey(p) !== key)
+      const cleaned = pair.schema === null
+        ? prev.filter(p => p.catalog !== pair.catalog)
+        : prev.filter(p => !(p.catalog === pair.catalog && p.schema === null))
+      return [...cleaned, pair]
+    })
+  }
+
+  const isPairSelected = (pair: DatabricksPair) =>
+    selectedPairs.some(p => pairKey(p) === pairKey(pair))
+
+  const handleDatabricksDiscover = async () => {
+    if (!oauthTokens || !selectedWarehouseId) return
+    const warehouse = warehouses?.find(w => w.id === selectedWarehouseId)
+    if (!warehouse) return
+    setDiscoverError(null)
+    setDiscovering(true)
+    try {
+      const res = await ApiService.discoverDatabricks({
+        server_hostname: oauthTokens.server_hostname,
+        access_token: oauthTokens.access_token,
+        http_path: warehouse.http_path,
+      })
+      setDiscoveredCatalogs(res.catalogs)
+      setConnectionConfig(prev => ({ ...prev, httpPath: warehouse.http_path }))
+      setDatabricksStep(2)
+    } catch (err: any) {
+      setDiscoverError(err?.message || 'Failed to discover Databricks catalogs')
+    } finally {
+      setDiscovering(false)
+    }
+  }
+
+  const handleDatabricksBatchCreate = async () => {
+    if (selectedPairs.length === 0) return
+    const pairs = selectedPairs
+    const failures: Array<{ pair: DatabricksPair; error: string }> = []
+    let done = 0
+    setBatchProgress({ done: 0, total: pairs.length, failures: [] })
+
+    for (const pair of pairs) {
+      try {
+        const prefix = databricksNamePrefix.trim()
+        const suffix = `${pair.catalog}.${pair.schema ?? '*'}`
+        const name = prefix ? `${prefix} · ${suffix}` : ''
+        if (!oauthTokens) throw new Error('Not signed in to Databricks')
+        await ApiService.createConnection({
+          type: 'databricks',
+          name: name || undefined,
+          connection_obj: {
+            server_hostname: oauthTokens.server_hostname,
+            http_path: connectionConfig.httpPath,
+            catalog: pair.catalog,
+            schema: pair.schema ?? undefined,
+            oauth: {
+              access_token: oauthTokens.access_token,
+              refresh_token: oauthTokens.refresh_token,
+              expires_at: oauthTokens.expires_at,
+              scope: oauthTokens.scope,
+              server_hostname: oauthTokens.server_hostname,
+            },
+          },
+        })
+      } catch (err: any) {
+        failures.push({ pair, error: err?.message || 'Unknown error' })
+      }
+      done += 1
+      setBatchProgress({ done, total: pairs.length, failures: [...failures] })
+    }
+
+    const succeededCount = pairs.length - failures.length
+    if (succeededCount > 0) {
+      queryClient.invalidateQueries({ queryKey: ['datasources'] })
+      showToast.success(`Created ${succeededCount} Databricks connection${succeededCount !== 1 ? 's' : ''}`)
+    }
+    if (failures.length === 0) {
+      setShowCreateDialog(false)
+      resetForm()
+    } else {
+      setSelectedPairs(failures.map(f => f.pair))
+      showToast.error(`${failures.length} connection${failures.length !== 1 ? 's' : ''} failed`)
+    }
+  }
 
   const handleCreateConnection = async () => {
     // Validate connection name
@@ -193,6 +491,24 @@ export default function DatabasesPage() {
         secret_access_key: connectionConfig.secretAccessKey,
         endpoint_url: connectionConfig.endpointUrl || '',
         query_mode: connectionConfig.queryMode,
+      }
+    } else if (selectedType === 'databricks') {
+      if (!oauthTokens) {
+        alert('Sign in to Databricks first')
+        return
+      }
+      connectionObj = {
+        server_hostname: oauthTokens.server_hostname,
+        http_path: connectionConfig.httpPath,
+        catalog: connectionConfig.catalog || undefined,
+        schema: connectionConfig.databricksSchema || undefined,
+        oauth: {
+          access_token: oauthTokens.access_token,
+          refresh_token: oauthTokens.refresh_token,
+          expires_at: oauthTokens.expires_at,
+          scope: oauthTokens.scope,
+          server_hostname: oauthTokens.server_hostname,
+        },
       }
     } else {
       // PostgreSQL, MySQL, MSSQL - send components, backend builds URL with driver
@@ -234,9 +550,15 @@ export default function DatabasesPage() {
       secretAccessKey: '',
       endpointUrl: '',
       queryMode: 'partiql',
+      serverHostname: '',
+      httpPath: '',
+      accessToken: '',
+      catalog: '',
+      databricksSchema: '',
     })
     resetCSVForm()
     resetUploadForm()
+    resetDatabricksWizard()
   }
 
   const handleDeleteClick = (datasource: Datasource) => {
@@ -303,6 +625,7 @@ export default function DatabasesPage() {
   }
 
   const handleTypeChange = (newType: ConnectionType | 'upload' | 'url') => {
+    resetDatabricksWizard()
     setSelectedType(newType)
     const defaultPorts: Record<string, string> = {
       pg: '5432',
@@ -934,6 +1257,22 @@ export default function DatabasesPage() {
                     <Cloud className="w-5 h-5 flex-shrink-0 text-amber-400" />
                     <span className="text-sm font-medium">DynamoDB</span>
                   </button>
+
+                  {/* Databricks: hidden for non-admin team members until admin configures OAuth */}
+                  {databricksTileVisible && (
+                    <button
+                      onClick={() => handleTypeChange('databricks')}
+                      disabled={createMutation.isPending || uploadMultipleFilesMutation.isPending || uploadFromURLMutation.isPending}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md transition-all text-left ${
+                        selectedType === 'databricks'
+                          ? 'bg-brand-orange/10 text-white border-l-3 border-brand-orange'
+                          : 'text-gray-400 hover:text-white hover:bg-[#2a2a2a]'
+                      } ${createMutation.isPending || uploadMultipleFilesMutation.isPending || uploadFromURLMutation.isPending ? 'opacity-50 cursor-not-allowed' : ''}`}
+                    >
+                      <Database className="w-5 h-5 flex-shrink-0 text-red-400" />
+                      <span className="text-sm font-medium">Databricks</span>
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -941,26 +1280,28 @@ export default function DatabasesPage() {
               <div className="flex-1 flex flex-col overflow-hidden">
                 <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
                   <div className="space-y-4">
-                    {/* Connection/Datasource Name - Always shown */}
-                    <div>
-                      <Label htmlFor="connection-name" className="text-white">
-                        {selectedType === 'upload' || selectedType === 'url' ? 'Datasource Name' : 'Connection Name'} <span className="text-red-400">*</span>
-                      </Label>
-                      <Input
-                        id="connection-name"
-                        value={selectedType === 'upload' || selectedType === 'url' ? uploadConnectionName : connectionConfig.name}
-                        onChange={(e) => {
-                          if (selectedType === 'upload' || selectedType === 'url') {
-                            setUploadConnectionName(e.target.value)
-                          } else {
-                            setConnectionConfig(prev => ({ ...prev, name: e.target.value }))
-                          }
-                        }}
-                        placeholder={selectedType === 'upload' || selectedType === 'url' ? 'My File Datasource' : 'My Database Connection'}
-                        disabled={createMutation.isPending || uploadMultipleFilesMutation.isPending || uploadFromURLMutation.isPending}
-                        className="mt-1 bg-[#1a1a1a] border-[#555555] text-white placeholder-[#888888]"
-                      />
-                    </div>
+                    {/* Connection/Datasource Name - Always shown (hidden for Databricks wizard which auto-names) */}
+                    {selectedType !== 'databricks' && (
+                      <div>
+                        <Label htmlFor="connection-name" className="text-white">
+                          {selectedType === 'upload' || selectedType === 'url' ? 'Datasource Name' : 'Connection Name'} <span className="text-red-400">*</span>
+                        </Label>
+                        <Input
+                          id="connection-name"
+                          value={selectedType === 'upload' || selectedType === 'url' ? uploadConnectionName : connectionConfig.name}
+                          onChange={(e) => {
+                            if (selectedType === 'upload' || selectedType === 'url') {
+                              setUploadConnectionName(e.target.value)
+                            } else {
+                              setConnectionConfig(prev => ({ ...prev, name: e.target.value }))
+                            }
+                          }}
+                          placeholder={selectedType === 'upload' || selectedType === 'url' ? 'My File Datasource' : 'My Database Connection'}
+                          disabled={createMutation.isPending || uploadMultipleFilesMutation.isPending || uploadFromURLMutation.isPending}
+                          className="mt-1 bg-[#1a1a1a] border-[#555555] text-white placeholder-[#888888]"
+                        />
+                      </div>
+                    )}
 
                     {/* Upload Files Form */}
                     {selectedType === 'upload' && (
@@ -1308,6 +1649,309 @@ export default function DatabasesPage() {
                       </div>
                     )}
 
+                    {selectedType === 'databricks' && (
+                      <div className="mb-4 flex items-center gap-3">
+                        <div className="flex items-center gap-2 flex-1">
+                          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${databricksStep === 1 ? 'bg-brand-orange text-white' : 'bg-green-600/20 text-green-400 border border-green-600/40'}`}>
+                            {databricksStep === 1 ? '1' : <CheckCircle2 className="w-4 h-4" />}
+                          </div>
+                          <span className={`text-sm font-medium ${databricksStep === 1 ? 'text-white' : 'text-gray-400'}`}>Credentials</span>
+                        </div>
+                        <div className={`h-px flex-1 ${databricksStep === 2 ? 'bg-brand-orange' : 'bg-[#444444]'}`} />
+                        <div className="flex items-center gap-2 flex-1 justify-end">
+                          <span className={`text-sm font-medium ${databricksStep === 2 ? 'text-white' : 'text-gray-500'}`}>Pick catalogs & schemas</span>
+                          <div className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-semibold ${databricksStep === 2 ? 'bg-brand-orange text-white' : 'bg-[#2a2a2a] text-gray-500 border border-[#444444]'}`}>2</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedType === 'databricks' && databricksStep === 1 && isSelfHosted && !databricksOAuthConfigured && !databricksOAuthCanConfigure && (
+                      <div className="bg-amber-900/20 border border-amber-700/40 rounded-md p-3 text-sm text-amber-200">
+                        Databricks OAuth isn't configured for this workspace. Ask your admin to register a custom OAuth app in the Databricks Account Console and add the credentials in Settings.
+                      </div>
+                    )}
+
+                    {selectedType === 'databricks' && databricksStep === 1 && isSelfHosted && !databricksOAuthConfigured && databricksOAuthCanConfigure && (
+                      <div className="space-y-3">
+                        <div className="bg-amber-900/20 border border-amber-700/40 rounded-md p-3 text-sm text-amber-200">
+                          Databricks OAuth isn't configured yet. Register Byaan as a custom OAuth app in the Databricks Account Console and paste the credentials below. After saving, every user can sign in with Databricks.
+                        </div>
+                        <DatabricksOAuthSettings onConfigChanged={refreshDatabricksAuthStatus} />
+                      </div>
+                    )}
+
+                    {selectedType === 'databricks' && databricksStep === 1 && databricksOAuthConfigured && (
+                      <div className="space-y-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <p className="text-xs text-gray-400 flex-1">
+                            Sign in with your Databricks account. Byaan will list available warehouses, then catalogs and schemas to pick from.
+                          </p>
+                          {databricksOAuthCanConfigure && (
+                            <button
+                              type="button"
+                              onClick={() => setShowManageDatabricksOAuth(v => !v)}
+                              className="text-xs text-brand-orange hover:underline whitespace-nowrap"
+                            >
+                              {showManageDatabricksOAuth ? 'Hide OAuth settings' : 'Manage OAuth credentials'}
+                            </button>
+                          )}
+                        </div>
+                        {showManageDatabricksOAuth && databricksOAuthCanConfigure && (
+                          <DatabricksOAuthSettings onConfigChanged={refreshDatabricksAuthStatus} />
+                        )}
+                        <div>
+                          <Label htmlFor="serverHostname" className="text-white">Workspace URL <span className="text-red-400">*</span></Label>
+                          <Input
+                            id="serverHostname"
+                            placeholder="adb-1234.azuredatabricks.net"
+                            value={connectionConfig.serverHostname}
+                            onChange={(e) => setConnectionConfig(prev => ({ ...prev, serverHostname: e.target.value }))}
+                            disabled={oauthSigningIn || !!oauthTokens}
+                            className="mt-1 bg-[#1a1a1a] border-[#555555] text-white font-mono text-sm"
+                          />
+                          <p className="text-xs text-gray-400 mt-1">
+                            Enter the <strong>Server hostname</strong> only — no <code>https://</code>, no path. Example: <code>adb-1234.azuredatabricks.net</code>.
+                          </p>
+                        </div>
+
+                        {!oauthTokens ? (
+                          oauthSigningIn ? (
+                            <div className="flex gap-2">
+                              <Button
+                                disabled
+                                className="flex-1 bg-brand-orange/70 hover:bg-brand-orange/70 cursor-default"
+                              >
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Waiting for sign-in…
+                              </Button>
+                              <Button
+                                type="button"
+                                onClick={handleCancelDatabricksSignIn}
+                                className="bg-[#2a2a2a] hover:bg-[#3a3a3a] border border-[#555555] text-white"
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+                          ) : (
+                            <Button
+                              onClick={handleDatabricksSignIn}
+                              disabled={!connectionConfig.serverHostname.trim()}
+                              className="w-full bg-brand-orange hover:bg-brand-orange/90"
+                            >
+                              Sign in with Databricks
+                            </Button>
+                          )
+                        ) : (
+                          <div className="flex items-start gap-2 bg-green-900/20 border border-green-700/50 rounded-md p-3 text-sm text-green-200">
+                            <CheckCircle2 className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                            <div className="flex-1">
+                              <div className="font-medium">Signed in to {oauthTokens.server_hostname}</div>
+                              <button
+                                type="button"
+                                onClick={resetDatabricksWizard}
+                                className="text-xs text-green-300/80 hover:underline mt-0.5"
+                              >
+                                Sign out
+                              </button>
+                            </div>
+                          </div>
+                        )}
+
+                        {oauthTokens && (
+                          <div>
+                            <Label className="text-white">SQL Warehouse <span className="text-red-400">*</span></Label>
+                            {loadingWarehouses ? (
+                              <div className="mt-2 flex items-center gap-2 text-sm text-gray-400">
+                                <Loader2 className="w-4 h-4 animate-spin" /> Loading warehouses…
+                              </div>
+                            ) : warehouses && warehouses.length > 0 ? (
+                              <div className="mt-1 border border-[#444444] rounded-md divide-y divide-[#3a3a3a] max-h-[220px] overflow-y-auto custom-scrollbar">
+                                {warehouses.map(w => (
+                                  <button
+                                    key={w.id}
+                                    type="button"
+                                    onClick={() => setSelectedWarehouseId(w.id)}
+                                    className={`w-full text-left px-3 py-2 text-sm hover:bg-[#2a2a2a] ${selectedWarehouseId === w.id ? 'bg-[#2a2a2a] border-l-2 border-brand-orange' : ''}`}
+                                  >
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-white font-medium">{w.name || w.id}</span>
+                                      <span className="text-xs text-gray-400">{w.state}{w.size ? ` · ${w.size}` : ''}</span>
+                                    </div>
+                                    <div className="text-xs text-gray-500 font-mono mt-0.5">{w.http_path}</div>
+                                  </button>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="mt-1 p-3 text-sm text-gray-400 border border-[#444444] rounded-md">
+                                No SQL warehouses visible to this account.
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {(oauthError || discoverError) && (
+                          <div className="flex items-start gap-2 bg-red-900/20 border border-red-700/50 rounded-md p-3 text-sm text-red-200">
+                            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                            <span>{oauthError || discoverError}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {selectedType === 'databricks' && databricksStep === 2 && discoveredCatalogs && (
+                      <div className="space-y-4">
+                        {batchProgress ? (
+                          <div className="bg-[#1a1a1a] border border-[#444444] rounded-lg p-5 space-y-4">
+                            <div className="flex items-center gap-3">
+                              {batchProgress.done < batchProgress.total ? (
+                                <Loader2 className="w-5 h-5 animate-spin text-brand-orange" />
+                              ) : batchProgress.failures.length === 0 ? (
+                                <CheckCircle2 className="w-5 h-5 text-green-400" />
+                              ) : (
+                                <AlertCircle className="w-5 h-5 text-red-400" />
+                              )}
+                              <div className="flex-1">
+                                <div className="text-sm text-white font-medium">
+                                  {batchProgress.done < batchProgress.total
+                                    ? 'Creating connections…'
+                                    : batchProgress.failures.length === 0
+                                      ? 'All connections created'
+                                      : `${batchProgress.total - batchProgress.failures.length} of ${batchProgress.total} created · ${batchProgress.failures.length} failed`}
+                                </div>
+                                <div className="text-xs text-gray-400 mt-0.5">{batchProgress.done} / {batchProgress.total} processed</div>
+                              </div>
+                            </div>
+                            <div className="w-full h-2 bg-[#333333] rounded overflow-hidden">
+                              <div
+                                className={`h-2 rounded transition-all ${batchProgress.failures.length > 0 && batchProgress.done === batchProgress.total ? 'bg-red-500' : 'bg-brand-orange'}`}
+                                style={{ width: `${(batchProgress.done / batchProgress.total) * 100}%` }}
+                              />
+                            </div>
+                            {batchProgress.failures.length > 0 && (
+                              <div className="space-y-1 max-h-[180px] overflow-y-auto custom-scrollbar pr-1">
+                                {batchProgress.failures.map((f, i) => (
+                                  <div key={i} className="flex items-start gap-2 bg-red-900/20 border border-red-700/40 rounded px-2 py-1.5 text-xs">
+                                    <AlertCircle className="w-3 h-3 mt-0.5 text-red-400 flex-shrink-0" />
+                                    <div className="flex-1">
+                                      <div className="font-mono text-red-200">{f.pair.catalog}.{f.pair.schema ?? '*'}</div>
+                                      <div className="text-red-300/80">{f.error}</div>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <Label htmlFor="databricksNamePrefix" className="text-white text-sm">Name prefix <span className="text-gray-500">(optional)</span></Label>
+                                <Input
+                                  id="databricksNamePrefix"
+                                  placeholder="My Workspace"
+                                  value={databricksNamePrefix}
+                                  onChange={(e) => setDatabricksNamePrefix(e.target.value)}
+                                  className="mt-1 bg-[#1a1a1a] border-[#555555] text-white text-sm"
+                                />
+                              </div>
+                              <div>
+                                <Label htmlFor="databricksFilter" className="text-white text-sm">Filter catalogs</Label>
+                                <div className="relative mt-1">
+                                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-500" />
+                                  <Input
+                                    id="databricksFilter"
+                                    placeholder="Search…"
+                                    value={databricksCatalogFilter}
+                                    onChange={(e) => setDatabricksCatalogFilter(e.target.value)}
+                                    className="bg-[#1a1a1a] border-[#555555] text-white text-sm pl-8"
+                                  />
+                                </div>
+                              </div>
+                            </div>
+                            <p className="text-xs text-gray-400 -mt-2">Each pick becomes its own connection sharing this access token. Rotate later by editing each.</p>
+
+                            <div className="border border-[#444444] rounded-md divide-y divide-[#3a3a3a] max-h-[300px] overflow-y-auto custom-scrollbar">
+                              {discoveredCatalogs.length === 0 && (
+                                <div className="p-6 text-sm text-gray-400 text-center">No catalogs visible to this token.</div>
+                              )}
+                              {discoveredCatalogs
+                                .filter(c => !databricksCatalogFilter.trim() || c.name.toLowerCase().includes(databricksCatalogFilter.toLowerCase().trim()))
+                                .map(cat => {
+                                  const isExpanded = expandedCatalogs.has(cat.name)
+                                  const allPair: DatabricksPair = { catalog: cat.name, schema: null }
+                                  const allSelected = isPairSelected(allPair)
+                                  const specificCount = selectedPairs.filter(p => p.catalog === cat.name && p.schema !== null).length
+                                  const isCatalogActive = allSelected || specificCount > 0
+                                  return (
+                                    <div key={cat.name} className={`${isCatalogActive ? 'bg-brand-orange/5' : 'bg-[#1a1a1a]'} transition-colors`}>
+                                      <div className="flex items-center gap-2 px-3 py-2.5">
+                                        <button
+                                          type="button"
+                                          onClick={() => setExpandedCatalogs(prev => {
+                                            const next = new Set(prev)
+                                            if (next.has(cat.name)) next.delete(cat.name)
+                                            else next.add(cat.name)
+                                            return next
+                                          })}
+                                          className="text-gray-400 hover:text-white"
+                                        >
+                                          {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                                        </button>
+                                        <Database className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
+                                        <span className="text-white text-sm font-mono flex-1 truncate">{cat.name}</span>
+                                        {specificCount > 0 && !allSelected && (
+                                          <span className="text-[10px] uppercase tracking-wide bg-brand-orange/15 text-brand-orange px-1.5 py-0.5 rounded">{specificCount} picked</span>
+                                        )}
+                                        <label className="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer hover:text-white">
+                                          <input
+                                            type="checkbox"
+                                            checked={allSelected}
+                                            onChange={() => togglePair(allPair)}
+                                            className="accent-brand-orange"
+                                          />
+                                          All ({cat.schemas.length})
+                                        </label>
+                                      </div>
+                                      {isExpanded && (
+                                        <div className="px-3 pb-2.5 pl-11 grid grid-cols-2 gap-x-3 gap-y-1">
+                                          {cat.schemas.length === 0 && <div className="text-xs text-gray-500 col-span-2">No accessible schemas.</div>}
+                                          {cat.schemas.map(s => {
+                                            const pair: DatabricksPair = { catalog: cat.name, schema: s }
+                                            const checked = isPairSelected(pair)
+                                            return (
+                                              <label key={s} className={`flex items-center gap-2 text-sm cursor-pointer py-0.5 ${allSelected ? 'text-gray-500' : checked ? 'text-brand-orange' : 'text-gray-200 hover:text-white'}`}>
+                                                <input
+                                                  type="checkbox"
+                                                  checked={checked}
+                                                  disabled={allSelected}
+                                                  onChange={() => togglePair(pair)}
+                                                  className="accent-brand-orange"
+                                                />
+                                                <span className="font-mono truncate">{s}</span>
+                                              </label>
+                                            )
+                                          })}
+                                        </div>
+                                      )}
+                                    </div>
+                                  )
+                                })}
+                            </div>
+
+                            <div className="flex items-center justify-between bg-[#1a1a1a] border border-[#444444] rounded-md px-3 py-2 text-sm">
+                              <span className="text-gray-300">
+                                {selectedPairs.length === 0
+                                  ? <span className="text-gray-500">No selection yet — pick at least one catalog or schema</span>
+                                  : <><span className="text-white font-semibold">{selectedPairs.length}</span> connection{selectedPairs.length !== 1 ? 's' : ''} will be created</>}
+                              </span>
+                              {selectedPairs.length > 0 && (
+                                <button type="button" onClick={() => setSelectedPairs([])} className="text-xs text-gray-400 hover:text-white">Clear</button>
+                              )}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    )}
+
                     {(selectedType === 'pg' || selectedType === 'mysql' || selectedType === 'mssql') && (
                       <div className="space-y-4">
                         <div className="grid grid-cols-2 gap-3">
@@ -1379,6 +2023,49 @@ export default function DatabasesPage() {
 
                 {/* Action Buttons */}
                 <div className="border-t border-[#444444] p-6 flex justify-end gap-2">
+                  {selectedType === 'databricks' ? (
+                    <>
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          if (batchProgress && batchProgress.done < batchProgress.total) return
+                          if (databricksStep === 2) {
+                            setDatabricksStep(1)
+                            setBatchProgress(null)
+                          } else {
+                            setShowCreateDialog(false)
+                            resetForm()
+                          }
+                        }}
+                        disabled={!!(batchProgress && batchProgress.done < batchProgress.total) || discovering}
+                        className="border-[#555555] text-white hover:bg-[#3a3a3a]"
+                      >
+                        {databricksStep === 2 ? 'Back' : 'Cancel'}
+                      </Button>
+                      {databricksStep === 1 ? (
+                        <Button
+                          onClick={handleDatabricksDiscover}
+                          disabled={!isCreateFormValid || discovering}
+                          className={`${isCreateFormValid && !discovering ? 'bg-brand-orange hover:bg-brand-orange/90' : 'bg-gray-500 cursor-not-allowed'} flex items-center gap-2`}
+                        >
+                          {discovering && <Loader2 className="w-4 h-4 animate-spin" />}
+                          Next →
+                        </Button>
+                      ) : (
+                        <Button
+                          onClick={handleDatabricksBatchCreate}
+                          disabled={!isCreateFormValid || !!(batchProgress && batchProgress.done < batchProgress.total)}
+                          className={`${isCreateFormValid && !batchProgress ? 'bg-brand-orange hover:bg-brand-orange/90' : 'bg-gray-500 cursor-not-allowed'} flex items-center gap-2`}
+                        >
+                          {batchProgress && batchProgress.done < batchProgress.total && <Loader2 className="w-4 h-4 animate-spin" />}
+                          {batchProgress && batchProgress.failures.length > 0 && batchProgress.done === batchProgress.total
+                            ? `Retry ${batchProgress.failures.length} failed`
+                            : `Create ${selectedPairs.length} connection${selectedPairs.length !== 1 ? 's' : ''}`}
+                        </Button>
+                      )}
+                    </>
+                  ) : (
+                  <>
                   <Button
                     variant="outline"
                     onClick={() => {
@@ -1422,6 +2109,8 @@ export default function DatabasesPage() {
                     )}
                     {uploadMultipleFilesMutation.isPending || uploadFromURLMutation.isPending ? 'Creating...' : 'Create Datasource'}
                   </Button>
+                  </>
+                  )}
                 </div>
               </div>
             </div>

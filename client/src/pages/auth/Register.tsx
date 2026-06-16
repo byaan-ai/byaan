@@ -141,41 +141,20 @@ export default function Register() {
     }
 
     try {
+      // If coming from invitation, use invitation registration endpoint
       if (isFromInvitation) {
         const invitationToken = localStorage.getItem('pendingInvitationToken')
         if (invitationToken) {
           await ApiService.authRegisterWithInvitation(email, password, fullName, invitationToken)
-          setIsProcessingInvitation(true)
-          try {
-            await login(email, password)
-            const result = await ApiService.acceptInvitation(invitationToken)
-            localStorage.removeItem('pendingInvitationToken')
-            localStorage.removeItem('pendingInvitationTenantName')
-
-            if (result.tenant_id) {
-              localStorage.setItem('byaan_active_tenant', result.tenant_id)
-              await fetchTenants()
-              const updatedTenants = useStore.getState().tenants
-              if (updatedTenants.length === 1) {
-                setTimeout(() => navigate('/', { replace: true }), 0)
-              } else {
-                switchTenant(result.tenant_id)
-              }
+          // Redirect to login (user is already verified, no email check needed)
+          navigate('/login?from=invitation', {
+            state: {
+              fromInvitationRegistration: true,
+              invitationEmail: email,
+              tenantName
             }
-            return
-          } catch (autoErr) {
-            console.error('Auto-login after invitation register failed:', autoErr)
-            navigate('/login?from=invitation', {
-              state: {
-                fromInvitationRegistration: true,
-                invitationEmail: email,
-                tenantName
-              }
-            })
-            return
-          } finally {
-            setIsProcessingInvitation(false)
-          }
+          })
+          return
         }
       }
 

@@ -1380,6 +1380,41 @@ class AsyncDatabaseService:
             return cls._connection_pools[connection_id]
 
     @classmethod
+    async def get_or_create_databricks_connector(cls, connection_id: str, connection_obj: dict[str, Any]):
+        """Get or create cached Databricks connector.
+
+        Wires a token-refresh callback that re-encrypts the updated OAuth block back
+        into the connection row so the rotated refresh_token survives a process
+        restart. The callback is a no-op when ``connection_id`` is not a real DB id
+        (e.g. the transient discover endpoint).
+        """
+        from server.services.databricks_connector import AsyncDatabricksConnector
+
+        async def _persist_refreshed_tokens(new_oauth: dict[str, Any]) -> None:
+            try:
+                from server.db.session import AsyncSessionFactory
+                from server.repositories.connections import ConnectionRepository
+
+                async with AsyncSessionFactory() as session:
+                    repo = ConnectionRepository(session)
+                    connection = await repo.get(connection_id)
+                    if not connection:
+                        return
+                    current = await connection.get_decrypted_connection_obj(session) or {}
+                    current["oauth"] = new_oauth
+                    await connection.set_encrypted_connection_obj(current, session)
+                    await session.commit()
+            except Exception:
+                logger.error("Failed to persist refreshed Databricks tokens", exc_info=True)
+
+        async with cls._pool_lock:
+            if connection_id not in cls._connection_pools:
+                connector = AsyncDatabricksConnector(connection_obj, on_token_refresh=_persist_refreshed_tokens)
+                await connector.connect()
+                cls._connection_pools[connection_id] = connector
+            return cls._connection_pools[connection_id]
+
+    @classmethod
     async def get_or_create_postgres_connector(
         cls, connection_id: str, connection_obj: dict[str, Any]
     ) -> AsyncPostgresConnector:
@@ -1692,7 +1727,7 @@ class DatabaseOperationsService:
 
         if normalized_db_type in ("duckdb", "file"):
             return DatabaseOperationsService._format_duckdb_compact(schema_data)
-        elif normalized_db_type in ("sql", "pg", "mysql", "sqlite", "mssql", "postgresql"):
+        elif normalized_db_type in ("sql", "pg", "mysql", "sqlite", "mssql", "postgresql", "databricks"):
             return DatabaseOperationsService._format_sql_compact(schema_data)
         elif normalized_db_type == "mongo":
             return DatabaseOperationsService._format_mongo_compact(schema_data)
@@ -1865,6 +1900,8 @@ class DatabaseOperationsService:
 
                     if connection.type == "mongo":
                         schema = await DatabaseOperationsService.get_mongo_schema_async(connection_obj)
+                    elif connection.type == "databricks":
+                        schema = await DatabaseOperationsService.get_databricks_schema_async(connection_obj)
                     elif connection.type in ["pg", "mysql", "sqlite", "mssql"]:
                         schema = await DatabaseOperationsService.get_sql_schema_async(
                             connection_obj, db_type=connection.type
@@ -1938,6 +1975,8 @@ class DatabaseOperationsService:
 
                         if connection.type == "mongo":
                             schema = await DatabaseOperationsService.get_mongo_schema_async(connection_obj)
+                        elif connection.type == "databricks":
+                            schema = await DatabaseOperationsService.get_databricks_schema_async(connection_obj)
                         elif connection.type in ["pg", "mysql", "sqlite", "mssql"]:
                             schema = await DatabaseOperationsService.get_sql_schema_async(
                                 connection_obj, db_type=connection.type
@@ -3255,6 +3294,52 @@ class DatabaseOperationsService:
         except Exception as e:
             logger.error(f"Failed to get DynamoDB schema: {str(e)}", exc_info=True)
             raise ConnectionError(f"Cannot connect to DynamoDB: {str(e)}")
+
+    @staticmethod
+    async def get_databricks_schema_async(connection_obj: dict[str, Any]) -> dict[str, Any]:
+        """Get Databricks schema asynchronously. Returns schema shape matching SQL connectors."""
+        from server.services.databricks_connector import AsyncDatabricksConnector
+
+        connector = AsyncDatabricksConnector(connection_obj)
+        try:
+            await connector.connect()
+            raw = await connector.get_schema()
+            catalog = raw.get("catalog")
+            schema_name = raw.get("schema")
+
+            schema_dict: dict[str, Any] = {}
+            for tbl in raw.get("tables", []):
+                key = tbl.get("name")
+                if not key:
+                    continue
+                schema_dict[key] = {
+                    "columns": [
+                        {"name": c["name"], "type": c["type"], "nullable": True} for c in tbl.get("columns", [])
+                    ],
+                    "foreign_keys": [],
+                    "qualified_name": tbl.get("qualified_name", key),
+                    "catalog": tbl.get("catalog"),
+                    "schema_name": tbl.get("schema"),
+                }
+
+            db_name_parts = [p for p in [catalog, schema_name] if p]
+            db_name = ".".join(db_name_parts) if db_name_parts else "Databricks"
+
+            return {
+                "datasource_type": "databricks",
+                "database_type": "databricks",
+                "database_name": db_name,
+                "schema": schema_dict,
+                "catalogs": raw.get("catalogs", []),
+                "schemas": raw.get("schemas", []),
+                "catalog": catalog,
+                "default_schema": schema_name,
+            }
+        except Exception as e:
+            logger.error(f"Failed to get Databricks schema: {str(e)}", exc_info=True)
+            raise ConnectionError(f"Cannot connect to Databricks: {str(e)}")
+        finally:
+            await connector.close()
 
     # ----------------------------
     # Nested schema inference utils

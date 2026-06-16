@@ -80,6 +80,7 @@ def get_prompt_components(model: str | None = None) -> dict:
             "mongo_specific_rules": str,
             "duckdb_specific_rules": str,
             "dynamodb_specific_rules": str,
+            "databricks_specific_rules": str,
             "summary_after_code": str,
         }
 
@@ -93,6 +94,7 @@ def get_prompt_components(model: str | None = None) -> dict:
         # Import GPT-optimized variants
         try:
             from server.prompts.components import (
+                DATABRICKS_SPECIFIC_RULES,
                 DYNAMODB_SPECIFIC_RULES,
                 FILTER_WORKFLOW_RULES,
                 SKILL_WORKFLOW_RULES,
@@ -127,6 +129,7 @@ def get_prompt_components(model: str | None = None) -> dict:
                 "mongo_specific_rules": GPT_MONGO_RULES,
                 "duckdb_specific_rules": GPT_DUCKDB_RULES,
                 "dynamodb_specific_rules": DYNAMODB_SPECIFIC_RULES,
+                "databricks_specific_rules": DATABRICKS_SPECIFIC_RULES,
                 "summary_after_code": GPT_SUMMARY,
             }
         except ImportError as e:
@@ -134,6 +137,7 @@ def get_prompt_components(model: str | None = None) -> dict:
 
     # Default components (used for Claude, Gemini, GLM and other models)
     from server.prompts.components import (
+        DATABRICKS_SPECIFIC_RULES,
         DUCKDB_SPECIFIC_RULES,
         DYNAMODB_SPECIFIC_RULES,
         FILTER_WORKFLOW_RULES,
@@ -156,5 +160,6 @@ def get_prompt_components(model: str | None = None) -> dict:
         "mongo_specific_rules": MONGO_SPECIFIC_RULES,
         "duckdb_specific_rules": DUCKDB_SPECIFIC_RULES,
         "dynamodb_specific_rules": DYNAMODB_SPECIFIC_RULES,
+        "databricks_specific_rules": DATABRICKS_SPECIFIC_RULES,
         "summary_after_code": SUMMARY_AFTER_CODE,
     }

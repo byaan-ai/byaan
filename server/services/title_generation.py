@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import Any
 
 from litellm import acompletion
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.services.claude_mcp_service import stream_claude_with_mcp_tools
 from server.services.llm_service import ModelService
+from server.tools.agentic import search_datasets
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
@@ -111,40 +113,49 @@ async def _generate_title_claude_sdk(
 
     async def _protected():
         generated_title = ""
+        sdk_error: str | None = None
         async for event in stream_claude_with_mcp_tools(
             prompt=prompt,
-            tools=None,
+            tools=[search_datasets],
             model=model,
             instructions=TITLE_SYSTEM_PROMPT,
-            context=None,
-            max_turns=1,
-            disallowed_tools_override=[
-                "WebSearch",
-                "WebFetch",
-                "Read",
-                "Write",
-                "Edit",
-                "Bash",
-                "Glob",
-                "Grep",
-                "Task",
-                "NotebookEdit",
-                "AskUserQuestion",
-                "TodoWrite",
-                "ToolSearch",
-                "Agent",
-                "LSP",
-            ],
+            context={},
         ):
-            if event.get("type") == "content":
+            etype = event.get("type")
+            if etype == "content":
                 generated_title += event.get("text", "")
-            elif event.get("type") == "done":
+            elif etype == "error":
+                sdk_error = event.get("error") or "Unknown Claude SDK error"
+            elif etype == "done":
                 break
-        return generated_title
+        return generated_title, sdk_error
 
-    generated_title = await asyncio.shield(_protected())
-    logger.info(f"Generated title via Claude SDK: {generated_title}")
+    generated_title, sdk_error = await asyncio.shield(_protected())
+    if sdk_error and not generated_title.strip():
+        logger.warning(f"[TITLE GEN] Claude SDK error, using fallback: {sdk_error}")
+        return _fallback_title(user_message)
+    logger.info(f"Generated title via Claude SDK: {generated_title!r}")
     return _clean_title(generated_title, user_message)
+
+
+def _extract_content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                btype = block.get("type")
+                if btype in ("text", "output_text") or btype is None:
+                    text = block.get("text") or block.get("content") or ""
+                    if isinstance(text, str):
+                        parts.append(text)
+        return "".join(parts)
+    return str(content)
 
 
 async def _generate_title_litellm(
@@ -163,11 +174,27 @@ async def _generate_title_litellm(
         model=model_instance.model,
         messages=messages,
         temperature=0.7,
-        max_tokens=20,
+        max_tokens=2048,
     )
 
-    title = response.choices[0].message.content.strip() if response.choices[0].message.content else ""
-    logger.info(f"Generated title via LiteLLM: {title}")
+    message = response.choices[0].message
+    raw_content = getattr(message, "content", None)
+    content = _extract_content_text(raw_content).strip()
+    if not content:
+        reasoning = (getattr(message, "reasoning_content", None) or "").strip()
+        if reasoning:
+            lines = [line.strip() for line in reasoning.splitlines() if line.strip()]
+            content = lines[-1] if lines else ""
+
+    if not content:
+        logger.warning(
+            f"[TITLE GEN] LiteLLM returned empty content. model={model_instance.model} "
+            f"finish_reason={getattr(response.choices[0], 'finish_reason', None)} "
+            f"raw_content_type={type(raw_content).__name__} raw={repr(raw_content)[:500]}"
+        )
+
+    title = content.strip()
+    logger.info(f"Generated title via LiteLLM: {title!r}")
     return _clean_title(title, user_message)
 
 

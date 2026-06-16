@@ -3,6 +3,17 @@ set -e
 
 echo "=== Byaan Self-Hosted Container Starting ==="
 
+# Fail fast if the data volume is out of space. Without this check, postgres
+# panics mid-checkpoint and supervisord restarts it forever, hiding the cause.
+MIN_FREE_MB="${MIN_FREE_MB:-200}"
+avail_mb=$(df -Pm /data 2>/dev/null | awk 'NR==2 {print $4}')
+if [ -n "$avail_mb" ] && [ "$avail_mb" -lt "$MIN_FREE_MB" ]; then
+    echo "FATAL: /data has only ${avail_mb}MB free (need >=${MIN_FREE_MB}MB)."
+    echo "Free space on the host, then restart this container."
+    echo "On the host:  ./start.sh prune   # or   docker system prune -af"
+    exit 1
+fi
+
 # Create log directory on persistent volume
 mkdir -p /data/logs
 
