@@ -31,9 +31,9 @@ def get_feature_flags() -> dict[str, bool]:
 
     return {
         "worker_features_enabled": worker_configured,
-        "external_sharing_enabled": not self_hosted,  # Desktop/Community only
-        "notebook_import_enabled": False,  # Removed with SaaS
-        "public_registration_enabled": False,  # Removed with SaaS
+        "external_sharing_enabled": (not self_hosted) and worker_configured,
+        "notebook_import_enabled": False,
+        "public_registration_enabled": False,
         "local_auth_enabled": email_auth_enabled,
         "invitation_only": self_hosted,
         "google_oauth_enabled": self_hosted and google_configured,
