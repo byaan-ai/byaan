@@ -2,13 +2,16 @@ import type { StateCreator } from 'zustand'
 import type { StoreState } from '../useStore'
 import type { ConnectedRepo } from '../../services/github'
 
+export type GitHubAuthMethod = 'oauth' | 'pat_classic' | 'pat_fine_grained' | null
+
 export interface GitHubSlice {
   githubConnected: boolean
   githubUsername: string | null
+  githubAuthMethod: GitHubAuthMethod
   connectedRepos: ConnectedRepo[]
   selectedRepo: ConnectedRepo | null
 
-  setGitHubConnected: (connected: boolean, username?: string | null) => void
+  setGitHubConnected: (connected: boolean, username?: string | null, authMethod?: GitHubAuthMethod) => void
   setConnectedRepos: (repos: ConnectedRepo[]) => void
   addConnectedRepo: (repo: ConnectedRepo) => void
   updateRepoStatus: (repoId: string, status: string, error?: string | null) => void
@@ -24,13 +27,15 @@ export const createGitHubSlice: StateCreator<
 > = (set) => ({
   githubConnected: false,
   githubUsername: null,
+  githubAuthMethod: null,
   connectedRepos: [],
   selectedRepo: null,
 
-  setGitHubConnected: (connected, username = null) =>
+  setGitHubConnected: (connected, username = null, authMethod = null) =>
     set(() => ({
       githubConnected: connected,
       githubUsername: username,
+      githubAuthMethod: authMethod,
     })),
 
   setConnectedRepos: (repos) =>

@@ -141,11 +141,18 @@ async def oauth_status(
 
     try:
         user_info = await github_service.get_authenticated_user(token)
+        auth_method = await github_service.get_stored_auth_method(auth.tenant_id, auth.user_id, session)
+        scopes = (
+            None
+            if auth_method == github_service.AUTH_METHOD_PAT_FINE_GRAINED
+            else github_service.GITHUB_SCOPES.split(" ")
+        )
         return success_response(
             data=GitHubOAuthStatusResponse(
                 connected=True,
                 username=user_info["login"],
-                scopes=github_service.GITHUB_SCOPES.split(" "),
+                scopes=scopes,
+                auth_method=auth_method,
             ).model_dump()
         )
     except Exception:

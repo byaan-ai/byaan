@@ -28,6 +28,13 @@ GITHUB_API_BASE = "https://api.github.com"
 GITHUB_SCOPES = "repo read:user"
 REQUIRED_SCOPES = {"repo"}
 
+CLASSIC_PAT_PREFIX = "ghp_"
+FINE_GRAINED_PAT_PREFIX = "github_pat_"
+
+AUTH_METHOD_OAUTH = "oauth"
+AUTH_METHOD_PAT_CLASSIC = "pat_classic"
+AUTH_METHOD_PAT_FINE_GRAINED = "pat_fine_grained"
+
 _device_code_store: dict[str, dict] = {}  # device_code → {tenant_id, user_id}
 
 
@@ -166,6 +173,28 @@ async def get_github_token(tenant_id: UUID, user_id: UUID, session: AsyncSession
     return decrypted.get("access_token")
 
 
+async def get_stored_auth_method(tenant_id: UUID, user_id: UUID, session: AsyncSession) -> str | None:
+    repo = SkillCredentialRepository(session)
+    cred = await repo.get_by_skill("github", tenant_id, user_id, scope="user")
+    if not cred:
+        return None
+    decrypted = await repo.get_decrypted_credentials(cred)
+    if not decrypted:
+        return None
+    token_type = (decrypted.get("token_type") or "").lower()
+    if token_type == AUTH_METHOD_PAT_FINE_GRAINED:
+        return AUTH_METHOD_PAT_FINE_GRAINED
+    if token_type in (AUTH_METHOD_PAT_CLASSIC, "pat"):
+        return AUTH_METHOD_PAT_CLASSIC
+    return AUTH_METHOD_OAUTH
+
+
+def detect_pat_type(token: str) -> str:
+    if token.startswith(FINE_GRAINED_PAT_PREFIX):
+        return AUTH_METHOD_PAT_FINE_GRAINED
+    return AUTH_METHOD_PAT_CLASSIC
+
+
 async def delete_github_token(tenant_id: UUID, user_id: UUID, session: AsyncSession) -> bool:
     repo = SkillCredentialRepository(session)
     return await repo.delete_by_skill("github", tenant_id, user_id, scope="user")
@@ -220,7 +249,7 @@ async def list_user_repos(token: str, page: int = 1, per_page: int = 30, search:
         response = await client.get(
             f"{GITHUB_API_BASE}/user/repos",
             params={
-                "affiliation": "owner,collaborator",
+                "affiliation": "owner,collaborator,organization_member",
                 "sort": "updated",
                 "per_page": per_page,
                 "page": page,
@@ -359,15 +388,41 @@ async def poll_device_token(device_code: str, client_id: str) -> dict:
         return {"status": "success", "token_data": data, "context": context}
 
 
-async def validate_and_save_pat(token: str, tenant_id: UUID, user_id: UUID, session: AsyncSession) -> dict:
-    missing = await validate_token_scopes(token)
-    if missing:
-        raise ValueError(
-            f"Token is missing required scope(s): {', '.join(missing)}. "
-            "Create a new token with these scopes at github.com/settings/tokens"
-        )
+async def _validate_fine_grained_pat(token: str) -> dict:
     user_info = await get_authenticated_user(token)
-    token_data = {"access_token": token, "token_type": "pat"}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(
+            f"{GITHUB_API_BASE}/user/repos",
+            params={"per_page": 1},
+            headers={**GITHUB_HEADERS, "Authorization": f"Bearer {token}"},
+        )
+        if response.status_code == 403:
+            raise ValueError(
+                "Fine-grained token lacks repository access. Grant 'Contents: Read-only' "
+                "and 'Metadata: Read-only' permissions and select at least one repository."
+            )
+        response.raise_for_status()
+        if not response.json():
+            raise ValueError(
+                "Fine-grained token has no accessible repositories. "
+                "Select at least one repository when creating the token."
+            )
+    return user_info
+
+
+async def validate_and_save_pat(token: str, tenant_id: UUID, user_id: UUID, session: AsyncSession) -> dict:
+    pat_type = detect_pat_type(token)
+    if pat_type == AUTH_METHOD_PAT_FINE_GRAINED:
+        user_info = await _validate_fine_grained_pat(token)
+    else:
+        missing = await validate_token_scopes(token)
+        if missing:
+            raise ValueError(
+                f"Token is missing required scope(s): {', '.join(missing)}. "
+                "Create a new token with these scopes at github.com/settings/tokens"
+            )
+        user_info = await get_authenticated_user(token)
+    token_data = {"access_token": token, "token_type": pat_type}
     await save_github_token(tenant_id, user_id, token_data, session)
     return user_info
 

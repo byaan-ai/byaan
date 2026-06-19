@@ -19,7 +19,9 @@ export function GitHubOAuthDialog({ open, onOpenChange, onSuccess, oauthAvailabl
   const [step, setStep] = useState<OAuthStep>('idle')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [authMethod, setAuthMethod] = useState<'oauth' | 'pat'>(oauthAvailable ? 'oauth' : 'pat')
+  const [authMethod, setAuthMethod] = useState<'oauth' | 'pat_classic' | 'pat_fine_grained'>(
+    oauthAvailable ? 'oauth' : 'pat_classic',
+  )
   const [patToken, setPatToken] = useState('')
   const [patLoading, setPatLoading] = useState(false)
   const [userCode, setUserCode] = useState('')
@@ -28,7 +30,7 @@ export function GitHubOAuthDialog({ open, onOpenChange, onSuccess, oauthAvailabl
   const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
-    setAuthMethod(oauthAvailable ? 'oauth' : 'pat')
+    setAuthMethod(oauthAvailable ? 'oauth' : 'pat_classic')
   }, [oauthAvailable])
 
   useEffect(() => {
@@ -42,7 +44,7 @@ export function GitHubOAuthDialog({ open, onOpenChange, onSuccess, oauthAvailabl
     setUserCode('')
     setCopied(false)
     setPatToken('')
-    setAuthMethod(oauthAvailable ? 'oauth' : 'pat')
+    setAuthMethod(oauthAvailable ? 'oauth' : 'pat_classic')
   }
 
   const handleClose = (newOpen: boolean) => {
@@ -144,8 +146,8 @@ export function GitHubOAuthDialog({ open, onOpenChange, onSuccess, oauthAvailabl
                 Connect your GitHub account to analyze repositories and build codebase skills.
               </p>
 
-              {oauthAvailable && (
-                <div className="flex gap-1 bg-[#1a1a1a] rounded-lg p-1">
+              <div className="flex gap-1 bg-[#1a1a1a] rounded-lg p-1">
+                {oauthAvailable && (
                   <button
                     onClick={() => setAuthMethod('oauth')}
                     className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
@@ -157,19 +159,30 @@ export function GitHubOAuthDialog({ open, onOpenChange, onSuccess, oauthAvailabl
                     <Github className="w-4 h-4" />
                     OAuth
                   </button>
-                  <button
-                    onClick={() => setAuthMethod('pat')}
-                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
-                      authMethod === 'pat'
-                        ? 'bg-[#3a3a3a] text-white'
-                        : 'text-gray-400 hover:text-gray-300'
-                    }`}
-                  >
-                    <KeyRound className="w-4 h-4" />
-                    Access Token
-                  </button>
-                </div>
-              )}
+                )}
+                <button
+                  onClick={() => setAuthMethod('pat_classic')}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
+                    authMethod === 'pat_classic'
+                      ? 'bg-[#3a3a3a] text-white'
+                      : 'text-gray-400 hover:text-gray-300'
+                  }`}
+                >
+                  <KeyRound className="w-4 h-4" />
+                  Classic PAT
+                </button>
+                <button
+                  onClick={() => setAuthMethod('pat_fine_grained')}
+                  className={`flex-1 flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
+                    authMethod === 'pat_fine_grained'
+                      ? 'bg-[#3a3a3a] text-white'
+                      : 'text-gray-400 hover:text-gray-300'
+                  }`}
+                >
+                  <KeyRound className="w-4 h-4" />
+                  Fine-grained
+                </button>
+              </div>
 
               {authMethod === 'oauth' && oauthAvailable ? (
                 <>
@@ -200,28 +213,72 @@ export function GitHubOAuthDialog({ open, onOpenChange, onSuccess, oauthAvailabl
                     type="password"
                     value={patToken}
                     onChange={(e) => setPatToken(e.target.value)}
-                    placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                    placeholder={
+                      authMethod === 'pat_fine_grained'
+                        ? 'github_pat_11ABCDEFG0xxxxxxxxxxxx'
+                        : 'ghp_xxxxxxxxxxxxxxxxxxxx'
+                    }
                     className="bg-[#1a1a1a] border-gray-700 text-white font-mono text-sm"
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && patToken.trim()) connectWithPAT()
                     }}
                   />
-                  <p className="text-xs text-gray-500">
-                    Create a token at{' '}
-                    <a
-                      href="https://github.com/settings/tokens"
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-brand-orange hover:underline"
-                    >
-                      github.com/settings/tokens
-                    </a>
-                    {' '}with these scopes:
-                  </p>
-                  <ul className="text-xs text-gray-500 space-y-1 mt-1 ml-3">
-                    <li><span className="text-gray-400 font-mono">repo</span> — Full access to public and private repositories <span className="text-gray-600">(required)</span></li>
-                    <li><span className="text-gray-400 font-mono">read:user</span> — Read your GitHub profile info <span className="text-gray-600">(optional)</span></li>
-                  </ul>
+                  {authMethod === 'pat_fine_grained' ? (
+                    <>
+                      <p className="text-xs text-gray-500">
+                        Create a token at{' '}
+                        <a
+                          href="https://github.com/settings/personal-access-tokens"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-brand-orange hover:underline"
+                        >
+                          github.com/settings/personal-access-tokens
+                        </a>
+                        {' '}with these Repository permissions:
+                      </p>
+                      <ul className="text-xs text-gray-500 space-y-1 mt-1 ml-3">
+                        <li><span className="text-gray-400 font-mono">Contents</span> — Read-only <span className="text-gray-600">(required)</span></li>
+                        <li><span className="text-gray-400 font-mono">Metadata</span> — Read-only <span className="text-gray-600">(required, auto-selected)</span></li>
+                      </ul>
+                      <div className="bg-[#1a1a1a] border border-gray-800 rounded-lg p-3 space-y-2">
+                        <p className="text-xs text-gray-400 font-medium">Setup checklist</p>
+                        <ul className="text-xs text-gray-500 space-y-1.5 list-disc ml-4">
+                          <li>
+                            <span className="text-gray-400">Resource owner</span> — choose your personal account for personal repos, or the organization for org repos.
+                          </li>
+                          <li>
+                            <span className="text-gray-400">Repository access</span> — pick &quot;Only select repositories&quot; (or &quot;All repositories&quot;) and tick the repos you want Byaan to see. Only those will appear in the repo list.
+                          </li>
+                          <li>
+                            <span className="text-gray-400">Repository permissions</span> — you must explicitly tick <span className="font-mono text-gray-400">Contents</span> Read-only. If the token page later shows &quot;does not have any repository permissions,&quot; nothing was selected — edit the token and try again.
+                          </li>
+                          <li>
+                            <span className="text-gray-400">Org tokens need approval</span> — when the resource owner is an organization, the token is <span className="text-brand-orange">pending</span> until an org admin approves it under <span className="font-mono text-gray-400">Settings → Third-party Access → Personal access tokens → Pending requests</span>. Until then it has zero access. The org must also have fine-grained PATs allowed in its policy.
+                          </li>
+                        </ul>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-xs text-gray-500">
+                        Create a token at{' '}
+                        <a
+                          href="https://github.com/settings/tokens"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-brand-orange hover:underline"
+                        >
+                          github.com/settings/tokens
+                        </a>
+                        {' '}with these scopes:
+                      </p>
+                      <ul className="text-xs text-gray-500 space-y-1 mt-1 ml-3">
+                        <li><span className="text-gray-400 font-mono">repo</span> — Full access to public and private repositories <span className="text-gray-600">(required)</span></li>
+                        <li><span className="text-gray-400 font-mono">read:user</span> — Read your GitHub profile info <span className="text-gray-600">(optional)</span></li>
+                      </ul>
+                    </>
+                  )}
                   <div className="flex justify-end gap-2 pt-1">
                     <Button variant="outline" onClick={() => handleClose(false)} className="border-[#555555] text-white hover:bg-[#3a3a3a]">
                       Cancel

@@ -20,6 +20,7 @@ class GitHubOAuthStatusResponse(BaseModel):
     connected: bool
     username: str | None = None
     scopes: list[str] | None = None
+    auth_method: str | None = None  # "oauth" | "pat_classic" | "pat_fine_grained"
 
 
 class GitHubRepoConnect(BaseModel):
