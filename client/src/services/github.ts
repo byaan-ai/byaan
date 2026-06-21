@@ -123,7 +123,12 @@ export const GitHubService = {
 
   async getStatus() {
     const res = await apiFetch('/oauth/status')
-    return res.data as { connected: boolean; username: string | null; scopes: string[] | null }
+    return res.data as {
+      connected: boolean
+      username: string | null
+      scopes: string[] | null
+      auth_method: 'oauth' | 'pat_classic' | 'pat_fine_grained' | null
+    }
   },
 
   async disconnect() {

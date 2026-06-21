@@ -32,6 +32,7 @@ export default function GitHubIntegrations() {
   const {
     githubConnected,
     githubUsername,
+    githubAuthMethod,
     setGitHubConnected,
     connectedRepos,
     setConnectedRepos,
@@ -132,7 +133,7 @@ export default function GitHubIntegrations() {
   const loadStatus = useCallback(async () => {
     try {
       const status = await GitHubService.getStatus()
-      setGitHubConnected(status.connected, status.username)
+      setGitHubConnected(status.connected, status.username, status.auth_method)
     } catch {
       setGitHubConnected(false)
     }
@@ -457,8 +458,18 @@ export default function GitHubIntegrations() {
               <div className="flex items-center gap-4">
                 <div className={`w-3 h-3 rounded-full ${githubConnected ? 'bg-green-400' : 'bg-gray-600'}`} />
                 <div>
-                  <h3 className="text-white font-medium">
+                  <h3 className="text-white font-medium flex items-center gap-2">
                     {githubConnected ? `Connected as ${githubUsername}` : 'Not connected'}
+                    {githubConnected && githubAuthMethod === 'pat_fine_grained' && (
+                      <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded bg-brand-orange/15 text-brand-orange border border-brand-orange/30">
+                        Fine-grained PAT
+                      </span>
+                    )}
+                    {githubConnected && githubAuthMethod === 'pat_classic' && (
+                      <span className="text-[10px] uppercase tracking-wide px-2 py-0.5 rounded bg-gray-500/15 text-gray-300 border border-gray-500/30">
+                        Classic PAT
+                      </span>
+                    )}
                   </h3>
                   <p className="text-sm text-gray-500">
                     {githubConnected
