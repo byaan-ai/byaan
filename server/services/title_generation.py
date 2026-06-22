@@ -11,6 +11,7 @@ from server.services.claude_mcp_service import stream_claude_with_mcp_tools
 from server.services.llm_service import ModelService
 from server.tools.agentic import search_datasets
 from server.utils.custom_logger import get_logger
+from server.utils.litellm_utils import supports_custom_temperature
 
 logger = get_logger(__name__)
 
@@ -51,7 +52,12 @@ def _fallback_title(user_message: str) -> str:
 
 
 def _clean_title(title: str, user_message: str) -> str:
-    title = re.sub(r"\[\[TOOL_CALL:[^\]]*\]\]", "", title)
+    title = re.sub(
+        r"\[\[TOOL_CALL:.*?\]\](?=\[\[TOOL_CALL|[^\[\]]|$)",
+        "",
+        title,
+        flags=re.DOTALL,
+    )
     title = re.sub(r"Tool executed successfully\s*", "", title)
     title = title.strip().strip('"').strip("'")
     if len(title) > 100:
@@ -170,12 +176,15 @@ async def _generate_title_litellm(
 
     messages = _build_title_messages(user_message, assistant_response)
 
-    response = await acompletion(
-        model=model_instance.model,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=2048,
-    )
+    completion_kwargs: dict = {
+        "model": model_instance.model,
+        "messages": messages,
+        "max_tokens": 2048,
+    }
+    if supports_custom_temperature(model_instance.model):
+        completion_kwargs["temperature"] = 0.7
+
+    response = await acompletion(**completion_kwargs)
 
     message = response.choices[0].message
     raw_content = getattr(message, "content", None)

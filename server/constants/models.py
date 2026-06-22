@@ -10,9 +10,9 @@ ANTHROPIC_MODELS = [
 ]
 
 CLAUDE_CODE_MODELS = [
-    "claude_code/claude-opus-4.8",
-    "claude_code/claude-opus-4.7",
-    "claude_code/claude-sonnet-4.6",
+    "claude_code/claude-opus-4-8",
+    "claude_code/claude-opus-4-7",
+    "claude_code/claude-sonnet-4-6",
 ]
 
 OPENROUTER_SPECIFIC_MODELS = [

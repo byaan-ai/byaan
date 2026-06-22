@@ -139,8 +139,8 @@ async def stream_claude_with_mcp_tools(
 
         # Step 3: Configure Claude options
         # Tool names are prefixed with mcp__<server_name>__<tool_name>
-        mcp_servers_dict = None
-        allowed_tools_list = None
+        mcp_servers_dict: dict = {}
+        allowed_tools_list: list[str] = []
 
         if mcp_server:
             mcp_servers_dict = {"byaan_tools": mcp_server}
@@ -186,6 +186,11 @@ async def stream_claude_with_mcp_tools(
             "stderr": stderr_callback,
             "env": cli_env,
         }
+
+        if model:
+            sdk_model = model.split("/", 1)[1] if model.startswith("claude_code/") else model
+            options_kwargs["model"] = sdk_model
+            logger.info(f"[CLAUDE MCP] Passing model to SDK: {sdk_model}")
 
         # Auto-detect CLI path using the same expanded PATH so discovery and launch agree
         cli_path = find_claude_cli_path(search_path=expanded_path)
@@ -384,6 +389,10 @@ async def stream_claude_with_mcp_tools(
 
                     logger.info(f"[CLAUDE MCP] API Source: {api_source}")
                     logger.info(f"[CLAUDE MCP] MCP Servers: {len(mcp_servers_info)}")
+
+                    actual_model = message.data.get("model")
+                    if actual_model:
+                        logger.info(f"[CLAUDE MCP] Active model (from SDK init): {actual_model}")
 
             elif message_type == "StreamEvent":
                 if hasattr(message, "event"):

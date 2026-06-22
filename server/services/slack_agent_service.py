@@ -13,10 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 litellm.drop_params = True
 
+from server.constants.models import MODELS_BY_PROVIDER
 from server.models.slack_conversation import SlackConversation
 from server.models.slack_event_log import SlackEventLog
 from server.models.slack_workspace import SlackWorkspace
 from server.repositories.custom_skill import CustomSkillRepository
+from server.repositories.llm_connections import LLMConnectionRepository
 from server.schemas.agent import AgentRequest
 from server.services.completion_service import CompletionService
 from server.services.crypto_service import CryptoService
@@ -38,6 +40,33 @@ class SlackAgentService:
 
     CONFIRMATION_MESSAGE = "Hey, I'm working on your request. I'll let you know once it's ready."
     SLACK_MENTION_HINT = "\n\n_@Byaan to continue the conversation_"
+
+    @staticmethod
+    async def _resolve_model_for_connection(
+        llm_connection_id: UUID,
+        session: AsyncSession,
+    ) -> str | None:
+        """Resolve the model string for a Slack LLM connection.
+
+        Order of preference:
+        1. Model stored in connection.config["model"] (user-selected at connection creation)
+        2. First entry in MODELS_BY_PROVIDER for the connection type (latest model)
+        """
+        connection = await LLMConnectionRepository(session).get(llm_connection_id)
+        if not connection:
+            return None
+
+        try:
+            cfg = await CryptoService.decrypt_config(connection.config, session) if connection.config else {}
+        except Exception:
+            cfg = {}
+
+        stored_model = cfg.get("model") if isinstance(cfg, dict) else None
+        if stored_model:
+            return stored_model
+
+        provider_models = MODELS_BY_PROVIDER.get(connection.type, [])
+        return provider_models[0] if provider_models else None
 
     @staticmethod
     async def process_mention(
@@ -91,6 +120,9 @@ class SlackAgentService:
             if not llm_connection_id:
                 raise ValueError("No LLM connection configured for Slack workspace")
 
+            resolved_model = await SlackAgentService._resolve_model_for_connection(llm_connection_id, session)
+            logger.info(f"[SLACK] Using model for connection {llm_connection_id}: {resolved_model}")
+
             slack_prompt = await SlackAgentService._build_slack_prompt(
                 question=question,
                 tenant_id=workspace.tenant_id,
@@ -102,6 +134,7 @@ class SlackAgentService:
                 notebook_id=conversation.notebook_id,
                 llm_connection_id=llm_connection_id,
                 create_notebook=conversation.notebook_id is None,
+                model=resolved_model,
             )
 
             raw_response, new_notebook_id, dashboard_generated, query_executed = await SlackAgentService._run_agent(
@@ -119,6 +152,7 @@ class SlackAgentService:
                 llm_connection_id=llm_connection_id,
                 tenant_id=workspace.tenant_id,
                 session=session,
+                model=resolved_model,
             )
 
             response_msg = await slack_client.post_message(
@@ -347,6 +381,7 @@ class SlackAgentService:
         llm_connection_id: UUID,
         tenant_id: UUID,
         session: AsyncSession,
+        model: str | None = None,
     ) -> tuple[list[dict], str]:
         """Clean agent response and convert to Slack Block Kit format."""
         try:
@@ -386,12 +421,18 @@ Output only the cleaned message in Markdown, nothing else."""
                 llm_connection_id=llm_connection_id,
                 session=session,
                 system_prompt="You are a message cleaner. Output only the cleaned message in Markdown.",
+                model=model,
             )
 
             cleaned = result if result else raw_response
 
             # Fallback: regex cleanup in case LLM didn't remove tool calls
-            cleaned = re.sub(r"\[\[TOOL_CALL:[^\]]+\]\]", "", cleaned)
+            cleaned = re.sub(
+                r"\[\[TOOL_CALL:.*?\]\](?=\[\[TOOL_CALL|[^\[\]]|$)",
+                "",
+                cleaned,
+                flags=re.DOTALL,
+            )
             cleaned = re.sub(r"Tool executed successfully", "", cleaned)
             cleaned = cleaned.strip()
 
