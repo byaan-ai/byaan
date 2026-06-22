@@ -3,6 +3,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from server.utils.conversation_items import conversation_items_to_messages
 from server.utils.custom_logger import get_logger
+from server.utils.litellm_utils import supports_custom_temperature
 
 logger = get_logger(__name__)
 
@@ -447,13 +448,15 @@ class ConversationStateSession:
             if not model_instance:
                 return "[Handoff summary: Failed to create model instance. Session was reset but context was not summarized.]"
 
-            # Call litellm directly for summarization
-            response = await acompletion(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=1000,
-                temperature=0.3,
-            )
+            completion_kwargs: dict = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1000,
+            }
+            if supports_custom_temperature(model):
+                completion_kwargs["temperature"] = 0.3
+
+            response = await acompletion(**completion_kwargs)
 
             # Extract summary from response (handle different response formats)
             try:

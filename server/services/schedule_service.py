@@ -36,7 +36,7 @@ logger = get_logger(__name__)
 
 executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="schedule_")
 
-_TOOL_CALL_RE = re.compile(r"\[\[TOOL_CALL:[^\]]*\]\]")
+_TOOL_CALL_RE = re.compile(r"\[\[TOOL_CALL:.*?\]\](?=\[\[TOOL_CALL|[^\[\]]|$)", re.DOTALL)
 
 
 def _clean_tool_markers(text: str) -> str:

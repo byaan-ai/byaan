@@ -8,6 +8,21 @@ from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
 
+# OpenAI reasoning families that reject non-default temperature. Extend as new families ship.
+_RESTRICTED_TEMPERATURE_FAMILIES = ("gpt-5", "o1", "o3", "o4")
+
+
+def supports_custom_temperature(model: str | None) -> bool:
+    """Return False for OpenAI reasoning families (gpt-5.x, o1/o3/o4) that only accept the default temperature.
+
+    LiteLLM's drop_params does not strip temperature for these models, so callers must omit it explicitly.
+    """
+    if not model:
+        return True
+
+    model_lower = model.lower()
+    return not any(family in model_lower for family in _RESTRICTED_TEMPERATURE_FAMILIES)
+
 
 def supports_parallel_tool_calls(model: str | None) -> bool:
     """
