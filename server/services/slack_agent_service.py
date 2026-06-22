@@ -18,7 +18,7 @@ from server.models.slack_event_log import SlackEventLog
 from server.models.slack_workspace import SlackWorkspace
 from server.repositories.custom_skill import CustomSkillRepository
 from server.schemas.agent import AgentRequest
-from server.services.completion_service import CompletionService
+from server.services.completion_service import CompletionError, CompletionService
 from server.services.crypto_service import CryptoService
 from server.services.export_service import CompiledHtmlExportService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
@@ -381,12 +381,16 @@ RAW RESPONSE:
 
 Output only the cleaned message in Markdown, nothing else."""
 
-            result = await CompletionService.complete(
-                prompt=prompt,
-                llm_connection_id=llm_connection_id,
-                session=session,
-                system_prompt="You are a message cleaner. Output only the cleaned message in Markdown.",
-            )
+            try:
+                result = await CompletionService.complete(
+                    prompt=prompt,
+                    llm_connection_id=llm_connection_id,
+                    session=session,
+                    system_prompt="You are a message cleaner. Output only the cleaned message in Markdown.",
+                )
+            except CompletionError as e:
+                logger.error(f"Slack message cleanup failed [{e.reason}]: {e.message}")
+                result = None
 
             cleaned = result if result else raw_response
 

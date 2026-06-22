@@ -475,7 +475,7 @@ TOOLS & WORKFLOW:
 2. `list_repo_skills(repo_id)` — List all available skills for a repo.
 3. `search_repo_code(repo_id, query)` — Search file paths in the repo tree.
 4. `get_repo_file(repo_id, path)` — Fetch actual file content from GitHub.
-5. `create_repo_skill(repo_id, skill_name, description)` — Create a custom analysis skill. Describe what to analyze; the tool fetches code, runs LLM analysis, and saves the result.
+5. `create_repo_skill(repo_id, skill_name, description, instructions)` — Save a repo-scoped skill. This tool does NOT call an LLM. You must compose the full markdown analysis yourself first (use `search_repo_code` + `get_repo_file` to read source) and pass it as `instructions`.
 
 WHEN TO USE:
 - When a user asks about their codebase, architecture, code patterns, or anything related to a connected repo
@@ -485,10 +485,9 @@ WHEN TO USE:
 
 CREATING CUSTOM SKILLS:
 - When a user asks for analysis NOT covered by existing skills (security audit, API docs, performance review, etc.)
-- When the user explicitly asks to "create a skill" or "analyze X aspect of the repo"
-- Provide a descriptive skill_name and clear description of what to analyze
-- The tool returns the full analysis — use it to answer the user immediately
-- The skill is saved for future conversations and retrievable via get_repo_skill
+- Workflow: (1) call `search_repo_code` and `get_repo_file` to gather the source you need, (2) write the markdown analysis yourself, (3) call `create_repo_skill(repo_id, skill_name, description, instructions=<the markdown>)` to persist it.
+- The tool just saves — it does not generate content. You are responsible for the analysis quality.
+- After saving, the skill is retrievable via `get_repo_skill(repo_id, "custom:<skill_name>")` in future conversations.
 </github_repos>"""
 
 

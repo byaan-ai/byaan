@@ -22,7 +22,7 @@ from server.repositories.queries import QueryRepository
 from server.repositories.schedules import ScheduleRunRepository
 from server.repositories.threads import ThreadRepository
 from server.schemas.agent import AgentRequest
-from server.services.completion_service import CompletionService
+from server.services.completion_service import CompletionError, CompletionService
 from server.services.crypto_service import CryptoService
 from server.services.query_service import QueryService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
@@ -600,11 +600,15 @@ TEXT TO TRANSFORM:
 
 TRANSFORMED TEXT:"""
 
-        result = await CompletionService.complete(
-            prompt=prompt,
-            llm_connection_id=llm_connection_id,
-            session=session,
-        )
+        try:
+            result = await CompletionService.complete(
+                prompt=prompt,
+                llm_connection_id=llm_connection_id,
+                session=session,
+            )
+        except CompletionError as e:
+            logger.error(f"Response transformation failed [{e.reason}]: {e.message}")
+            return response
         return result if result else response
 
     @staticmethod

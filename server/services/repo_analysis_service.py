@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from server.db.session import AsyncSessionFactory
-from server.models.custom_skill import CustomSkill
 from server.repositories.custom_skill import CustomSkillRepository
 from server.repositories.github_repository import GitHubRepoRepository
 from server.services import github_service
-from server.services.completion_service import CompletionService
+from server.services.completion_service import CompletionError, CompletionService
 from server.services.unified_agent import is_using_claude_code_auth
 from server.utils.custom_logger import get_logger
 
@@ -366,15 +365,18 @@ async def _generate_skill(
 ) -> None:
     async with AsyncSessionFactory() as skill_session:
         skill_repo = CustomSkillRepository(skill_session)
-        content = await CompletionService.complete(
-            prompt=prompt,
-            llm_connection_id=llm_connection_id,
-            session=skill_session,
-            system_prompt=system_prompt,
-            use_claude_sdk=use_claude_sdk,
-        )
-        if not content:
-            raise ValueError(f"LLM returned empty content for skill {skill_type}")
+        try:
+            content = await CompletionService.complete(
+                prompt=prompt,
+                llm_connection_id=llm_connection_id,
+                session=skill_session,
+                system_prompt=system_prompt,
+                use_claude_sdk=use_claude_sdk,
+            )
+        except CompletionError as err:
+            raise RuntimeError(
+                f"Skill '{skill_type}' for {repo_full_name} failed: {err.reason} — {err.message}"
+            ) from err
 
         if skill_type == "codebase":
             description = (
@@ -522,167 +524,3 @@ async def analyze_local_repository(
             logger.error(f"[ANALYSIS] Failed for local repo {repo_name}: {e}", exc_info=True)
             await repo_repo.update_analysis_status(repo_id, "failed", error=str(e))
             _clear_progress(rid)
-
-
-async def execute_local_custom_skill(
-    repo_id: UUID,
-    tenant_id: UUID,
-    user_id: UUID,
-    llm_connection_id: str,
-    prompt_template: str,
-    skill_name: str,
-    parameters: str | None,
-    local_path: str,
-    repo_name: str,
-) -> CustomSkill:
-    from server.services.local_repo_service import detect_local_languages, get_local_file_content, get_local_file_tree
-
-    async with AsyncSessionFactory() as session:
-        skill_repo = CustomSkillRepository(session)
-
-        tree = await get_local_file_tree(local_path)
-        blob_paths = _get_blob_paths(tree)
-        key_files = _select_key_files(blob_paths)
-
-        file_contents: dict[str, str] = {}
-        total_chars = 0
-        for path in key_files:
-            if total_chars >= MAX_CHARS_PER_SKILL:
-                break
-            content = await get_local_file_content(local_path, path)
-            if content:
-                file_contents[path] = content
-                total_chars += len(content)
-
-        languages = detect_local_languages(tree)
-
-        file_tree_str = "\n".join(blob_paths)
-        file_contents_str = "\n\n".join(f"### {p}\n```\n{c}\n```" for p, c in file_contents.items())
-        languages_str = json.dumps(languages, indent=2)
-
-        prompt = prompt_template.replace("{file_contents}", file_contents_str)
-        prompt = prompt.replace("{file_tree}", file_tree_str)
-        prompt = prompt.replace("{languages}", languages_str)
-
-        if parameters:
-            try:
-                params = json.loads(parameters)
-                for key, value in params.items():
-                    prompt = prompt.replace(f"{{{key}}}", str(value))
-            except json.JSONDecodeError:
-                pass
-
-        content = await CompletionService.complete(
-            prompt=prompt,
-            llm_connection_id=llm_connection_id,
-            session=session,
-            system_prompt=(
-                "You are writing a skill document that an AI agent will consume. "
-                "Write structured markdown optimized for machine parsing. "
-                "Start with a '## When To Use This Skill' section listing trigger terms. "
-                "Use bullet points, cite exact file paths, no filler. Target 200-400 lines. "
-                "Acknowledge gaps instead of speculating."
-            ),
-        )
-        if not content:
-            raise ValueError("LLM returned empty content for custom skill")
-
-        lang_list = ", ".join(list(languages.keys())[:3]) if languages else ""
-        description = f"Use when asked about {skill_name} in {repo_name}."
-        if lang_list:
-            description += f" Languages: {lang_list}."
-        description = description[:500]
-
-        skill = await skill_repo.upsert_github_skill(
-            tenant_id=tenant_id,
-            created_by=user_id,
-            github_repo_id=repo_id,
-            github_analysis_type=f"custom:{skill_name}",
-            name=skill_name,
-            description=description,
-            instructions=content,
-        )
-        return skill
-
-
-async def execute_custom_skill(
-    repo_id: UUID,
-    tenant_id: UUID,
-    user_id: UUID,
-    llm_connection_id: str,
-    prompt_template: str,
-    skill_name: str,
-    parameters: str | None,
-    github_token: str,
-    repo_full_name: str,
-    default_branch: str,
-) -> CustomSkill:
-    async with AsyncSessionFactory() as session:
-        skill_repo = CustomSkillRepository(session)
-
-        owner, repo_name = repo_full_name.split("/", 1)
-
-        tree = await github_service.get_repo_tree(github_token, owner, repo_name, default_branch)
-        blob_paths = _get_blob_paths(tree)
-        key_files = _select_key_files(blob_paths)
-
-        file_contents: dict[str, str] = {}
-        total_chars = 0
-        for path in key_files:
-            if total_chars >= MAX_CHARS_PER_SKILL:
-                break
-            content = await github_service.get_file_content(github_token, owner, repo_name, path)
-            if content:
-                file_contents[path] = content
-                total_chars += len(content)
-
-        languages = await github_service.get_repo_languages(github_token, owner, repo_name)
-
-        file_tree_str = "\n".join(blob_paths)
-
-        file_contents_str = "\n\n".join(f"### {p}\n```\n{c}\n```" for p, c in file_contents.items())
-        languages_str = json.dumps(languages, indent=2)
-
-        prompt = prompt_template.replace("{file_contents}", file_contents_str)
-        prompt = prompt.replace("{file_tree}", file_tree_str)
-        prompt = prompt.replace("{languages}", languages_str)
-
-        if parameters:
-            try:
-                params = json.loads(parameters)
-                for key, value in params.items():
-                    prompt = prompt.replace(f"{{{key}}}", str(value))
-            except json.JSONDecodeError:
-                pass
-
-        content = await CompletionService.complete(
-            prompt=prompt,
-            llm_connection_id=llm_connection_id,
-            session=session,
-            system_prompt=(
-                "You are writing a skill document that an AI agent will consume. "
-                "Write structured markdown optimized for machine parsing. "
-                "Start with a '## When To Use This Skill' section listing trigger terms. "
-                "Use bullet points, cite exact file paths, no filler. Target 200-400 lines. "
-                "Acknowledge gaps instead of speculating."
-            ),
-        )
-        if not content:
-            raise ValueError("LLM returned empty content for custom skill")
-
-        lang_list = ", ".join(list(languages.keys())[:3]) if languages else ""
-        description = f"Use when asked about {skill_name} in {repo_full_name}."
-        if lang_list:
-            description += f" Languages: {lang_list}."
-        description = description[:500]
-
-        skill = await skill_repo.upsert_github_skill(
-            tenant_id=tenant_id,
-            created_by=user_id,
-            github_repo_id=repo_id,
-            github_analysis_type=f"custom:{skill_name}",
-            name=skill_name,
-            description=description,
-            instructions=content,
-        )
-        return skill
