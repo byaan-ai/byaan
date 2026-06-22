@@ -17,11 +17,12 @@ from server.services.claude_mcp_service import DISALLOWED_BUILTIN_TOOLS, stream_
 from server.services.llm_service import ModelService
 from server.services.unified_agent import is_using_claude_code_auth
 from server.utils.custom_logger import get_logger
+from server.utils.litellm_utils import supports_custom_temperature
 
 logger = get_logger(__name__)
 
 ALL_BUILTIN_TOOLS = [*DISALLOWED_BUILTIN_TOOLS, "Read", "ToolSearch"]
-_TOOL_CALL_RE = re.compile(r"\[\[TOOL_CALL:[^\]]*\]\]")
+_TOOL_CALL_RE = re.compile(r"\[\[TOOL_CALL:.*?\]\](?=\[\[TOOL_CALL|[^\[\]]|$)", re.DOTALL)
 
 CompletionErrorReason = Literal[
     "auth",
@@ -69,11 +70,21 @@ class CompletionService:
         session: AsyncSession,
         system_prompt: str | None = None,
         use_claude_sdk: bool | None = None,
-    ) -> str:
+        model: str | None = None,
+    ) -> str | None:
         """
         Get a completion from the appropriate LLM based on connection type.
 
-        Raises CompletionError with a classified reason on any failure.
+        Args:
+            prompt: The user prompt/message
+            llm_connection_id: The LLM connection to use
+            session: Database session
+            system_prompt: Optional system instructions
+            use_claude_sdk: If provided, skip the DB auth check and use this value directly
+            model: Optional model identifier to pass to the underlying provider
+
+        Returns:
+            The completion text, or None if failed
         """
         llm_id = str(llm_connection_id)
 
@@ -85,15 +96,15 @@ class CompletionService:
                 return await CompletionService._complete_with_claude_sdk(
                     prompt=prompt,
                     system_prompt=system_prompt,
+                    model=model,
                 )
-            return await CompletionService._complete_with_litellm(
-                prompt=prompt,
-                llm_connection_id=llm_id,
-                system_prompt=system_prompt,
-            )
-        except CompletionError as e:
-            logger.error(f"Completion failed [{e.reason}]: {e.message}", exc_info=True)
-            raise
+            else:
+                return await CompletionService._complete_with_litellm(
+                    prompt=prompt,
+                    llm_connection_id=llm_id,
+                    system_prompt=system_prompt,
+                    model=model,
+                )
         except Exception as e:
             err = _classify(e)
             logger.error(f"Completion failed [{err.reason}]: {err.message}", exc_info=True)
@@ -103,6 +114,7 @@ class CompletionService:
     async def _complete_with_claude_sdk(
         prompt: str,
         system_prompt: str | None = None,
+        model: str | None = None,
     ) -> str:
         """Complete using Claude Code SDK with all builtin tools disabled.
 
@@ -128,7 +140,7 @@ class CompletionService:
         gen = stream_claude_with_mcp_tools(
             prompt=prompt,
             tools=None,
-            model=None,
+            model=model,
             instructions=system_prompt,
             context=None,
             disallowed_tools_override=ALL_BUILTIN_TOOLS,
@@ -158,9 +170,10 @@ class CompletionService:
         prompt: str,
         llm_connection_id: str,
         system_prompt: str | None = None,
-    ) -> str:
+        model: str | None = None,
+    ) -> str | None:
         """Complete using LiteLLM."""
-        model_instance = await ModelService.get_litellm_model_instance(llm_connection_id)
+        model_instance = await ModelService.get_litellm_model_instance(llm_connection_id, model=model)
         if not model_instance:
             raise CompletionError(
                 "model_unavailable",
@@ -172,11 +185,14 @@ class CompletionService:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        response = await acompletion(
-            model=model_instance.model,
-            messages=messages,
-            temperature=0,
-        )
+        completion_kwargs: dict = {
+            "model": model_instance.model,
+            "messages": messages,
+        }
+        if supports_custom_temperature(model_instance.model):
+            completion_kwargs["temperature"] = 0
+
+        response = await acompletion(**completion_kwargs)
         content = response.choices[0].message.content  # type: ignore[union-attr]
         stripped = content.strip() if content else ""
         if not stripped:

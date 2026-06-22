@@ -91,18 +91,14 @@ async def build_litellm_params(conn: LLMConnection, session=None, model: str = N
             logger.debug(f"Removed 'codex/' prefix from model name: {model_name}")
 
     if not model_name:
-        if conn.type == "openai":
-            model_name = "gpt-5.4"
-        elif conn.type == "anthropic":
-            model_name = "claude-sonnet-4-5"
-        elif conn.type == "codex":
-            model_name = "gpt-5.4"
-        elif conn.type == "claude_code":
-            model_name = "claude-opus-4.6"
-        elif conn.type == "openrouter":
-            model_name = "anthropic/claude-sonnet-4.5"
-        elif conn.type == "groq":
-            model_name = "moonshotai/kimi-k2-instruct-0905"
+        provider_models = MODELS_BY_PROVIDER.get(conn.type, [])
+        if provider_models:
+            default_with_prefix = provider_models[0]
+            own_prefix = f"{conn.type}/"
+            if default_with_prefix.startswith(own_prefix):
+                model_name = default_with_prefix[len(own_prefix) :]
+            else:
+                model_name = default_with_prefix
         elif conn.type == "azure":
             raise ValueError("Azure deployment name must be provided in the configuration.")
         elif conn.type == "bedrock":
