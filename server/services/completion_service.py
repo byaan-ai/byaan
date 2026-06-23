@@ -121,7 +121,7 @@ class CompletionService:
         If the model emits only tool calls (post-strip result is empty), retry once with a
         stricter instruction. If still empty, raise CompletionError('empty', ...).
         """
-        result = await CompletionService._run_claude_sdk_once(prompt, system_prompt)
+        result = await CompletionService._run_claude_sdk_once(prompt, system_prompt, model)
         if result:
             return result
 
@@ -129,13 +129,13 @@ class CompletionService:
             "Output only the final markdown document. Do not call any tools. "
             "Do not emit '[[TOOL_CALL:...]]'. Begin your response with the first line of the markdown."
         )
-        result = await CompletionService._run_claude_sdk_once(prompt, retry_system)
+        result = await CompletionService._run_claude_sdk_once(prompt, retry_system, model)
         if result:
             return result
         raise CompletionError("empty", "Claude SDK produced only tool-call output")
 
     @staticmethod
-    async def _run_claude_sdk_once(prompt: str, system_prompt: str | None) -> str:
+    async def _run_claude_sdk_once(prompt: str, system_prompt: str | None, model: str | None = None) -> str:
         result = ""
         gen = stream_claude_with_mcp_tools(
             prompt=prompt,
