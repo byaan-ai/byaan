@@ -769,7 +769,7 @@ async def create_unified_agent(
 
         github_repos = {}
         local_repos = {}
-        if tenant_id and user_id and session:
+        if tenant_id and session:
             github_repos = await _load_github_repos_for_agent(tenant_id, user_id, session)
             local_repos = await _load_local_repos_for_agent(tenant_id, user_id, session)
 
