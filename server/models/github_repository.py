@@ -35,6 +35,7 @@ class GitHubRepository(Base):
     analysis_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     language_breakdown: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    scope: Mapped[str] = mapped_column(String(10), nullable=False, default="user", server_default="user")
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=False), default=datetime.now, server_default=func.current_timestamp()

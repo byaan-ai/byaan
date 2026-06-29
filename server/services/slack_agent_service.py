@@ -141,6 +141,7 @@ class SlackAgentService:
                 request=agent_request,
                 session=session,
                 tenant_id=workspace.tenant_id,
+                user_id=None,
             )
 
             if new_notebook_id and conversation.notebook_id is None:
@@ -333,8 +334,13 @@ class SlackAgentService:
         request: AgentRequest,
         session: AsyncSession,
         tenant_id: UUID,
+        user_id: UUID | None = None,
     ) -> tuple[str, UUID | None, bool, bool]:
         """Run the unified agent and collect the full response.
+
+        ``user_id`` is optional because Slack messages are workspace-scoped and may not map to
+        an individual Byaan user. The unified agent will fall back to org-scoped resources
+        (skills, GitHub repos/tokens) when ``user_id`` is None.
 
         Returns:
             Tuple of (response_text, notebook_id if created, dashboard_generated, query_executed)
@@ -344,7 +350,7 @@ class SlackAgentService:
         dashboard_generated = False
         query_executed = False
 
-        async for event in stream_handoff_agent_response(request, session, tenant_id=tenant_id):
+        async for event in stream_handoff_agent_response(request, session, tenant_id=tenant_id, user_id=user_id):
             if event.startswith("data: "):
                 try:
                     data = json.loads(event[6:])
@@ -621,6 +627,7 @@ User's question:
                 request=request,
                 tenant_id=workspace.tenant_id,
                 session=session,
+                user_id=None,
             )
 
             if dashboard_generated:

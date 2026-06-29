@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -106,8 +106,27 @@ class GitHubRepoRepository:
             select(GitHubRepository)
             .where(
                 GitHubRepository.tenant_id == tenant_id,
-                GitHubRepository.user_id == user_id,
                 GitHubRepository.source == source,
+                GitHubRepository.is_active.is_(True),
+                or_(
+                    GitHubRepository.user_id == user_id,
+                    GitHubRepository.scope == "org",
+                ),
+            )
+            .options(selectinload(GitHubRepository.skills))
+            .order_by(GitHubRepository.updated_at.desc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def list_org_accessible(self, tenant_id: UUID, source: str) -> list[GitHubRepository]:
+        """Get all active org-scoped repositories for a tenant (no user required)."""
+        stmt = (
+            select(GitHubRepository)
+            .where(
+                GitHubRepository.tenant_id == tenant_id,
+                GitHubRepository.source == source,
+                GitHubRepository.scope == "org",
                 GitHubRepository.is_active.is_(True),
             )
             .options(selectinload(GitHubRepository.skills))
@@ -115,6 +134,20 @@ class GitHubRepoRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def set_scope(self, repo_id: UUID, tenant_id: UUID, user_id: UUID, scope: str) -> GitHubRepository | None:
+        """Update scope ('user' or 'org'). Only the connecting user may change it."""
+        if scope not in ("user", "org"):
+            return None
+        repo = await self.get(repo_id, tenant_id)
+        if not repo:
+            return None
+        if repo.user_id != user_id:
+            return None
+        repo.scope = scope
+        await self._session.commit()
+        await self._session.refresh(repo, ["skills"])
+        return repo
 
     async def get_by_local_path(self, tenant_id: UUID, local_path: str) -> GitHubRepository | None:
         stmt = select(GitHubRepository).where(

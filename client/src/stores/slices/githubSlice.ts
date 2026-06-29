@@ -15,6 +15,7 @@ export interface GitHubSlice {
   setConnectedRepos: (repos: ConnectedRepo[]) => void
   addConnectedRepo: (repo: ConnectedRepo) => void
   updateRepoStatus: (repoId: string, status: string, error?: string | null) => void
+  updateRepoScope: (repoId: string, scope: 'user' | 'org') => void
   removeConnectedRepo: (repoId: string) => void
   setSelectedRepo: (repo: ConnectedRepo | null) => void
 }
@@ -53,6 +54,11 @@ export const createGitHubSlice: StateCreator<
       connectedRepos: state.connectedRepos.map((r) =>
         r.id === repoId ? { ...r, analysis_status: status, analysis_error: error } : r
       ),
+    })),
+
+  updateRepoScope: (repoId, scope) =>
+    set((state) => ({
+      connectedRepos: state.connectedRepos.map((r) => (r.id === repoId ? { ...r, scope } : r)),
     })),
 
   removeConnectedRepo: (repoId) =>
