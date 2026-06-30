@@ -374,7 +374,7 @@ def _add_skill_credentials_to_context(
         context[f"{key}_credentials"] = skill_data.get("credentials", {})
 
 
-async def _load_github_repos_for_agent(tenant_id: UUID, user_id: UUID, session: AsyncSession) -> dict[str, dict]:
+async def _load_github_repos_for_agent(tenant_id: UUID, user_id: UUID | None, session: AsyncSession) -> dict[str, dict]:
     try:
         from server.repositories.custom_skill import CustomSkillRepository
         from server.repositories.github_repository import GitHubRepoRepository
@@ -383,12 +383,15 @@ async def _load_github_repos_for_agent(tenant_id: UUID, user_id: UUID, session: 
         repo_repo = GitHubRepoRepository(session)
         custom_skill_repo = CustomSkillRepository(session)
 
-        token = await github_service.get_github_token(tenant_id, user_id, session)
+        token = await _get_github_token_for_agent(tenant_id, user_id, session)
         if not token:
             logger.info("[GITHUB AGENT] No GitHub token available, skipping GitHub repos")
             return {}
 
-        repos = await repo_repo.list_by_user_and_source(tenant_id, user_id, "github")
+        if user_id:
+            repos = await repo_repo.list_by_user_and_source(tenant_id, user_id, "github")
+        else:
+            repos = await repo_repo.list_org_accessible(tenant_id, "github")
 
         logger.info(f"[GITHUB AGENT] Found {len(repos)} GitHub repos for user {user_id}")
 
@@ -428,11 +431,15 @@ async def _load_github_repos_for_agent(tenant_id: UUID, user_id: UUID, session: 
         return {}
 
 
-async def _get_github_token_for_agent(tenant_id: UUID, user_id: UUID, session: AsyncSession) -> str | None:
+async def _get_github_token_for_agent(tenant_id: UUID, user_id: UUID | None, session: AsyncSession) -> str | None:
     try:
         from server.services import github_service
 
-        return await github_service.get_github_token(tenant_id, user_id, session)
+        if user_id:
+            token = await github_service.get_github_token(tenant_id, user_id, session)
+            if token:
+                return token
+        return await github_service.get_org_github_token(tenant_id, session)
     except Exception:
         return None
 
@@ -471,17 +478,31 @@ SKILL TYPES:
 - `custom`: User-created analysis skills
 
 TOOLS & WORKFLOW:
-1. `get_repo_skill(repo_id, skill_type)` — Read a skill's full content. Start here for any repo question.
+1. `get_repo_skill(repo_id, skill_type)` — Read a pre-analyzed skill summary. Best for HIGH-LEVEL overview/architecture.
 2. `list_repo_skills(repo_id)` — List all available skills for a repo.
-3. `search_repo_code(repo_id, query)` — Search file paths in the repo tree.
-4. `get_repo_file(repo_id, path)` — Fetch actual file content from GitHub.
+3. `search_repo_code(repo_id, query)` — Search file paths in the repo tree (case-insensitive substring match).
+4. `get_repo_file(repo_id, path)` — Fetch actual CURRENT file content from GitHub. Use this for any question about specific code.
 5. `create_repo_skill(repo_id, skill_name, description)` — Create a custom analysis skill. Describe what to analyze; the tool fetches code, runs LLM analysis, and saves the result.
 
-WHEN TO USE:
-- When a user asks about their codebase, architecture, code patterns, or anything related to a connected repo
-- When a user mentions a repo name or asks "how does X work in my code"
-- Load the relevant skill FIRST for context, then use search_repo_code/get_repo_file for specific details
-- You can combine repo skills with database queries when the user wants to understand both code and data
+⚠ IMPORTANT: Skills are SNAPSHOTS captured at analyze time. They may be stale after the user pushes new commits.
+For any question about RECENT or SPECIFIC code, always read the live file via get_repo_file — do NOT rely on the skill alone.
+
+WHEN TO USE WHICH:
+- Project orientation (architecture, tech stack, structure, conventions) → start with get_repo_skill(skill_type="codebase").
+- Data layer questions (models, schemas, migrations, ORM setup) → get_repo_skill(skill_type="data_layer").
+- Locating something specific in the code → search_repo_code to find the path, then get_repo_file to read it. Do NOT guess paths.
+- Reasoning about current/recent behavior, dependencies, configs, error traces → get_repo_file on the implicated files. Skills can be stale.
+- Cross-cutting analysis the existing skills do not cover → create_repo_skill with a clear focus description.
+- Combine with database queries when the user asks about both code and data.
+
+BE PROACTIVE — do NOT wait for the user to say "look in the repo" or "check the github". If <github_repos> contains a repo whose name or context matches the question, explore it on the FIRST turn.
+
+PERSISTENCE — save what you discover:
+After exploring a repo (reading files, mapping handlers, diagnosing bugs), call add_learning to record reusable findings.
+Title MUST start with the exact repo_full_name shown above (e.g. "<repo_full_name> — <insight>") so search_learnings can find it later.
+Save WHERE code lives, HOW modules are wired, gotchas — never copy file contents.
+Before exploring, call search_learnings with the repo_full_name + topic to recall past discoveries.
+This is what stops the "push me again" loop — every exploration should leave behind a learning the next session reuses.
 
 CREATING CUSTOM SKILLS:
 - When a user asks for analysis NOT covered by existing skills (security audit, API docs, performance review, etc.)
@@ -748,7 +769,7 @@ async def create_unified_agent(
 
         github_repos = {}
         local_repos = {}
-        if tenant_id and user_id and session:
+        if tenant_id and session:
             github_repos = await _load_github_repos_for_agent(tenant_id, user_id, session)
             local_repos = await _load_local_repos_for_agent(tenant_id, user_id, session)
 

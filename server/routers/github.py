@@ -33,6 +33,7 @@ from server.schemas.standard_response import error_response, success_response
 from server.services import github_service
 from server.utils.config_loader import get_email_config, is_self_hosted
 from server.utils.custom_logger import get_logger
+from server.utils.deployment import is_feature_enabled
 
 logger = get_logger(__name__)
 
@@ -415,10 +416,102 @@ async def delete_repo(
     session: AsyncSession = Depends(get_async_session),
 ):
     repo_repo = GitHubRepoRepository(session)
+    existing = await repo_repo.get(repo_id, auth.tenant_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    if existing.user_id != auth.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the user who connected this repository can disconnect it",
+        )
+
+    was_shared = existing.scope == "org"
     deleted = await repo_repo.delete(repo_id, auth.tenant_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+
+    if was_shared:
+        remaining = await repo_repo.list_org_accessible(auth.tenant_id, "github")
+        if not remaining:
+            await github_service.unshare_org_github_token(auth.tenant_id, session)
+
     return success_response(message="Repository disconnected")
+
+
+@router.post("/github/repos/{repo_id}/share")
+async def share_repo_with_team(
+    repo_id: UUID,
+    auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Promote a connected repository to org scope so workspace-scoped callers (Slack) can use it."""
+    if not is_feature_enabled("team_sharing_enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Team sharing is not available in this deployment mode",
+        )
+    repo_repo = GitHubRepoRepository(session)
+    existing = await repo_repo.get(repo_id, auth.tenant_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    if existing.user_id != auth.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the user who connected this repository can share it",
+        )
+
+    repo = await repo_repo.set_scope(repo_id, auth.tenant_id, auth.user_id, "org")
+    if not repo:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to share repository")
+
+    token_shared = await github_service.share_github_token_with_org(auth.tenant_id, auth.user_id, session)
+    if not token_shared:
+        await repo_repo.set_scope(repo_id, auth.tenant_id, auth.user_id, "user")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No GitHub credentials available to share. Reconnect your GitHub account and try again.",
+        )
+
+    return success_response(
+        data=GitHubRepoResponse.model_validate(repo).model_dump(mode="json"),
+        message="Repository shared with team",
+    )
+
+
+@router.post("/github/repos/{repo_id}/unshare")
+async def unshare_repo_from_team(
+    repo_id: UUID,
+    auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Revoke org scope. Removes the shared GitHub token if no other org-scoped repo remains."""
+    if not is_feature_enabled("team_sharing_enabled"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Team sharing is not available in this deployment mode",
+        )
+    repo_repo = GitHubRepoRepository(session)
+    existing = await repo_repo.get(repo_id, auth.tenant_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    if existing.user_id != auth.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the user who connected this repository can unshare it",
+        )
+
+    repo = await repo_repo.set_scope(repo_id, auth.tenant_id, auth.user_id, "user")
+    if not repo:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to unshare repository")
+
+    remaining = await repo_repo.list_org_accessible(auth.tenant_id, "github")
+    if not remaining:
+        await github_service.unshare_org_github_token(auth.tenant_id, session)
+
+    return success_response(
+        data=GitHubRepoResponse.model_validate(repo).model_dump(mode="json"),
+        message="Repository is now personal",
+    )
 
 
 # --- Analysis Endpoints ---
@@ -437,6 +530,8 @@ async def analyze_repo(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
 
     token = await github_service.get_github_token(auth.tenant_id, auth.user_id, session)
+    if not token and repo.scope == "org":
+        token = await github_service.get_org_github_token(auth.tenant_id, session)
     if not token:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="GitHub not connected")
 
