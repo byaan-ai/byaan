@@ -216,11 +216,32 @@ class SlackAgentService:
                                 value=value_str,
                             )
 
+                            action_buttons = [auto_button, customize_button, dashboard_button]
+
+                            download_value = json.dumps(
+                                {
+                                    "tables": valid_tables,
+                                    "thread_ts": thread_ts or event_ts,
+                                    "channel_id": channel_id,
+                                }
+                            )
+                            if len(download_value) <= 2000:
+                                download_excel_button = SlackBlockBuilder.button(
+                                    text="📥 Download Excel",
+                                    action_id="download_excel",
+                                    value=download_value,
+                                )
+                                action_buttons.append(download_excel_button)
+                            else:
+                                logger.warning(
+                                    f"Table data too large for download_excel button value ({len(download_value)} chars), skipping button"
+                                )
+
                             visualization_blocks = [
                                 SlackBlockBuilder.card(
-                                    title="📊 Visualization",
+                                    title="📊 Data and Visualization",
                                 ),
-                                SlackBlockBuilder.actions([auto_button, customize_button, dashboard_button]),
+                                SlackBlockBuilder.actions(action_buttons),
                             ]
 
                         await slack_client.post_message(

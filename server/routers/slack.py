@@ -238,6 +238,17 @@ async def slack_interactivity(
 
             return JSONResponse(status_code=200, content={"ok": True})
 
+        elif action_id == "download_excel":
+            value_data = json.loads(action.get("value", "{}"))
+
+            background_tasks.add_task(
+                _process_download_excel,
+                team_id=team_id,
+                table_data=value_data,
+            )
+
+            return JSONResponse(status_code=200, content={"ok": True})
+
     return JSONResponse(status_code=200, content={"ok": True})
 
 
@@ -447,9 +458,30 @@ async def _process_customize_chart_options(
                 ),
             )
 
+            top_action_buttons = [auto_button, customize_button, dashboard_button]
+            download_excel_value = json.dumps(
+                {
+                    "tables": tables,
+                    "thread_ts": thread_ts,
+                    "channel_id": channel_id,
+                }
+            )
+            if len(download_excel_value) <= 2000:
+                top_action_buttons.append(
+                    SlackBlockBuilder.button(
+                        text="📥 Download Excel",
+                        action_id="download_excel",
+                        value=download_excel_value,
+                    )
+                )
+            else:
+                logger.warning(
+                    f"Table data too large for download_excel button value ({len(download_excel_value)} chars), skipping button in customize view"
+                )
+
             blocks = [
-                SlackBlockBuilder.header("📊 Visualization"),
-                SlackBlockBuilder.actions([auto_button, customize_button, dashboard_button]),
+                SlackBlockBuilder.header("📊 Data and Visualization"),
+                SlackBlockBuilder.actions(top_action_buttons),
                 SlackBlockBuilder.divider(),
                 SlackBlockBuilder.header("⚙️ Customize Your Chart"),
                 SlackBlockBuilder.section("Select the columns and chart type for your visualization."),
@@ -717,6 +749,51 @@ async def _process_generate_custom_chart(
 
     except Exception as e:
         logger.error(f"Error processing generate custom chart: {e}", exc_info=True)
+
+
+async def _process_download_excel(
+    team_id: str,
+    table_data: dict,
+):
+    """Build xlsx from parsed query result tables and upload to Slack thread."""
+    try:
+        async with AsyncSessionFactory() as session:
+            repo = SlackWorkspaceRepository(session)
+            workspace = await repo.get_by_team_id(team_id)
+
+            if not workspace:
+                logger.error(f"Workspace not found for team: {team_id}")
+                return
+
+            bot_token = await SlackAgentService._get_bot_token(workspace, session)
+            slack_client = SlackService(bot_token)
+
+            channel_id = table_data.get("channel_id")
+            thread_ts = table_data.get("thread_ts")
+
+            tables = table_data.get("tables") or []
+            if not tables:
+                await slack_client.post_message(
+                    channel=channel_id,
+                    thread_ts=thread_ts,
+                    text="❌ No query result tables found to export.",
+                )
+                return
+
+            from server.utils.slack_excel_builder import build_xlsx_from_tables
+
+            xlsx_bytes = build_xlsx_from_tables(tables)
+
+            sheet_word = "sheet" if len(tables) == 1 else "sheets"
+            await slack_client.upload_file(
+                channel=channel_id,
+                file_bytes=xlsx_bytes,
+                filename="query_results.xlsx",
+                thread_ts=thread_ts,
+                initial_comment=f"📥 Query results ({len(tables)} {sheet_word})",
+            )
+    except Exception as e:
+        logger.error(f"Error processing download excel: {e}", exc_info=True)
 
 
 @router.get("/config")
