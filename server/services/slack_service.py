@@ -1,11 +1,24 @@
 """Slack API service for posting messages."""
 
+import re
+
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
+
+
+_MENTION_RE = re.compile(r"<@[A-Z0-9]+(?:\|[^>]+)?>")
+
+
+def strip_bot_mentions(text: str, bot_user_id: str | None = None) -> str:
+    """Remove Slack user mentions (defaults to stripping every <@USER> token)."""
+    if bot_user_id:
+        text = re.sub(rf"<@{re.escape(bot_user_id)}(?:\|[^>]+)?>", "", text)
+    text = _MENTION_RE.sub("", text)
+    return text.strip()
 
 
 class SlackService:
@@ -117,3 +130,28 @@ class SlackService:
             error_code = e.response.get("error", "unknown_error")
             logger.error(f"Slack API error uploading file: {error_code}")
             raise
+
+    async def fetch_thread_replies(
+        self,
+        channel: str,
+        thread_ts: str,
+        limit: int = 20,
+    ) -> list[dict]:
+        """Fetch replies for a thread via conversations.replies.
+
+        Returns the most recent ``limit`` messages (oldest first). On any Slack
+        API error returns an empty list so callers can fall back gracefully.
+        """
+        try:
+            response = await self.client.conversations_replies(
+                channel=channel,
+                ts=thread_ts,
+                limit=min(limit, 100),
+            )
+            messages = response.get("messages", []) or []
+            if len(messages) > limit:
+                messages = messages[-limit:]
+            return messages
+        except SlackApiError as e:
+            logger.warning(f"Slack API error fetching thread replies: {e.response.get('error', 'unknown')}")
+            return []

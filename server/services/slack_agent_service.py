@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 litellm.drop_params = True
 
-from server.constants.models import MODELS_BY_PROVIDER
+from server.constants.models import MODELS_BY_PROVIDER, SLACK_CLASSIFIER_MODEL_BY_PROVIDER
 from server.models.slack_conversation import SlackConversation
 from server.models.slack_event_log import SlackEventLog
 from server.models.slack_workspace import SlackWorkspace
@@ -24,13 +24,21 @@ from server.services.completion_service import CompletionService
 from server.services.crypto_service import CryptoService
 from server.services.export_service import CompiledHtmlExportService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
-from server.services.slack_service import SlackService
+from server.services.slack_intent_classifier import classify_intent
+from server.services.slack_service import SlackService, strip_bot_mentions
+from server.services.slack_thread_filter import (
+    check_mute_keyword,
+    check_resume_keyword,
+    get_conversation,
+    layer1_should_skip,
+)
 from server.services.unified_agent import stream_handoff_agent_response
 from server.utils.custom_logger import get_logger
 from server.utils.slack_block_elements import SlackBlockBuilder
 from server.utils.slack_chart_detector import SlackChartDetector
 from server.utils.slack_formatter import markdown_to_slack_blocks
 from server.utils.slack_table_parser import SlackTableParser
+from server.utils.slack_thread_lock import acquire_thread_lock
 
 logger = get_logger(__name__)
 
@@ -39,7 +47,23 @@ class SlackAgentService:
     """Service for processing Slack messages through the AI agent."""
 
     CONFIRMATION_MESSAGE = "Hey, I'm working on your request. I'll let you know once it's ready."
-    SLACK_MENTION_HINT = "\n\n_@Byaan to continue the conversation_"
+    SLACK_MENTION_HINT = "\n\n_Reply here or @Byaan to continue the conversation_"
+
+    @staticmethod
+    async def _resolve_classifier_model(
+        llm_connection_id: UUID,
+        session: AsyncSession,
+        fallback_model: str | None,
+    ) -> str | None:
+        """Return a cheap classifier model for the connection's provider.
+
+        Falls back to the workspace default when the provider has no override
+        (Azure, Bedrock, Groq, xAI).
+        """
+        connection = await LLMConnectionRepository(session).get(llm_connection_id)
+        if not connection:
+            return fallback_model
+        return SLACK_CLASSIFIER_MODEL_BY_PROVIDER.get(connection.type, fallback_model)
 
     @staticmethod
     async def _resolve_model_for_connection(
@@ -148,120 +172,24 @@ class SlackAgentService:
                 conversation.notebook_id = new_notebook_id
                 await session.commit()
 
-            blocks, fallback_text = await SlackAgentService._summarize_for_slack(
-                raw_response=raw_response,
-                llm_connection_id=llm_connection_id,
-                tenant_id=workspace.tenant_id,
-                session=session,
-                model=resolved_model,
-            )
-
-            response_msg = await slack_client.post_message(
-                channel=channel_id,
-                text=fallback_text,
+            await SlackAgentService._post_agent_response(
+                workspace=workspace,
+                slack_client=slack_client,
+                conversation=conversation,
+                channel_id=channel_id,
                 thread_ts=thread_ts or event_ts,
-                blocks=blocks,
+                raw_response=raw_response,
+                dashboard_generated=dashboard_generated,
+                query_executed=query_executed,
+                llm_connection_id=llm_connection_id,
+                resolved_model=resolved_model,
+                append_mention_hint=True,
+                session=session,
             )
 
-            has_table = SlackTableParser.has_markdown_table(raw_response)
-            if has_table and query_executed and conversation.notebook_id:
-                try:
-                    all_tables = SlackChartDetector._extract_all_tables(raw_response)
-                    valid_tables = [t for t in all_tables if len(t) >= 2 and len(t) <= 21]
-
-                    if valid_tables:
-                        table_data = {
-                            "tables": valid_tables,
-                            "thread_ts": thread_ts or event_ts,
-                            "channel_id": channel_id,
-                            "notebook_id": str(conversation.notebook_id) if conversation.notebook_id else None,
-                            "tenant_id": str(workspace.tenant_id),
-                            "created_by": str(workspace.installed_by) if workspace.installed_by else None,
-                        }
-
-                        value_str = json.dumps(table_data)
-
-                        dashboard_button = SlackBlockBuilder.button(
-                            text="📊 Full Dashboard",
-                            action_id="generate_dashboard",
-                            value=json.dumps(
-                                {
-                                    "notebook_id": str(conversation.notebook_id),
-                                    "thread_ts": thread_ts or event_ts,
-                                    "channel_id": channel_id,
-                                }
-                            ),
-                        )
-
-                        if len(value_str) > 2000:
-                            logger.warning(
-                                f"Table data too large for button value ({len(value_str)} chars), showing only dashboard button"
-                            )
-                            visualization_blocks = [
-                                SlackBlockBuilder.card(
-                                    title="📊 Visualization",
-                                ),
-                                SlackBlockBuilder.actions([dashboard_button]),
-                            ]
-                        else:
-                            auto_button = SlackBlockBuilder.button(
-                                text="🤖 Auto Generate",
-                                action_id="auto_generate_chart",
-                                value=value_str,
-                            )
-
-                            customize_button = SlackBlockBuilder.button(
-                                text="⚙️ Customize",
-                                action_id="customize_chart_show_options",
-                                value=value_str,
-                            )
-
-                            action_buttons = [auto_button, customize_button, dashboard_button]
-
-                            download_value = json.dumps(
-                                {
-                                    "tables": valid_tables,
-                                    "thread_ts": thread_ts or event_ts,
-                                    "channel_id": channel_id,
-                                }
-                            )
-                            if len(download_value) <= 2000:
-                                download_excel_button = SlackBlockBuilder.button(
-                                    text="📥 Download Excel",
-                                    action_id="download_excel",
-                                    value=download_value,
-                                )
-                                action_buttons.append(download_excel_button)
-                            else:
-                                logger.warning(
-                                    f"Table data too large for download_excel button value ({len(download_value)} chars), skipping button"
-                                )
-
-                            visualization_blocks = [
-                                SlackBlockBuilder.card(
-                                    title="📊 Data and Visualization",
-                                ),
-                                SlackBlockBuilder.actions(action_buttons),
-                            ]
-
-                        await slack_client.post_message(
-                            channel=channel_id,
-                            text="Visualization options available",
-                            thread_ts=thread_ts or event_ts,
-                            blocks=visualization_blocks,
-                        )
-                except Exception as e:
-                    logger.error(f"Error posting visualization options: {e}", exc_info=True)
-
-            if dashboard_generated and conversation.notebook_id:
-                response_ts = response_msg.get("ts")
-                await SlackAgentService._upload_dashboard_screenshot(
-                    slack_client=slack_client,
-                    channel_id=channel_id,
-                    thread_ts=response_ts,
-                    notebook_id=conversation.notebook_id,
-                    session=session,
-                )
+            conversation.bot_owned = True
+            conversation.last_bot_reply_at = datetime.now()
+            await session.commit()
 
             event_log.processing_status = "completed"
             await session.commit()
@@ -409,6 +337,7 @@ class SlackAgentService:
         tenant_id: UUID,
         session: AsyncSession,
         model: str | None = None,
+        append_mention_hint: bool = True,
     ) -> tuple[list[dict], str]:
         """Clean agent response and convert to Slack Block Kit format."""
         try:
@@ -463,7 +392,8 @@ Output only the cleaned message in Markdown, nothing else."""
             cleaned = re.sub(r"Tool executed successfully", "", cleaned)
             cleaned = cleaned.strip()
 
-            cleaned += SlackAgentService.SLACK_MENTION_HINT
+            if append_mention_hint:
+                cleaned += SlackAgentService.SLACK_MENTION_HINT
 
             logger.info(
                 f"Processing Slack response for tables/charts. Has table: {SlackTableParser.has_markdown_table(cleaned)}"
@@ -488,7 +418,7 @@ Output only the cleaned message in Markdown, nothing else."""
 
         except Exception as e:
             logger.error(f"Error summarizing for Slack: {e}", exc_info=True)
-            text = raw_response + SlackAgentService.SLACK_MENTION_HINT
+            text = raw_response + (SlackAgentService.SLACK_MENTION_HINT if append_mention_hint else "")
             return markdown_to_slack_blocks(text)
 
     @staticmethod
@@ -603,6 +533,370 @@ User's question:
                 exc_info=True,
                 extra={"posthog_context": {"notebook_id": str(notebook_id)}},
             )
+
+    @staticmethod
+    async def _post_agent_response(
+        workspace: SlackWorkspace,
+        slack_client: SlackService,
+        conversation: SlackConversation,
+        channel_id: str,
+        thread_ts: str,
+        raw_response: str,
+        dashboard_generated: bool,
+        query_executed: bool,
+        llm_connection_id: UUID,
+        resolved_model: str | None,
+        append_mention_hint: bool,
+        session: AsyncSession,
+    ) -> None:
+        """Shared post-agent rendering: summarize, post message, viz buttons, dashboard upload."""
+        blocks, fallback_text = await SlackAgentService._summarize_for_slack(
+            raw_response=raw_response,
+            llm_connection_id=llm_connection_id,
+            tenant_id=workspace.tenant_id,
+            session=session,
+            model=resolved_model,
+            append_mention_hint=append_mention_hint,
+        )
+
+        response_msg = await slack_client.post_message(
+            channel=channel_id,
+            text=fallback_text,
+            thread_ts=thread_ts,
+            blocks=blocks,
+        )
+
+        has_table = SlackTableParser.has_markdown_table(raw_response)
+        if has_table and query_executed and conversation.notebook_id:
+            try:
+                all_tables = SlackChartDetector._extract_all_tables(raw_response)
+                valid_tables = [t for t in all_tables if len(t) >= 2 and len(t) <= 21]
+
+                if valid_tables:
+                    table_data = {
+                        "tables": valid_tables,
+                        "thread_ts": thread_ts,
+                        "channel_id": channel_id,
+                        "notebook_id": str(conversation.notebook_id) if conversation.notebook_id else None,
+                        "tenant_id": str(workspace.tenant_id),
+                        "created_by": str(workspace.installed_by) if workspace.installed_by else None,
+                    }
+
+                    value_str = json.dumps(table_data)
+
+                    dashboard_button = SlackBlockBuilder.button(
+                        text="📊 Full Dashboard",
+                        action_id="generate_dashboard",
+                        value=json.dumps(
+                            {
+                                "notebook_id": str(conversation.notebook_id),
+                                "thread_ts": thread_ts,
+                                "channel_id": channel_id,
+                            }
+                        ),
+                    )
+
+                    if len(value_str) > 2000:
+                        logger.warning(
+                            f"Table data too large for button value ({len(value_str)} chars), showing only dashboard button"
+                        )
+                        visualization_blocks = [
+                            SlackBlockBuilder.card(title="📊 Visualization"),
+                            SlackBlockBuilder.actions([dashboard_button]),
+                        ]
+                    else:
+                        auto_button = SlackBlockBuilder.button(
+                            text="🤖 Auto Generate",
+                            action_id="auto_generate_chart",
+                            value=value_str,
+                        )
+                        customize_button = SlackBlockBuilder.button(
+                            text="⚙️ Customize",
+                            action_id="customize_chart_show_options",
+                            value=value_str,
+                        )
+                        action_buttons = [auto_button, customize_button, dashboard_button]
+
+                        download_value = json.dumps(
+                            {
+                                "tables": valid_tables,
+                                "thread_ts": thread_ts,
+                                "channel_id": channel_id,
+                            }
+                        )
+                        if len(download_value) <= 2000:
+                            download_excel_button = SlackBlockBuilder.button(
+                                text="📥 Download Excel",
+                                action_id="download_excel",
+                                value=download_value,
+                            )
+                            action_buttons.append(download_excel_button)
+                        else:
+                            logger.warning(
+                                f"Table data too large for download_excel button value ({len(download_value)} chars), skipping button"
+                            )
+
+                        visualization_blocks = [
+                            SlackBlockBuilder.card(title="📊 Data and Visualization"),
+                            SlackBlockBuilder.actions(action_buttons),
+                        ]
+
+                    await slack_client.post_message(
+                        channel=channel_id,
+                        text="Visualization options available",
+                        thread_ts=thread_ts,
+                        blocks=visualization_blocks,
+                    )
+            except Exception as e:
+                logger.error(f"Error posting visualization options: {e}", exc_info=True)
+
+        if dashboard_generated and conversation.notebook_id:
+            response_ts = response_msg.get("ts")
+            await SlackAgentService._upload_dashboard_screenshot(
+                slack_client=slack_client,
+                channel_id=channel_id,
+                thread_ts=response_ts,
+                notebook_id=conversation.notebook_id,
+                session=session,
+            )
+
+    @staticmethod
+    async def _build_history_from_slack(
+        slack_client: SlackService,
+        channel_id: str,
+        thread_ts: str,
+        bot_user_id: str | None,
+        limit: int = 12,
+    ) -> list[dict]:
+        replies = await slack_client.fetch_thread_replies(channel_id, thread_ts, limit=limit)
+        history: list[dict] = []
+        for msg in replies:
+            text = strip_bot_mentions(msg.get("text", "") or "", bot_user_id)
+            if not text:
+                continue
+            is_bot = bool(msg.get("bot_id")) or (bot_user_id and msg.get("user") == bot_user_id)
+            history.append({"author": "byaan" if is_bot else "user", "text": text})
+        return history
+
+    @staticmethod
+    async def process_thread_followup(
+        workspace: SlackWorkspace,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        text: str,
+        event_ts: str,
+        event_id: str,
+        session: AsyncSession,
+    ) -> None:
+        """Process a non-mention message in a Byaan-owned thread.
+
+        Runs cheap guards first, then classifier, then serialized agent invocation.
+        Silent skip on any gate failure to avoid noisy channels.
+        """
+        event_log = SlackEventLog(
+            slack_workspace_id=workspace.id,
+            event_type="message_followup",
+            event_id=event_id,
+            slack_channel_id=channel_id,
+            slack_user_id=user_id,
+            processing_status="processing",
+        )
+        session.add(event_log)
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            logger.info(f"Duplicate Slack event: {event_id}")
+            return
+
+        bot_token = await SlackAgentService._get_bot_token(workspace, session)
+        slack_client = SlackService(bot_token)
+
+        try:
+            conversation = await get_conversation(workspace.id, channel_id, thread_ts, session)
+
+            if check_resume_keyword(text):
+                if conversation and conversation.auto_follow_muted:
+                    conversation.auto_follow_muted = False
+                    await session.commit()
+                    await slack_client.post_message(
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text="👋 Byaan is back. I'll follow up on this thread again.",
+                    )
+                event_log.processing_status = "completed"
+                await session.commit()
+                return
+
+            if check_mute_keyword(text):
+                if conversation:
+                    conversation.auto_follow_muted = True
+                    await session.commit()
+                    await slack_client.post_message(
+                        channel=channel_id,
+                        thread_ts=thread_ts,
+                        text="🤫 Muted for this thread. Mention @Byaan or say 'resume byaan' to re-enable.",
+                    )
+                event_log.processing_status = "completed"
+                await session.commit()
+                return
+
+            skip, reason = layer1_should_skip(text, workspace.bot_user_id, conversation)
+            if skip:
+                logger.info(f"Slack followup layer1 skip: reason={reason} thread={thread_ts}")
+                event_log.processing_status = "skipped_layer1"
+                event_log.error_message = reason
+                await session.commit()
+                return
+
+            history = await SlackAgentService._build_history_from_slack(
+                slack_client=slack_client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                bot_user_id=workspace.bot_user_id,
+            )
+
+            llm_connection_id = workspace.default_llm_connection_id
+            if not llm_connection_id:
+                logger.warning(f"Slack workspace {workspace.id} has no default LLM connection; skipping followup")
+                event_log.processing_status = "skipped_no_llm"
+                await session.commit()
+                return
+
+            resolved_model = await SlackAgentService._resolve_model_for_connection(llm_connection_id, session)
+            classifier_model = await SlackAgentService._resolve_classifier_model(
+                llm_connection_id=llm_connection_id,
+                session=session,
+                fallback_model=resolved_model,
+            )
+            logger.info(
+                f"[SLACK] Classifier model for connection {llm_connection_id}: {classifier_model} "
+                f"(agent model: {resolved_model})"
+            )
+            cleaned_text = strip_bot_mentions(text, workspace.bot_user_id)
+
+            should_respond, decision_source = await classify_intent(
+                text=cleaned_text,
+                history=history,
+                llm_connection_id=llm_connection_id,
+                session=session,
+                model=classifier_model,
+            )
+
+            logger.info(
+                f"Slack followup classifier decision: respond={should_respond} "
+                f"source={decision_source} model={classifier_model} thread={thread_ts}"
+            )
+
+            if not should_respond:
+                event_log.processing_status = "skipped_classifier"
+                event_log.error_message = decision_source
+                await session.commit()
+                return
+
+            await slack_client.post_message(
+                channel=channel_id,
+                text=SlackAgentService.CONFIRMATION_MESSAGE,
+                thread_ts=thread_ts,
+            )
+
+            async with acquire_thread_lock(workspace.slack_team_id, channel_id, thread_ts):
+                conversation = await SlackAgentService._get_or_create_conversation(
+                    workspace=workspace,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    user_id=user_id,
+                    session=session,
+                )
+
+                slack_prompt = await SlackAgentService._build_followup_prompt(
+                    question=cleaned_text,
+                    tenant_id=workspace.tenant_id,
+                    session=session,
+                )
+
+                agent_request = AgentRequest(
+                    message=slack_prompt,
+                    notebook_id=conversation.notebook_id,
+                    llm_connection_id=llm_connection_id,
+                    create_notebook=conversation.notebook_id is None,
+                    model=resolved_model,
+                )
+
+                raw_response, new_notebook_id, dashboard_generated, query_executed = await SlackAgentService._run_agent(
+                    request=agent_request,
+                    session=session,
+                    tenant_id=workspace.tenant_id,
+                    user_id=None,
+                )
+
+                if new_notebook_id and conversation.notebook_id is None:
+                    conversation.notebook_id = new_notebook_id
+                    await session.commit()
+
+                await SlackAgentService._post_agent_response(
+                    workspace=workspace,
+                    slack_client=slack_client,
+                    conversation=conversation,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    raw_response=raw_response,
+                    dashboard_generated=dashboard_generated,
+                    query_executed=query_executed,
+                    llm_connection_id=llm_connection_id,
+                    resolved_model=resolved_model,
+                    append_mention_hint=True,
+                    session=session,
+                )
+
+                conversation.last_bot_reply_at = datetime.now()
+                await session.commit()
+
+            event_log.processing_status = "completed"
+            await session.commit()
+
+        except Exception as e:
+            logger.error(f"Error processing Slack followup: {e}", exc_info=True)
+            event_log.processing_status = "failed"
+            event_log.error_message = str(e)
+            await session.commit()
+
+    @staticmethod
+    async def _build_followup_prompt(
+        question: str,
+        tenant_id: UUID,
+        session: AsyncSession,
+    ) -> str:
+        """Build agent prompt for a thread follow-up (no explicit mention).
+
+        Mirrors the mention path: relies on the thread's notebook memory for
+        prior context so we do not double-inject Slack history the agent
+        already remembers.
+        """
+        inbound_skills = await CustomSkillRepository(session).get_by_type(tenant_id, "slack_inbound")
+
+        skill_instructions = ""
+        if inbound_skills:
+            combined = "\n\n".join(
+                f"### {skill.name}\n{skill.instructions}" for skill in inbound_skills if skill.is_active
+            )
+            skill_instructions = f"""
+SLACK INBOUND SKILLS (follow these instructions when processing this request):
+{combined}
+"""
+
+        return f"""This message came from Slack as a follow-up in an existing thread.
+{skill_instructions}
+When processing this request:
+- The user did NOT re-mention Byaan; treat this as a continuation of the thread's conversation
+- Use your notebook memory for prior context (queries, replies, data seen so far)
+- Format your response for Slack (use Slack markdown, keep it concise)
+- IMPORTANT: Always format query results as markdown tables using pipe (|) delimiters
+- Include units in column headers rather than cell values
+
+User's newest message:
+{question}"""
 
     @staticmethod
     async def process_generate_dashboard_request(

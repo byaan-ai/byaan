@@ -55,3 +55,12 @@ MODELS_BY_PROVIDER: dict[str, list[str]] = {
     "xai": XAI_MODELS,
     "codex": CODEX_MODELS,
 }
+
+# Cheap-model override for the Slack thread-followup intent classifier; providers not listed fall back to workspace default.
+SLACK_CLASSIFIER_MODEL_BY_PROVIDER: dict[str, str] = {
+    "anthropic": "anthropic/claude-sonnet-4-6",
+    "claude_code": "claude_code/claude-sonnet-4-6",
+    "openrouter": "anthropic/claude-sonnet-4-6",
+    "openai": "openai/gpt-5.4",
+    "codex": "codex/gpt-5.4",
+}

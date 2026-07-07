@@ -7,6 +7,7 @@ import json
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import ClientDisconnect
 
 from server.auth.dependencies import AuthContext, require_scope
 from server.auth.scopes import Scope
@@ -48,15 +49,26 @@ async def slack_events(
     - Processes app_mention events in background
     - Returns 200 quickly to prevent Slack retries
     """
-    body = await request.body()
+    try:
+        body = await request.body()
+    except ClientDisconnect:
+        logger.info("Slack client disconnected before body read; will be retried by Slack")
+        return JSONResponse(status_code=200, content={"ok": True})
 
     try:
-        payload = await request.json()
+        payload = json.loads(body) if body else {}
     except Exception:
         return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
 
     if payload.get("type") == "url_verification":
         return {"challenge": payload.get("challenge")}
+
+    retry_num = request.headers.get("X-Slack-Retry-Num")
+    if retry_num:
+        logger.info(
+            f"Slack retry received: num={retry_num} reason={request.headers.get('X-Slack-Retry-Reason')} "
+            f"event_id={payload.get('event_id')} — allowing through for dedup-based processing"
+        )
 
     timestamp = request.headers.get("X-Slack-Request-Timestamp", "")
     signature = request.headers.get("X-Slack-Signature", "")
@@ -105,7 +117,48 @@ async def slack_events(
             event_ts=event.get("ts"),
             event_id=event_id,
         )
+    elif event_type == "message":
+        if _should_route_thread_followup(event, workspace.bot_user_id):
+            background_tasks.add_task(
+                _process_thread_followup,
+                team_id=team_id,
+                channel_id=event.get("channel"),
+                thread_ts=event.get("thread_ts"),
+                user_id=event.get("user"),
+                text=event.get("text", ""),
+                event_ts=event.get("ts"),
+                event_id=event_id,
+            )
     return JSONResponse(status_code=200, content={"ok": True})
+
+
+def _should_route_thread_followup(event: dict, bot_user_id: str | None) -> bool:
+    """Cheap synchronous gate at the router edge.
+
+    Rejects channel-level chatter, bot echoes, edits, and messages authored by
+    Byaan itself before we spend any work on background processing.
+    """
+    if event.get("subtype") in {
+        "bot_message",
+        "message_changed",
+        "message_deleted",
+        "channel_join",
+        "channel_leave",
+        "thread_broadcast",
+    }:
+        return False
+    if event.get("bot_id"):
+        return False
+    if not event.get("thread_ts"):
+        return False
+    if bot_user_id and event.get("user") == bot_user_id:
+        return False
+    text = event.get("text") or ""
+    if not text:
+        return False
+    if bot_user_id and f"<@{bot_user_id}>" in text:
+        return False
+    return True
 
 
 async def _process_app_mention(
@@ -139,6 +192,38 @@ async def _process_app_mention(
             )
     except Exception as e:
         logger.error(f"Error processing app_mention: {e}", exc_info=True)
+
+
+async def _process_thread_followup(
+    team_id: str,
+    channel_id: str,
+    thread_ts: str,
+    user_id: str,
+    text: str,
+    event_ts: str,
+    event_id: str,
+):
+    """Process a non-mention thread message when auto-followup is enabled."""
+    try:
+        async with AsyncSessionFactory() as session:
+            repo = SlackWorkspaceRepository(session)
+            workspace = await repo.get_by_team_id(team_id)
+
+            if not workspace or not workspace.is_active:
+                return
+
+            await SlackAgentService.process_thread_followup(
+                workspace=workspace,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                user_id=user_id,
+                text=text,
+                event_ts=event_ts,
+                event_id=event_id,
+                session=session,
+            )
+    except Exception as e:
+        logger.error(f"Error processing Slack thread followup: {e}", exc_info=True)
 
 
 @router.post("/interactivity")
@@ -809,14 +894,7 @@ async def get_slack_config(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Slack not configured")
 
     return success_response(
-        data=SlackConfigResponse(
-            id=workspace.id,
-            slack_team_id=workspace.slack_team_id,
-            slack_team_name=workspace.slack_team_name,
-            is_active=workspace.is_active,
-            default_llm_connection_id=workspace.default_llm_connection_id,
-            created_at=workspace.created_at,
-        ).model_dump(),
+        data=SlackConfigResponse.model_validate(workspace).model_dump(),
         message="Slack configuration retrieved",
     )
 
@@ -865,14 +943,7 @@ async def create_slack_config(
     )
 
     return success_response(
-        data=SlackConfigResponse(
-            id=workspace.id,
-            slack_team_id=workspace.slack_team_id,
-            slack_team_name=workspace.slack_team_name,
-            is_active=workspace.is_active,
-            default_llm_connection_id=workspace.default_llm_connection_id,
-            created_at=workspace.created_at,
-        ).model_dump(),
+        data=SlackConfigResponse.model_validate(workspace).model_dump(),
         message="Slack integration configured successfully",
     )
 
@@ -944,14 +1015,7 @@ async def update_slack_config(
     workspace = await repo.update(workspace.id, **updates)
 
     return success_response(
-        data=SlackConfigResponse(
-            id=workspace.id,
-            slack_team_id=workspace.slack_team_id,
-            slack_team_name=workspace.slack_team_name,
-            is_active=workspace.is_active,
-            default_llm_connection_id=workspace.default_llm_connection_id,
-            created_at=workspace.created_at,
-        ).model_dump(),
+        data=SlackConfigResponse.model_validate(workspace).model_dump(),
         message="Slack configuration updated",
     )
 
