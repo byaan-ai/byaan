@@ -188,7 +188,6 @@ class SlackAgentService:
             )
 
             conversation.bot_owned = True
-            conversation.last_bot_reply_at = datetime.now()
             await session.commit()
 
             event_log.processing_status = "completed"
@@ -849,9 +848,6 @@ User's question:
                     append_mention_hint=True,
                     session=session,
                 )
-
-                conversation.last_bot_reply_at = datetime.now()
-                await session.commit()
 
             event_log.processing_status = "completed"
             await session.commit()

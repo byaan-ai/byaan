@@ -30,7 +30,6 @@ class SlackConversation(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     bot_owned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     auto_follow_muted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
-    last_bot_reply_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=False), nullable=True)
     last_activity_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=False), default=datetime.now, server_default=func.current_timestamp()
     )

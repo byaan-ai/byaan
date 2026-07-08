@@ -9,7 +9,6 @@ thread.
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -19,9 +18,6 @@ from server.models.slack_conversation import SlackConversation
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
-
-
-COLD_THREAD_HOURS = 48
 
 REACTION_ONLY_TOKENS = {
     "lol",
@@ -76,7 +72,6 @@ class SkipReason:
     REACTION_TOKEN = "reaction_token"
     OTHER_HUMAN_TARGETED = "other_human_targeted"
     THREAD_NEVER_ACTIVE = "thread_never_active"
-    THREAD_COLD = "thread_cold"
     THREAD_NOT_OWNED = "thread_not_owned"
     THREAD_MUTED = "thread_muted"
 
@@ -164,12 +159,5 @@ def layer1_should_skip(
 
     if not conversation.bot_owned:
         return True, SkipReason.THREAD_NOT_OWNED
-
-    if conversation.last_bot_reply_at is None:
-        return True, SkipReason.THREAD_NEVER_ACTIVE
-
-    cutoff = datetime.now() - timedelta(hours=COLD_THREAD_HOURS)
-    if conversation.last_bot_reply_at < cutoff:
-        return True, SkipReason.THREAD_COLD
 
     return False, None

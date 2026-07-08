@@ -19,7 +19,7 @@ from server.utils.custom_logger import get_logger
 logger = get_logger(__name__)
 
 
-CLASSIFIER_TIMEOUT_SEC = 10.0
+CLASSIFIER_TIMEOUT_SEC = 20.0
 
 STRICTNESS_HINT = (
     "TRUE when: (1) data/analytics question, (2) dashboard or chart tweak, "
