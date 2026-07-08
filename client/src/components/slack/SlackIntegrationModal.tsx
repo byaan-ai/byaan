@@ -88,6 +88,14 @@ function SetupStepsAccordion({ webhookUrl }: { webhookUrl: string }) {
               <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">channels:read</code>
               <span className="text-gray-500 text-xs">— To list channels (optional)</span>
             </div>
+            <div className="flex items-center gap-2">
+              <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">channels:history</code>
+              <span className="text-gray-500 text-xs">— To follow up in public channel threads without re-mention</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">groups:history</code>
+              <span className="text-gray-500 text-xs">— To follow up in private channel threads without re-mention</span>
+            </div>
           </li>
         </ul>
       ),
@@ -139,7 +147,21 @@ function SetupStepsAccordion({ webhookUrl }: { webhookUrl: string }) {
           </li>
           <li className="flex items-start gap-2">
             <span className="text-gray-500 mt-0.5">•</span>
-            <span>Under <strong className="text-gray-300">"Subscribe to bot events"</strong>, add: <code className="text-xs bg-gray-700 px-1 rounded">app_mention</code></span>
+            <span>Under <strong className="text-gray-300">"Subscribe to bot events"</strong>, add:</span>
+          </li>
+          <li className="ml-4 space-y-1">
+            <div className="flex items-center gap-2">
+              <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">app_mention</code>
+              <span className="text-gray-500 text-xs">— For direct @Byaan mentions</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">message.channels</code>
+              <span className="text-gray-500 text-xs">— For thread follow-ups in public channels</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">message.groups</code>
+              <span className="text-gray-500 text-xs">— For thread follow-ups in private channels</span>
+            </div>
           </li>
           <li className="flex items-start gap-2">
             <span className="text-gray-500 mt-0.5">•</span>

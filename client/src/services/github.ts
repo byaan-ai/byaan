@@ -76,6 +76,7 @@ export interface ConnectedRepo {
   analysis_error: string | null
   language_breakdown: string | null
   is_active: boolean
+  scope: 'user' | 'org'
   created_at: string
   updated_at: string
   skills: RepoSkill[]
@@ -162,6 +163,16 @@ export const GitHubService = {
 
   async deleteRepo(id: string) {
     return apiFetch(`/repos/${id}`, { method: 'DELETE' })
+  },
+
+  async shareRepoWithTeam(id: string) {
+    const res = await apiFetch(`/repos/${id}/share`, { method: 'POST' })
+    return res.data as ConnectedRepo
+  },
+
+  async unshareRepoFromTeam(id: string) {
+    const res = await apiFetch(`/repos/${id}/unshare`, { method: 'POST' })
+    return res.data as ConnectedRepo
   },
 
   async analyzeRepo(id: string, llmConnectionId: string) {

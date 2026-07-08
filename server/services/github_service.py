@@ -173,6 +173,31 @@ async def get_github_token(tenant_id: UUID, user_id: UUID, session: AsyncSession
     return decrypted.get("access_token")
 
 
+async def get_org_github_token(tenant_id: UUID, session: AsyncSession) -> str | None:
+    """Fetch the org-scoped GitHub token, if any. Used by Slack/agent flows without a user."""
+    repo = SkillCredentialRepository(session)
+    cred = await repo.get_by_skill("github", tenant_id, user_id=None, scope="org")
+    if not cred:
+        return None
+    decrypted = await repo.get_decrypted_credentials(cred)
+    if not decrypted:
+        return None
+    return decrypted.get("access_token")
+
+
+async def share_github_token_with_org(tenant_id: UUID, user_id: UUID, session: AsyncSession) -> bool:
+    """Promote the user's GitHub credentials to org scope so non-user callers (Slack) can use them."""
+    repo = SkillCredentialRepository(session)
+    cred = await repo.share_to_org("github", tenant_id, user_id)
+    return cred is not None
+
+
+async def unshare_org_github_token(tenant_id: UUID, session: AsyncSession) -> bool:
+    """Remove the org-scoped GitHub token. Does not touch user-scoped credentials."""
+    repo = SkillCredentialRepository(session)
+    return await repo.delete_by_skill("github", tenant_id, user_id=None, scope="org")
+
+
 async def get_stored_auth_method(tenant_id: UUID, user_id: UUID, session: AsyncSession) -> str | None:
     repo = SkillCredentialRepository(session)
     cred = await repo.get_by_skill("github", tenant_id, user_id, scope="user")

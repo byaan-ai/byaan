@@ -51,6 +51,7 @@ class GitHubRepoResponse(BaseModel):
     analysis_error: str | None
     language_breakdown: str | None
     is_active: bool
+    scope: str = "user"
     created_at: datetime
     updated_at: datetime
     skills: list[RepoSkillSummary] = []

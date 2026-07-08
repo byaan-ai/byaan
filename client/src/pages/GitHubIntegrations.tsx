@@ -17,11 +17,14 @@ import {
   FolderOpen,
   Plus,
   AlertCircle,
+  Users,
 } from 'lucide-react'
 import { GitHubService, type GitHubRepo, type ConnectedRepo } from '../services/github'
 import { LocalRepoService } from '../services/localRepos'
 import { isTauriApp } from '../lib/tauri-api'
 import { useStore } from '../stores/useStore'
+import { useScopes } from '@/hooks/useScopes'
+import { Switch } from '@/components/ui/switch'
 import { GitHubOAuthDialog } from '../components/github/GitHubOAuthDialog'
 import { GitHubOAuthSettings } from '../components/github/GitHubOAuthSettings'
 import { ModelSelector } from '../components/ModelSelector'
@@ -38,6 +41,7 @@ export default function GitHubIntegrations() {
     setConnectedRepos,
     addConnectedRepo,
     updateRepoStatus,
+    updateRepoScope,
     removeConnectedRepo,
     preferredProvider,
     preferredModel,
@@ -45,7 +49,12 @@ export default function GitHubIntegrations() {
     setPreferredModel,
     clearPreferredModel,
     openSidebar,
+    user,
   } = useStore()
+  const { features } = useScopes()
+  const teamSharingEnabled = features.team_sharing_enabled
+  const currentUserId = user?.id
+  const [togglingShareRepos, setTogglingShareRepos] = useState<Set<string>>(new Set())
 
   const [showOAuthDialog, setShowOAuthDialog] = useState(false)
   const [oauthAvailable, setOauthAvailable] = useState(true)
@@ -222,6 +231,25 @@ export default function GitHubIntegrations() {
       removeConnectedRepo(repoId)
     } catch {
       console.error('Failed to disconnect repo')
+    }
+  }
+
+  const handleToggleShare = async (repo: ConnectedRepo, share: boolean) => {
+    if (togglingShareRepos.has(repo.id)) return
+    setTogglingShareRepos((prev) => new Set(prev).add(repo.id))
+    try {
+      const updated = share
+        ? await GitHubService.shareRepoWithTeam(repo.id)
+        : await GitHubService.unshareRepoFromTeam(repo.id)
+      updateRepoScope(repo.id, updated.scope)
+    } catch (err) {
+      console.error('Failed to toggle repo sharing:', err)
+    } finally {
+      setTogglingShareRepos((prev) => {
+        const next = new Set(prev)
+        next.delete(repo.id)
+        return next
+      })
     }
   }
 
@@ -810,19 +838,48 @@ export default function GitHubIntegrations() {
                         <p className="mt-2 text-xs text-red-400">{repo.analysis_error}</p>
                       )}
 
-                      {repo.analysis_status === 'completed' && repo.skills?.length > 0 && (
-                        <div className="mt-2 flex items-center gap-2 flex-wrap">
-                          {repo.skills.map((skill) => (
-                            <Badge
-                              key={skill.id}
-                              className="bg-purple-900/30 text-purple-400 border-purple-800 text-xs cursor-pointer hover:bg-purple-900/50"
-                              onClick={() => openSidebar('skills', skill.id)}
+                      {(repo.analysis_status === 'completed' && repo.skills?.length > 0) ||
+                      (teamSharingEnabled && (repo.user_id === currentUserId || repo.scope === 'org')) ? (
+                        <div className="mt-2 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            {repo.analysis_status === 'completed' &&
+                              repo.skills?.map((skill) => (
+                                <Badge
+                                  key={skill.id}
+                                  className="bg-purple-900/30 text-purple-400 border-purple-800 text-xs cursor-pointer hover:bg-purple-900/50"
+                                  onClick={() => openSidebar('skills', skill.id)}
+                                >
+                                  {skill.name}
+                                </Badge>
+                              ))}
+                          </div>
+                          {teamSharingEnabled && repo.user_id === currentUserId && (
+                            <div
+                              className="flex items-center gap-2 shrink-0"
+                              title="Share with team lets Slack and other workspace users access this repo"
                             >
-                              {skill.name}
+                              <Users
+                                className={`w-4 h-4 ${repo.scope === 'org' ? 'text-green-400' : 'text-gray-500'}`}
+                              />
+                              <span className="text-sm text-gray-300">Share with team</span>
+                              <Switch
+                                checked={repo.scope === 'org'}
+                                onCheckedChange={(checked) => handleToggleShare(repo, checked)}
+                                disabled={togglingShareRepos.has(repo.id)}
+                              />
+                              {togglingShareRepos.has(repo.id) && (
+                                <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+                              )}
+                            </div>
+                          )}
+                          {teamSharingEnabled && repo.scope === 'org' && repo.user_id !== currentUserId && (
+                            <Badge className="bg-green-900/30 text-green-400 border-green-800 text-xs shrink-0">
+                              <Users className="w-3 h-3 mr-1 inline" />
+                              Shared by team
                             </Badge>
-                          ))}
+                          )}
                         </div>
-                      )}
+                      ) : null}
 
                       {repo.language_breakdown && (
                         <div className="mt-3 flex gap-2 flex-wrap">
