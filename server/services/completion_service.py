@@ -1,9 +1,16 @@
 """Unified completion service that handles both LiteLLM and Claude Code auth paths."""
 
 import re
+from typing import Literal
 from uuid import UUID
 
 from litellm import acompletion
+from litellm.exceptions import (
+    AuthenticationError,
+    BadRequestError,
+    ContextWindowExceededError,
+    RateLimitError,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.services.claude_mcp_service import DISALLOWED_BUILTIN_TOOLS, stream_claude_with_mcp_tools
@@ -16,6 +23,41 @@ logger = get_logger(__name__)
 
 ALL_BUILTIN_TOOLS = [*DISALLOWED_BUILTIN_TOOLS, "Read", "ToolSearch"]
 _TOOL_CALL_RE = re.compile(r"\[\[TOOL_CALL:.*?\]\](?=\[\[TOOL_CALL|[^\[\]]|$)", re.DOTALL)
+
+CompletionErrorReason = Literal[
+    "auth",
+    "rate_limit",
+    "context_overflow",
+    "empty",
+    "model_unavailable",
+    "unknown",
+]
+
+
+class CompletionError(Exception):
+    """Structured error from CompletionService so callers can surface the real cause."""
+
+    def __init__(self, reason: CompletionErrorReason, message: str) -> None:
+        super().__init__(f"{reason}: {message}")
+        self.reason = reason
+        self.message = message
+
+
+def _classify(exc: BaseException) -> CompletionError:
+    if isinstance(exc, CompletionError):
+        return exc
+    if isinstance(exc, AuthenticationError):
+        return CompletionError("auth", str(exc))
+    if isinstance(exc, RateLimitError):
+        return CompletionError("rate_limit", str(exc))
+    if isinstance(exc, ContextWindowExceededError):
+        return CompletionError("context_overflow", str(exc))
+    if isinstance(exc, BadRequestError):
+        msg = str(exc).lower()
+        if "context" in msg or "token" in msg and "max" in msg:
+            return CompletionError("context_overflow", str(exc))
+        return CompletionError("unknown", str(exc))
+    return CompletionError("unknown", str(exc))
 
 
 class CompletionService:
@@ -64,16 +106,36 @@ class CompletionService:
                     model=model,
                 )
         except Exception as e:
-            logger.error(f"Completion failed: {e}", exc_info=True)
-            return None
+            err = _classify(e)
+            logger.error(f"Completion failed [{err.reason}]: {err.message}", exc_info=True)
+            raise err from e
 
     @staticmethod
     async def _complete_with_claude_sdk(
         prompt: str,
         system_prompt: str | None = None,
         model: str | None = None,
-    ) -> str | None:
-        """Complete using Claude Code SDK with all builtin tools disabled."""
+    ) -> str:
+        """Complete using Claude Code SDK with all builtin tools disabled.
+
+        If the model emits only tool calls (post-strip result is empty), retry once with a
+        stricter instruction. If still empty, raise CompletionError('empty', ...).
+        """
+        result = await CompletionService._run_claude_sdk_once(prompt, system_prompt, model)
+        if result:
+            return result
+
+        retry_system = ((system_prompt + "\n\n") if system_prompt else "") + (
+            "Output only the final markdown document. Do not call any tools. "
+            "Do not emit '[[TOOL_CALL:...]]'. Begin your response with the first line of the markdown."
+        )
+        result = await CompletionService._run_claude_sdk_once(prompt, retry_system, model)
+        if result:
+            return result
+        raise CompletionError("empty", "Claude SDK produced only tool-call output")
+
+    @staticmethod
+    async def _run_claude_sdk_once(prompt: str, system_prompt: str | None, model: str | None = None) -> str:
         result = ""
         gen = stream_claude_with_mcp_tools(
             prompt=prompt,
@@ -82,6 +144,7 @@ class CompletionService:
             instructions=system_prompt,
             context=None,
             disallowed_tools_override=ALL_BUILTIN_TOOLS,
+            max_turns=1,
         )
         try:
             async for event in gen:
@@ -100,7 +163,7 @@ class CompletionService:
 
         result = _TOOL_CALL_RE.sub("", result)
         result = result.replace("\n\nTool executed successfully\n\n", "")
-        return result.strip() if result.strip() else None
+        return result.strip()
 
     @staticmethod
     async def _complete_with_litellm(
@@ -112,8 +175,10 @@ class CompletionService:
         """Complete using LiteLLM."""
         model_instance = await ModelService.get_litellm_model_instance(llm_connection_id, model=model)
         if not model_instance:
-            logger.error(f"Could not create model instance for LLM connection {llm_connection_id}")
-            return None
+            raise CompletionError(
+                "model_unavailable",
+                f"Could not create model instance for LLM connection {llm_connection_id}",
+            )
 
         messages = []
         if system_prompt:
@@ -129,4 +194,7 @@ class CompletionService:
 
         response = await acompletion(**completion_kwargs)
         content = response.choices[0].message.content  # type: ignore[union-attr]
-        return content.strip() if content else None
+        stripped = content.strip() if content else ""
+        if not stripped:
+            raise CompletionError("empty", "LiteLLM returned empty content")
+        return stripped

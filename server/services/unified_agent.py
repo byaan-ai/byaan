@@ -506,10 +506,9 @@ This is what stops the "push me again" loop — every exploration should leave b
 
 CREATING CUSTOM SKILLS:
 - When a user asks for analysis NOT covered by existing skills (security audit, API docs, performance review, etc.)
-- When the user explicitly asks to "create a skill" or "analyze X aspect of the repo"
-- Provide a descriptive skill_name and clear description of what to analyze
-- The tool returns the full analysis — use it to answer the user immediately
-- The skill is saved for future conversations and retrievable via get_repo_skill
+- Workflow: (1) call `search_repo_code` and `get_repo_file` to gather the source you need, (2) write the markdown analysis yourself, (3) call `create_repo_skill(repo_id, skill_name, description, instructions=<the markdown>)` to persist it.
+- The tool just saves — it does not generate content. You are responsible for the analysis quality.
+- After saving, the skill is retrievable via `get_repo_skill(repo_id, "custom:<skill_name>")` in future conversations.
 </github_repos>"""
 
 

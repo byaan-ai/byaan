@@ -104,52 +104,49 @@ async def get_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) -> str:
 
 
 @function_tool
-async def create_repo_skill(ctx: RunContextWrapper, repo_id: str, skill_name: str, description: str) -> str:
-    """Create a custom analysis skill for a connected GitHub repository. The tool fetches code, runs LLM analysis, and saves the result.
+async def create_repo_skill(
+    ctx: RunContextWrapper, repo_id: str, skill_name: str, description: str, instructions: str
+) -> str:
+    """Save a custom analysis skill attached to a connected GitHub repository.
+
+    This tool does NOT call an LLM. You — the agent — must compose the full markdown analysis
+    yourself first by reading the repo via `get_repo_file` / `search_repo_code` / `get_repo_skill`,
+    then pass the finished markdown as `instructions`. The tool just persists it and returns.
 
     Args:
-        repo_id: The repository ID
+        repo_id: The repository ID (must be a connected GitHub repo in context)
         skill_name: Short name for the skill (e.g., "Security Audit", "API Documentation")
-        description: What to analyze — describe the focus area in natural language
+        description: One-line summary of what the skill covers (max 500 chars)
+        instructions: The full markdown analysis the agent has already written. Required, non-empty.
     """
-    from server.services.repo_analysis_service import execute_custom_skill
+    from server.db.session import AsyncSessionFactory
+    from server.repositories.custom_skill import CustomSkillRepository
+
+    if not instructions or not instructions.strip():
+        return json.dumps({"error": "instructions must be a non-empty markdown analysis written by the agent"})
 
     github_repos = ctx.context.get("github_repos", {})
     repo_data = github_repos.get(repo_id)
     if not repo_data:
         return json.dumps({"error": f"Repository {repo_id} not found in context"})
 
-    token = ctx.context.get("github_token")
     tenant_id = ctx.context.get("tenant_id")
     user_id = ctx.context.get("user_id")
-    llm_connection_id = ctx.context.get("llm_connection_id")
-
-    if not all([token, tenant_id, user_id, llm_connection_id]):
-        return json.dumps(
-            {"error": "Missing required context (github_token, tenant_id, user_id, or llm_connection_id)"}
-        )
-
-    prompt_template = (
-        f"Analyze this codebase with the following focus: {description}\n\n"
-        "## Repository Languages\n{languages}\n\n"
-        "## File Tree\n{file_tree}\n\n"
-        "## File Contents\n{file_contents}\n\n"
-        "Produce a thorough, structured markdown analysis."
-    )
+    if not all([tenant_id, user_id]):
+        return json.dumps({"error": "Missing required context (tenant_id or user_id)"})
 
     try:
-        skill = await execute_custom_skill(
-            repo_id=UUID(repo_id),
-            tenant_id=tenant_id,
-            user_id=user_id,
-            llm_connection_id=llm_connection_id,
-            prompt_template=prompt_template,
-            skill_name=skill_name,
-            parameters=None,
-            github_token=token,
-            repo_full_name=repo_data["repo_full_name"],
-            default_branch=repo_data["default_branch"],
-        )
+        async with AsyncSessionFactory() as session:
+            skill_repo = CustomSkillRepository(session)
+            skill = await skill_repo.upsert_github_skill(
+                tenant_id=tenant_id,
+                created_by=user_id,
+                github_repo_id=UUID(repo_id),
+                github_analysis_type=f"custom:{skill_name}",
+                name=skill_name,
+                description=description[:500],
+                instructions=instructions,
+            )
 
         skill_key = f"custom:{skill_name}"
         repo_data.setdefault("skills", {})[skill_key] = {
@@ -167,7 +164,7 @@ async def create_repo_skill(ctx: RunContextWrapper, repo_id: str, skill_name: st
         )
     except Exception as e:
         logger.error(f"[CREATE REPO SKILL] Failed: {e}", exc_info=True)
-        return json.dumps({"error": f"Failed to create skill: {str(e)}"})
+        return json.dumps({"error": f"Failed to save skill: {str(e)}"})
 
 
 def get_github_tools() -> list:
