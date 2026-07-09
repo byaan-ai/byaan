@@ -60,6 +60,18 @@ def _set_viewer_cookie_if_possible(response: Response, request: Request | None, 
     )
 
 
+async def _slack_notebook_ids(session: AsyncSession, notebook_ids: list) -> set:
+    """Return the subset of notebook_ids that have an associated Slack conversation."""
+    if not notebook_ids:
+        return set()
+    from server.models.slack_conversation import SlackConversation
+
+    result = await session.execute(
+        select(SlackConversation.notebook_id).where(SlackConversation.notebook_id.in_(notebook_ids))
+    )
+    return {row.notebook_id for row in result.all() if row.notebook_id is not None}
+
+
 @router.post("/notebooks", status_code=status.HTTP_201_CREATED)
 async def create_notebook_endpoint(
     payload: NotebookCreate,
@@ -98,7 +110,16 @@ async def list_notebooks_endpoint(
         if not auth.has_scope(Scope.NOTEBOOK_READ):
             notebooks = [n for n in notebooks if n.created_by is not None and str(n.created_by) == str(auth.user_id)]
 
-        response = NotebookListResponse(items=[NotebookRead.model_validate(n) for n in notebooks], total=len(notebooks))
+        slack_notebook_ids = await _slack_notebook_ids(session, [n.id for n in notebooks])
+
+        items = []
+        for n in notebooks:
+            item = NotebookRead.model_validate(n)
+            if n.id in slack_notebook_ids:
+                item.source = "slack"
+            items.append(item)
+
+        response = NotebookListResponse(items=items, total=len(notebooks))
         return success_response(data=response.model_dump(), message=f"Retrieved {len(notebooks)} notebook(s)")
     except Exception as e:
         logger.error(
