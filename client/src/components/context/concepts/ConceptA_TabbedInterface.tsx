@@ -1,21 +1,25 @@
 import React from 'react';
 import { useStore } from '@/stores/useStore';
-import { X, Database, FileText, Palette, Brain, Zap, BookOpen } from 'lucide-react';
+import { X, Database, FileText, Palette, Brain, Zap, BookOpen, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { DatabaseUnderstandingSection } from '../DatabaseUnderstandingSection';
 import { InstructionsEditor } from '../InstructionsEditor';
 import { LearningsViewer } from '../LearningsViewer';
 import { StyleGuidelinesEditor } from '../StyleGuidelinesEditor';
 import { SkillsSection } from '../SkillsSection';
+import { SuggestionsSection } from '../SuggestionsSection';
+import { usePendingSuggestionCount } from '../../../hooks/useSkillSuggestions';
 
 export const ConceptA_TabbedInterface: React.FC = () => {
   const { isSidebarOpen, closeSidebar, activeSection, setActiveSection } = useStore();
+  const { data: pendingCount = 0 } = usePendingSuggestionCount();
 
   if (!isSidebarOpen) return null;
 
   const tabs = [
     { id: 'instructions' as const, label: 'Instructions', icon: FileText },
     { id: 'learnings' as const, label: 'Learnings', icon: BookOpen },
+    { id: 'suggestions' as const, label: 'Suggestions', icon: Sparkles },
     { id: 'skills' as const, label: 'Skills', icon: Zap },
     { id: 'style' as const, label: 'Style Guide', icon: Palette },
     { id: 'database' as const, label: 'Datasources', icon: Database },
@@ -70,6 +74,13 @@ export const ConceptA_TabbedInterface: React.FC = () => {
               >
                 <Icon className="w-3.5 h-3.5" />
                 <span>{tab.label}</span>
+                {tab.id === 'suggestions' && pendingCount > 0 && (
+                  <span className={`ml-1 min-w-[18px] h-[18px] px-1 flex items-center justify-center rounded-full text-[10px] font-semibold ${
+                    isActive ? 'bg-white/20 text-white' : 'bg-brand-orange text-white'
+                  }`}>
+                    {pendingCount}
+                  </span>
+                )}
               </button>
             );
           })}
@@ -80,6 +91,7 @@ export const ConceptA_TabbedInterface: React.FC = () => {
           <div className="p-6">
             {activeSection === 'instructions' && <InstructionsEditor />}
             {activeSection === 'learnings' && <LearningsViewer />}
+            {activeSection === 'suggestions' && <SuggestionsSection />}
             {activeSection === 'skills' && <SkillsSection />}
             {activeSection === 'style' && <StyleGuidelinesEditor />}
             {activeSection === 'database' && <DatabaseUnderstandingSection />}

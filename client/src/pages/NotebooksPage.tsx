@@ -240,6 +240,8 @@ export default function NotebooksPage() {
                   <div className="max-w-[850px] mx-auto grid grid-cols-1 md:grid-cols-2 gap-6">
                     {displayNotebooks.map(notebook => {
                       const timeAgo = formatTimeAgo(notebook.updated_at)
+                      const isSlack = notebook.source === 'slack'
+                      const displayName = isSlack ? (notebook.slack_thread_title || notebook.notebook_name) : notebook.notebook_name
                       return (
                         <Card
                           key={notebook.id}
@@ -249,14 +251,19 @@ export default function NotebooksPage() {
                           <div className="flex items-start justify-between mb-3 gap-4">
                             <div className="flex-1 min-w-0">
                               {/* Notebook Name */}
-                              <div className="flex items-center gap-3 mb-2 flex-wrap">
+                              <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                {isSlack && (
+                                  <span className="flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                                    Slack
+                                  </span>
+                                )}
                                 <h3
                                   className="text-lg font-normal text-white break-words"
-                                  title={notebook.notebook_name.length > 40 ? notebook.notebook_name : undefined}
+                                  title={displayName.length > 40 ? displayName : undefined}
                                 >
-                                  {notebook.notebook_name.length > 40
-                                    ? `${notebook.notebook_name.substring(0, 40)}...`
-                                    : notebook.notebook_name}
+                                  {displayName.length > 40
+                                    ? `${displayName.substring(0, 40)}...`
+                                    : displayName}
                                 </h3>
                               </div>
 

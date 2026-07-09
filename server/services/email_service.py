@@ -292,3 +292,30 @@ class SMTPEmailService:
             html=html_content,
             text=text_content,
         )
+
+    async def send_skill_digest_email(
+        self,
+        to_email: str,
+        tenant_name: str,
+        stats: dict,
+        suggestions: list[dict],
+        frontend_url: str,
+    ) -> dict:
+        html_content = get_skill_digest_html(
+            tenant_name=tenant_name,
+            stats=stats,
+            suggestions=suggestions,
+            frontend_url=frontend_url,
+        )
+        text_content = get_skill_digest_text(
+            tenant_name=tenant_name,
+            stats=stats,
+            suggestions=suggestions,
+            frontend_url=frontend_url,
+        )
+        return await self._send_email(
+            to_email=to_email,
+            subject=f"Skill Learning Digest - {tenant_name}",
+            html=html_content,
+            text=text_content,
+        )

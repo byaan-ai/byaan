@@ -7,6 +7,7 @@ import LLMConnectionsPage from './pages/LLMConnections'
 import DatabasesPage from './pages/Databases'
 import TeamMembersPage from './pages/TeamMembers'
 import NotebooksPage from './pages/NotebooksPage'
+import SkillReviewPage from './pages/SkillReviewPage'
 import HomePage from './pages/HomePage'
 import FoldersPage from './pages/FoldersPage'
 import FolderDetailPage from './pages/FolderDetailPage'
@@ -171,6 +172,18 @@ function App() {
             }
           />
           <Route
+            path="/skill-review"
+            element={
+              <AuthGuard>
+                <ViewerRedirect>
+                  <Layout>
+                    <SkillReviewPage />
+                  </Layout>
+                </ViewerRedirect>
+              </AuthGuard>
+            }
+          />
+          <Route
             path="/llm-connections"
             element={
               <AuthGuard>
@@ -282,6 +295,7 @@ function App() {
             <Route path="/notebook/:id" element={<ChatPreview />} />
             <Route path="/notebook/:id/preview" element={<ChatPreview />} />
             <Route path="/notebooks" element={<NotebooksPage />} />
+            <Route path="/skill-review" element={<SkillReviewPage />} />
             <Route path="/llm-connections" element={<LLMConnectionsPage />} />
             <Route path="/databases" element={<DatabasesPage />} />
             <Route path="/github" element={<GitHubIntegrations />} />
@@ -321,6 +335,7 @@ function App() {
             <Route path="/notebook/:id" element={<ChatPreview />} />
             <Route path="/notebook/:id/preview" element={<ChatPreview />} />
             <Route path="/notebooks" element={<NotebooksPage />} />
+            <Route path="/skill-review" element={<SkillReviewPage />} />
             <Route path="/llm-connections" element={<LLMConnectionsPage />} />
             <Route path="/databases" element={<DatabasesPage />} />
             <Route path="/github" element={<GitHubIntegrations />} />

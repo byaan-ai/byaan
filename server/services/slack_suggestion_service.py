@@ -158,9 +158,7 @@ def _build_card_blocks(suggestion: SkillSuggestion, skill_name: str) -> list[dic
         blocks.append(
             SlackBlockBuilder.actions(
                 [
-                    SlackBlockBuilder.button(
-                        text="Approve", action_id=ACTION_APPROVE, value=value, style="primary"
-                    ),
+                    SlackBlockBuilder.button(text="Approve", action_id=ACTION_APPROVE, value=value, style="primary"),
                     SlackBlockBuilder.button(text="Reject", action_id=ACTION_REJECT, value=value, style="danger"),
                     SlackBlockBuilder.button(text="Discuss", action_id=ACTION_DISCUSS, value=value),
                 ]
@@ -176,9 +174,9 @@ def _resolve_target(workspace: SlackWorkspace, suggestion: SkillSuggestion) -> t
         return workspace.reviewers_channel_id, None
     source = suggestion.source or {}
     if source.get("origin") == "slack":
-        channel = source.get("channel") or source.get("channel_id")
+        channel = source.get("channel") or source.get("channel_id") or source.get("slack_channel_id")
         if channel:
-            return channel, source.get("thread_ts")
+            return channel, source.get("thread_ts") or source.get("slack_thread_ts")
     return None, None
 
 
