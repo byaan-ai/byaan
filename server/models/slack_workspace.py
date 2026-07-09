@@ -31,6 +31,7 @@ class SlackWorkspace(Base):
         GUID(), ForeignKey("llm_connections.id", ondelete="SET NULL"), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    reviewers_channel_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     installed_by: Mapped[UUID | None] = mapped_column(
         GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

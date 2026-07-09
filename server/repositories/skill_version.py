@@ -45,10 +45,6 @@ class SkillVersionRepository:
         return snapshot
 
     async def list_for_skill(self, skill_id: UUID) -> list[SkillVersion]:
-        query = (
-            select(SkillVersion)
-            .where(SkillVersion.skill_id == skill_id)
-            .order_by(SkillVersion.version.desc())
-        )
+        query = select(SkillVersion).where(SkillVersion.skill_id == skill_id).order_by(SkillVersion.version.desc())
         result = await self._session.execute(query)
         return list(result.scalars().all())

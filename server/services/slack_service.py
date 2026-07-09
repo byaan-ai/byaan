@@ -59,6 +59,27 @@ class SlackService:
             logger.error(f"Slack API error in auth test: {e.response['error']}")
             raise
 
+    async def get_user_info(self, user_id: str) -> dict | None:
+        """Look up a Slack user via users.info.
+
+        Returns a normalized dict with ``id``, ``name`` (display name falling back
+        to real name) and ``email`` (may be None). Returns None on missing scope or
+        any API error so callers can treat the user as unidentified.
+        """
+        try:
+            response = await self.client.users_info(user=user_id)
+            user = response.get("user", {}) or {}
+            profile = user.get("profile", {}) or {}
+            name = profile.get("display_name") or profile.get("real_name") or user.get("name") or user_id
+            return {
+                "id": user.get("id", user_id),
+                "name": name,
+                "email": profile.get("email"),
+            }
+        except SlackApiError as e:
+            logger.warning(f"Slack API error fetching user info: {e.response.get('error', 'unknown')}")
+            return None
+
     async def list_channels(self, limit: int = 200) -> list[dict]:
         """List public channels the bot has access to."""
         try:

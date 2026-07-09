@@ -434,6 +434,32 @@ def get_smtp_config() -> dict[str, str | bool | int | None]:
     }
 
 
+def get_skill_loop_config() -> dict[str, bool | int]:
+    """
+    Get skill-learning-loop configuration from environment variables.
+
+    Returns:
+        Dict with enabled flag, tick interval, per-day evaluation cap, and digest hour.
+    """
+    import os
+
+    enabled = os.getenv("SKILL_LOOP_ENABLED", "false").lower() in ("1", "true", "yes")
+
+    def _int(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except ValueError:
+            logger.warning(f"Invalid {name} value, falling back to {default}")
+            return default
+
+    return {
+        "enabled": enabled,
+        "interval_seconds": _int("SKILL_LOOP_INTERVAL_SECONDS", 1800),
+        "max_evals_per_day": _int("SKILL_LOOP_MAX_EVALS_PER_DAY", 20),
+        "digest_hour": _int("SKILL_LOOP_DIGEST_HOUR", 17),
+    }
+
+
 def get_public_base_url() -> str:
     """
     Get public base URL for generating shared dashboard links.

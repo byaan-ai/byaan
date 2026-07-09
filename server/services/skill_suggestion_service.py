@@ -105,9 +105,7 @@ class SkillSuggestionService:
             instructions = final_instructions or suggestion.proposed_instructions
             if not instructions:
                 raise ValueError("No instructions to apply for edit suggestion")
-            snapshot = await self._version_repo.snapshot_skill(
-                skill, changed_by="loop", suggestion_id=suggestion.id
-            )
+            snapshot = await self._version_repo.snapshot_skill(skill, changed_by="loop", suggestion_id=suggestion.id)
             new_version = snapshot.version
             skill.instructions = instructions
         elif suggestion.suggestion_type == "new_skill":
@@ -123,9 +121,7 @@ class SkillSuggestionService:
                 scope="org",
                 skill_type="general",
             )
-            snapshot = await self._version_repo.snapshot_skill(
-                skill, changed_by="loop", suggestion_id=suggestion.id
-            )
+            snapshot = await self._version_repo.snapshot_skill(skill, changed_by="loop", suggestion_id=suggestion.id)
             new_version = snapshot.version
             suggestion.skill_id = skill.id
 

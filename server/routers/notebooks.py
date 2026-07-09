@@ -60,16 +60,24 @@ def _set_viewer_cookie_if_possible(response: Response, request: Request | None, 
     )
 
 
-async def _slack_notebook_ids(session: AsyncSession, notebook_ids: list) -> set:
-    """Return the subset of notebook_ids that have an associated Slack conversation."""
+async def _slack_notebook_titles(session: AsyncSession, notebook_ids: list) -> dict:
+    """Map notebook_ids that have a Slack conversation to their thread title."""
     if not notebook_ids:
-        return set()
+        return {}
     from server.models.slack_conversation import SlackConversation
 
     result = await session.execute(
-        select(SlackConversation.notebook_id).where(SlackConversation.notebook_id.in_(notebook_ids))
+        select(SlackConversation.notebook_id, SlackConversation.thread_title).where(
+            SlackConversation.notebook_id.in_(notebook_ids)
+        )
     )
-    return {row.notebook_id for row in result.all() if row.notebook_id is not None}
+    titles: dict = {}
+    for notebook_id, thread_title in result.all():
+        if notebook_id is None:
+            continue
+        if notebook_id not in titles or (thread_title and not titles[notebook_id]):
+            titles[notebook_id] = thread_title
+    return titles
 
 
 @router.post("/notebooks", status_code=status.HTTP_201_CREATED)
@@ -110,13 +118,14 @@ async def list_notebooks_endpoint(
         if not auth.has_scope(Scope.NOTEBOOK_READ):
             notebooks = [n for n in notebooks if n.created_by is not None and str(n.created_by) == str(auth.user_id)]
 
-        slack_notebook_ids = await _slack_notebook_ids(session, [n.id for n in notebooks])
+        slack_notebook_titles = await _slack_notebook_titles(session, [n.id for n in notebooks])
 
         items = []
         for n in notebooks:
             item = NotebookRead.model_validate(n)
-            if n.id in slack_notebook_ids:
+            if n.id in slack_notebook_titles:
                 item.source = "slack"
+                item.slack_thread_title = slack_notebook_titles[n.id]
             items.append(item)
 
         response = NotebookListResponse(items=items, total=len(notebooks))

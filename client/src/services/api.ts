@@ -424,6 +424,8 @@ export interface Notebook {
   last_used_model?: string
   memory?: string | null
   created_by?: string
+  source?: 'slack' | 'app'
+  slack_thread_title?: string | null
   created_at: string
   updated_at: string
 }

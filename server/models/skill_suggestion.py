@@ -36,9 +36,7 @@ class SkillSuggestion(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     source: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
-    reviewed_by: Mapped[UUID | None] = mapped_column(
-        GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    reviewed_by: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     reviewed_via: Mapped[str | None] = mapped_column(String(10), nullable=True)
     reviewer_slack_user_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
     reviewer_display_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
