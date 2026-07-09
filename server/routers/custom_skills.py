@@ -10,6 +10,7 @@ from server.auth.dependencies import AuthContext, require_scope
 from server.auth.scopes import Scope
 from server.db.session import get_async_session
 from server.repositories.custom_skill import CustomSkillRepository
+from server.repositories.skill_version import SkillVersionRepository
 from server.schemas.custom_skills import (
     CustomSkillCreate,
     CustomSkillDomainToggleRequest,
@@ -17,6 +18,7 @@ from server.schemas.custom_skills import (
     CustomSkillResponse,
     CustomSkillUpdate,
 )
+from server.schemas.skill_suggestions import SkillVersionResponse
 from server.schemas.standard_response import success_response
 from server.services.crypto_service import CryptoService
 from server.utils.custom_logger import get_logger
@@ -119,6 +121,28 @@ async def get_custom_skill(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
 
     return success_response(data=_to_response(skill), message="Custom skill retrieved")
+
+
+@router.get("/custom-skills/{skill_id}/versions")
+async def list_custom_skill_versions(
+    skill_id: UUID,
+    auth: AuthContext = Depends(require_scope(Scope.USER_READ)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """List the version history (snapshots) for a custom skill."""
+    repo = CustomSkillRepository(session)
+    skill = await repo.get(skill_id, auth.tenant_id)
+    if not skill:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Custom skill not found")
+
+    if skill.scope == "user" and skill.created_by != auth.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    versions = await SkillVersionRepository(session).list_for_skill(skill_id)
+    return success_response(
+        data=[SkillVersionResponse.model_validate(v).model_dump() for v in versions],
+        message="Skill versions retrieved",
+    )
 
 
 @router.post("/custom-skills")

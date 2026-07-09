@@ -1,4 +1,5 @@
 from server.models.connections import Connection
+from server.models.conversation_evaluation import ConversationEvaluation
 from server.models.custom_skill import CustomSkill
 from server.models.dashboard import Dashboard
 from server.models.datasets import Dataset
@@ -23,6 +24,8 @@ from server.models.refresh_token import RefreshToken
 from server.models.schedules import Schedule, ScheduleRun
 from server.models.settings import Setting
 from server.models.skill_credentials import SkillCredential
+from server.models.skill_suggestion import SkillSuggestion
+from server.models.skill_version import SkillVersion
 from server.models.slack_conversation import SlackConversation
 from server.models.slack_event_log import SlackEventLog
 from server.models.slack_workspace import SlackWorkspace
@@ -36,6 +39,7 @@ from server.models.verification_token import VerificationToken
 
 __all__ = [
     "Connection",
+    "ConversationEvaluation",
     "CustomSkill",
     "Dashboard",
     "DatasourceAnnotation",
@@ -64,6 +68,8 @@ __all__ = [
     "ScheduleRun",
     "Setting",
     "SkillCredential",
+    "SkillSuggestion",
+    "SkillVersion",
     "SlackConversation",
     "SlackEventLog",
     "SlackWorkspace",

@@ -74,6 +74,7 @@ from server.routers import raw_query as raw_query_router
 from server.routers import schedules as schedules_router
 from server.routers import scopes as scopes_router
 from server.routers import settings as settings_router
+from server.routers import skill_suggestions as skill_suggestions_router
 from server.routers import skills as skills_router
 from server.routers import slack as slack_router
 from server.routers import tenant as tenant_router
@@ -576,6 +577,8 @@ app.include_router(learnings_router.router, prefix="/api", tags=["learnings"])
 app.include_router(skills_router.router, prefix="/api", tags=["skills"])
 
 app.include_router(custom_skills_router.router, prefix="/api", tags=["custom-skills"])
+
+app.include_router(skill_suggestions_router.router, prefix="/api", tags=["skill-suggestions"])
 
 app.include_router(slack_router.router, prefix="/api", tags=["slack"])
 
