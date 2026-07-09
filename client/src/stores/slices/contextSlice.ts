@@ -9,6 +9,10 @@ export interface CredentialField {
   placeholder: string
   help: string
   optional?: boolean
+  type?: string
+  options?: { value: string; label: string }[]
+  default?: string
+  depends_on?: { key: string; value: string }
 }
 
 export interface SkillStatus {

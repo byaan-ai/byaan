@@ -165,6 +165,30 @@ docker run --rm -v byaan_data:/data -v $(pwd):/backup alpine tar xzf /backup/bya
 docker exec byaan tail -f /data/logs/backend.log
 ```
 
+## Connect Claude Code via MCP (stdio, on the server)
+
+Engineers with SSH access to the box can connect Claude Code directly to Byaan through the running container — no API key needed. There is no network listener: the MCP session is the stdin/stdout of a process spawned via `docker exec`, so it is only reachable by users who can already talk to the Docker daemon on this host.
+
+```bash
+# One-time: install the wrapper (from this directory)
+sudo cp byaan-mcp /usr/local/bin/ && sudo chmod +x /usr/local/bin/byaan-mcp
+
+# Register with Claude Code (identity = your Byaan account email)
+claude mcp add-json byaan '{
+  "type": "stdio",
+  "command": "byaan-mcp",
+  "args": ["you@org.com"]
+}' --scope user
+```
+
+If your user belongs to multiple workspaces, pass the tenant slug as a second argument: `"args": ["you@org.com", "my-workspace"]`.
+
+Notes:
+
+- `BYAAN_MCP_USER` selects which Byaan user the session acts as; learnings, notebooks, and saved queries are attributed to that user. Session starts are audit-logged in the backend log.
+- Host admins can set any email here — by design. Anyone with Docker access already has the database credentials, so the host is the trust boundary; this adds attribution, not a new privilege.
+- For remote access (without SSH), use the HTTP MCP endpoint instead: `https://your-domain/api/mcp/` with `Authorization: Bearer <byaan API key>` generated in Settings.
+
 ## Updating
 
 ```bash

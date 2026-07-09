@@ -5,12 +5,24 @@ import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { useStore } from '@/stores/useStore';
 import { CheckCircle, ExternalLink, Github, Globe, Key, Shield, Users, Zap, Loader2, Search, Plus, Edit2, Trash2 } from 'lucide-react';
-import type { SkillScope, SkillStatus, CustomSkill, CreateCustomSkillData } from '@/stores/slices/contextSlice';
+import type { SkillScope, SkillStatus, CustomSkill, CreateCustomSkillData, CredentialField } from '@/stores/slices/contextSlice';
 import { useScopes } from '@/hooks/useScopes';
 import { WriteSkillModal } from './WriteSkillModal';
 import { ConfirmationModal } from '@/components/ConfirmationModal';
 
 type CategoryTab = 'byaan' | 'custom' | 'whitelisted';
+
+function isFieldVisible(
+  field: CredentialField,
+  fields: CredentialField[],
+  credentials: Record<string, string>
+): boolean {
+  const dep = field.depends_on;
+  if (!dep?.key) return true;
+  const depField = fields.find(f => f.key === dep.key);
+  const current = credentials[dep.key]?.trim() || depField?.default || '';
+  return current === dep.value;
+}
 
 export function SkillsSection() {
   const {
@@ -123,7 +135,8 @@ export function SkillsSection() {
 
     const trimmedCredentials: Record<string, string> = {};
     for (const field of skill.credential_fields) {
-      const value = credentials[field.key]?.trim();
+      if (!isFieldVisible(field, skill.credential_fields, credentials)) continue;
+      const value = credentials[field.key]?.trim() || (field.type === 'select' ? field.default : '') || '';
       if (!value && !field.optional && !skill.is_configured) return;
       if (value) trimmedCredentials[field.key] = value;
     }
@@ -676,11 +689,14 @@ function SkillCard({
   onUnshare: () => void;
 }) {
   const isConfigured = hasPersonal || hasOrg;
+  const visibleFields = skill.credential_fields.filter(f =>
+    isFieldVisible(f, skill.credential_fields, credentials)
+  );
   const allFieldsFilled = isConfigured
     ? Object.values(credentials).some(v => v?.trim())
-    : skill.credential_fields
+    : visibleFields
         .filter(f => !f.optional)
-        .every(f => credentials[f.key]?.trim());
+        .every(f => Boolean(credentials[f.key]?.trim() || (f.type === 'select' && f.default)));
 
   return (
     <div className="bg-[#1a1a1a] border border-gray-800 rounded-lg p-4">
@@ -734,19 +750,31 @@ function SkillCard({
       {/* Edit form */}
       {isEditing && (
         <div className="mt-4 space-y-4">
-          {skill.credential_fields.map((field, index) => (
+          {visibleFields.map((field, index) => (
             <div key={field.key} className="space-y-1">
               <label className="text-xs font-medium text-gray-300">{field.label}</label>
-              <Input
-                type={field.optional ? 'text' : 'password'}
-                placeholder={isConfigured && !field.optional
-                  ? 'Leave blank to keep current value'
-                  : field.placeholder || `Enter ${field.label.toLowerCase()}...`}
-                value={credentials[field.key] || ''}
-                onChange={(e) => onCredentialChange(field.key, e.target.value)}
-                className="bg-[#0d0d0d] border-gray-700 text-sm"
-                autoFocus={index === 0}
-              />
+              {field.type === 'select' ? (
+                <select
+                  value={credentials[field.key] || field.default || ''}
+                  onChange={(e) => onCredentialChange(field.key, e.target.value)}
+                  className="w-full h-9 px-3 rounded-md bg-[#0d0d0d] border border-gray-700 text-sm text-white"
+                >
+                  {(field.options || []).map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              ) : (
+                <Input
+                  type={field.optional ? 'text' : 'password'}
+                  placeholder={isConfigured && !field.optional
+                    ? 'Leave blank to keep current value'
+                    : field.placeholder || `Enter ${field.label.toLowerCase()}...`}
+                  value={credentials[field.key] || ''}
+                  onChange={(e) => onCredentialChange(field.key, e.target.value)}
+                  className="bg-[#0d0d0d] border-gray-700 text-sm"
+                  autoFocus={index === 0}
+                />
+              )}
               {field.help && <p className="text-xs text-gray-500">{field.help}</p>}
             </div>
           ))}

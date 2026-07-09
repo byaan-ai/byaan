@@ -1,5 +1,5 @@
 """
-Byaan MCP stdio server for community/local mode.
+Byaan MCP stdio server.
 
 This is a standalone MCP server that uses stdin/stdout transport for direct
 communication with Claude Code. It runs independently without requiring the
@@ -8,10 +8,20 @@ full FastAPI backend to be running.
 Usage:
     python -m server.mcp.stdio_server
 
-For local/community mode only. Hosted/teams mode should use http_server.py.
+Desktop/community mode resolves the single local tenant automatically.
+Self-hosted mode requires BYAAN_MCP_USER=<email> (and BYAAN_MCP_TENANT=<slug>
+when the user belongs to multiple tenants); access is implicit via the ability
+to exec inside the container, e.g.:
+
+    docker exec -i -e BYAAN_MCP_USER=you@org.com <container> \\
+        uv run --directory /app/server python -m server.mcp.stdio_server
+
+For remote access to a self-hosted deployment, use the HTTP endpoint
+(/api/mcp with a Bearer API key) instead — stdio never listens on a port.
 """
 
 import asyncio
+import os
 import sys
 
 from fastmcp import FastMCP
@@ -53,26 +63,94 @@ What NOT to save: query results, data values, totals, SQL or query code, code sn
 </learning_enforcement>"""
 
 
+async def _resolve_self_hosted_context(db_session):
+    """
+    Resolve identity for self-hosted stdio sessions from BYAAN_MCP_USER.
+
+    There is no token here on purpose: reaching this process already requires
+    shell/docker access to the host, which is the trust boundary. The env var
+    only selects which existing user the session acts as, and is audit-logged.
+    """
+    from sqlalchemy import func, select
+
+    from server.models.tenant import Tenant
+    from server.models.tenant_member import TenantMember
+    from server.models.user import User
+
+    email = os.getenv("BYAAN_MCP_USER", "").strip().lower()
+    if not email:
+        raise Exception(
+            "Self-hosted stdio mode requires BYAAN_MCP_USER=<email> to select the acting user. "
+            "Example: docker exec -i -e BYAAN_MCP_USER=you@org.com <container> "
+            "uv run --directory /app/server python -m server.mcp.stdio_server"
+        )
+
+    result = await db_session.execute(select(User).where(func.lower(User.email) == email))
+    user = result.scalar_one_or_none()
+    if not user or not user.is_active:
+        raise Exception(f"BYAAN_MCP_USER '{email}' does not match an active user.")
+
+    owned = (await db_session.execute(select(Tenant).where(Tenant.owner_id == user.id))).scalars().all()
+    member = (
+        (
+            await db_session.execute(
+                select(Tenant)
+                .join(TenantMember, TenantMember.tenant_id == Tenant.id)
+                .where(TenantMember.user_id == user.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    tenants = {tenant.id: tenant for tenant in [*owned, *member]}
+    if not tenants:
+        raise Exception(f"User '{email}' does not belong to any tenant.")
+
+    slugs = sorted(tenant.slug for tenant in tenants.values())
+    tenant_slug = os.getenv("BYAAN_MCP_TENANT", "").strip()
+    if tenant_slug:
+        matches = [tenant for tenant in tenants.values() if tenant.slug == tenant_slug]
+        if not matches:
+            raise Exception(f"User '{email}' has no access to tenant '{tenant_slug}'. Available: {slugs}")
+        tenant = matches[0]
+    elif len(tenants) == 1:
+        tenant = next(iter(tenants.values()))
+    else:
+        raise Exception(f"User '{email}' belongs to multiple tenants; set BYAAN_MCP_TENANT=<slug>. Available: {slugs}")
+
+    logger.info(f"stdio self-hosted session: user={email} ({user.id}) tenant={tenant.slug} ({tenant.id})")
+    return tenant.id, user.id
+
+
 async def _resolve_local_context(db_session):
     """
-    Resolve the local tenant and user context.
-    For stdio mode, we expect a single tenant in the database.
-    Only selects tenants whose owner actually exists in the users table.
+    Resolve the tenant and user context for this stdio process.
+
+    Desktop/community mode expects a single tenant in the database and only
+    selects tenants whose owner actually exists in the users table.
+    Self-hosted mode requires an explicit BYAAN_MCP_USER identity.
     """
     from sqlalchemy import select
 
+    from server.auth.tenant_context import set_tenant_id
     from server.models.tenant import Tenant
     from server.models.user import User
 
-    result = await db_session.execute(
-        select(Tenant).join(User, Tenant.owner_id == User.id).order_by(Tenant.created_at.desc()).limit(1)
-    )
-    tenant = result.scalar_one_or_none()
+    if is_self_hosted():
+        tenant_id, user_id = await _resolve_self_hosted_context(db_session)
+    else:
+        result = await db_session.execute(
+            select(Tenant).join(User, Tenant.owner_id == User.id).order_by(Tenant.created_at.desc()).limit(1)
+        )
+        tenant = result.scalar_one_or_none()
 
-    if not tenant:
-        raise Exception("No tenant found. Please complete onboarding first.")
+        if not tenant:
+            raise Exception("No tenant found. Please complete onboarding first.")
 
-    return tenant.id, tenant.owner_id
+        tenant_id, user_id = tenant.id, tenant.owner_id
+
+    set_tenant_id(tenant_id)
+    return tenant_id, user_id
 
 
 async def _load_skills_for_stdio() -> tuple[dict, dict]:
@@ -235,12 +313,6 @@ async def create_stdio_server() -> FastMCP:
     """
     logger.info("Initializing Byaan MCP stdio server...")
 
-    # Check that we're not in hosted mode
-    if is_self_hosted():
-        logger.error("stdio_server.py should only be used in local/community mode!")
-        logger.error("For hosted mode, use http_server.py instead.")
-        sys.exit(1)
-
     # Load skills at startup
     custom_skills, enabled_skills = await _load_skills_for_stdio()
     skills_hint = _build_skills_hint_for_stdio(enabled_skills, custom_skills)
@@ -289,9 +361,12 @@ async def get_stdio_session() -> dict:
     async with AsyncSessionFactory() as db_session:
         tenant_id, user_id = await _resolve_local_context(db_session)
 
-        # Use deterministic session_id for stdio mode
-        # This ensures we reuse the same session/notebook across server restarts
-        session_id = f"stdio-local-{tenant_id}"
+        # Deterministic session_id so the same session/notebook is reused across
+        # restarts; per-user in self-hosted mode so engineers don't share notebooks
+        if is_self_hosted():
+            session_id = f"stdio-{tenant_id}-{user_id}"
+        else:
+            session_id = f"stdio-local-{tenant_id}"
 
         # Try to get existing session from database
         repo = MCPSessionRepository(db_session)
@@ -368,10 +443,8 @@ def register_stdio_tools(mcp: FastMCP):
 
 async def main():
     """Main entry point for stdio server."""
-    import os
-
     logger.info("=" * 60)
-    logger.info("Starting Byaan MCP stdio server (community mode)")
+    logger.info("Starting Byaan MCP stdio server")
     logger.info(f"APP_MODE: {os.getenv('APP_MODE', 'not set')}")
     logger.info(f"Database: {os.getenv('DATABASE_URL', 'default')[:50]}...")
     logger.info("=" * 60)

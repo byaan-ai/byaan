@@ -316,18 +316,26 @@ GET /api/projects/{project_id}/dashboards/
 GET /api/projects/{project_id}/feature_flags/
 ```
 
-### Get Events (Non-HogQL)
+### Get Cohorts
+
+```
+GET /api/projects/{project_id}/cohorts/
+```
+
+### Get Events (Non-HogQL) — deprecated
 
 ```
 GET /api/projects/{project_id}/events/?limit=100
 ```
 
+PostHog has deprecated this endpoint (kept for backwards compatibility, `offset` capped at 50,000). Prefer the Query endpoint with HogQL for any ad-hoc listing or aggregation of events.
+
 ## Pagination
 
-List endpoints support pagination with:
+List endpoints paginate in one of two ways:
 
-- **`limit`**: Number of results per request (default varies by endpoint)
-- **`offset`**: Skip first N results
+- **Cursor-style `next` URLs** (persons, insights, dashboards): the response contains `{"next": "<url>", "previous": ..., "results": [...]}` — request the `next` URL (path + query only, same host) for the following page
+- **`limit` / `offset`** (events): skip-based paging
 
 For HogQL queries, use `LIMIT` and `OFFSET` clauses:
 
@@ -343,8 +351,11 @@ OFFSET 200
 
 | Endpoint | Limit |
 |----------|-------|
-| Query endpoint | 2400/hour |
-| Analytics endpoints | 240/minute, 1200/hour |
+| Query endpoint | 2400/hour (per organization) |
+| Analytics endpoints (insights, persons, recordings) | 240/minute, 1200/hour |
+| CRUD/list endpoints | 480/minute, 4800/hour |
+
+PostHog reserves the right to throttle or reject queries that look like bulk exports — keep queries analytical, not extractive.
 
 ## Common Pitfalls
 
@@ -356,13 +367,15 @@ OFFSET 200
 
 4. **Date filtering**: Use `timestamp > now() - INTERVAL N DAY` for recent data. Without date filters, queries may be slow.
 
-5. **Region-specific URLs**: US Cloud uses `us.posthog.com`, EU Cloud uses `eu.posthog.com`. Using the wrong region will fail.
+5. **Result caps**: Without an explicit `LIMIT`, HogQL results are capped at 100 rows. With an explicit `LIMIT`, up to 50,000 rows per query.
 
-6. **Personal vs Project API Keys**: Use Personal API Keys (start with `phx_`), not Project API Keys (which are for client-side tracking).
+6. **Region-specific URLs**: US Cloud uses `us.posthog.com`, EU Cloud uses `eu.posthog.com`. Using the wrong region will fail.
 
-7. **Case sensitivity**: Event names and property keys are case-sensitive. `$pageview` is different from `$Pageview`.
+7. **Personal vs Project API Keys**: Use Personal API Keys (start with `phx_`), not Project API Keys (which are for client-side tracking).
 
-8. **Empty results**: If queries return no data, check the date range and ensure events exist for that period.
+8. **Case sensitivity**: Event names and property keys are case-sensitive. `$pageview` is different from `$Pageview`.
+
+9. **Empty results**: If queries return no data, check the date range and ensure events exist for that period.
 
 ## Notes
 

@@ -95,7 +95,15 @@ async def list_skills(
             required_credentials=config.required_credentials,
             credential_fields=[
                 CredentialFieldSchema(
-                    key=c.key, label=c.label, placeholder=c.placeholder, help=c.help, optional=c.optional
+                    key=c.key,
+                    label=c.label,
+                    placeholder=c.placeholder,
+                    help=c.help,
+                    optional=c.optional,
+                    type=c.type,
+                    options=c.options,
+                    default=c.default,
+                    depends_on=c.depends_on,
                 )
                 for c in config.credentials
             ],

@@ -16,6 +16,10 @@ class CredentialFieldSchema(BaseModel):
     placeholder: str = ""
     help: str = ""
     optional: bool = False
+    type: str = "text"
+    options: list[dict[str, str]] = Field(default_factory=list)
+    default: str = ""
+    depends_on: dict[str, str] = Field(default_factory=dict)
 
 
 class SkillCredentialCreate(BaseModel):
