@@ -1,0 +1,106 @@
+{
+  "model": "claude-opus-4-8",
+  "engine": "claude-agentic",
+  "reasoning_effort": null,
+  "judge_model": null,
+  "judge_engine": null,
+  "mode": "prompt-only",
+  "concurrency": 4,
+  "case_timeout": 300.0,
+  "started_at": "2026-07-10T12:45:05.696139+00:00",
+  "finished_at": "2026-07-10T12:45:05.696149+00:00",
+  "cases_run": 3,
+  "aggregates": {
+    "overall": {
+      "total": 3,
+      "passed": 2,
+      "pass_rate": 0.667
+    },
+    "by_category": {
+      "base_population_anchoring": {
+        "total": 1,
+        "passed": 1,
+        "pass_rate": 1.0
+      },
+      "no_evidence_denial": {
+        "total": 1,
+        "passed": 0,
+        "pass_rate": 0.0
+      },
+      "schedule_vs_timestamp": {
+        "total": 1,
+        "passed": 1,
+        "pass_rate": 1.0
+      }
+    }
+  },
+  "results": [
+    {
+      "id": "bp-001",
+      "category": "base_population_anchoring",
+      "difficulty": "easy",
+      "expected_type": "numeric",
+      "answer_pass": true,
+      "sql_pass": null,
+      "judge_pass": null,
+      "passed": true,
+      "model_sql": null,
+      "model_answer_excerpt": "3000",
+      "sql_result": null,
+      "expected_value": 3000.0,
+      "ground_truth_value": 3000.0,
+      "latency_seconds": 12.298,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "retries": 0,
+      "error": null,
+      "notes": []
+    },
+    {
+      "id": "sv-001",
+      "category": "schedule_vs_timestamp",
+      "difficulty": "hard",
+      "expected_type": "numeric",
+      "answer_pass": true,
+      "sql_pass": null,
+      "judge_pass": true,
+      "passed": true,
+      "model_sql": null,
+      "model_answer_excerpt": "1156",
+      "sql_result": null,
+      "expected_value": 1156.0,
+      "ground_truth_value": 1156.0,
+      "latency_seconds": 51.068,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "retries": 0,
+      "error": null,
+      "notes": [
+        "judge: The answer correctly uses Cedar Valley General Intake\u2019s queue schedule of 08:00\u201318:00 in site-local time and reports the resulting after-hours count."
+      ]
+    },
+    {
+      "id": "ne-001",
+      "category": "no_evidence_denial",
+      "difficulty": "medium",
+      "expected_type": "refusal",
+      "answer_pass": false,
+      "sql_pass": null,
+      "judge_pass": false,
+      "passed": false,
+      "model_sql": null,
+      "model_answer_excerpt": "0 \u2014 there is no appointments table in this database.",
+      "sql_result": null,
+      "expected_value": null,
+      "ground_truth_value": null,
+      "latency_seconds": 15.303,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "retries": 0,
+      "error": null,
+      "notes": [
+        "judge: Although it correctly notes the table is absent, it invents a count of 0 instead of stating that the number is unavailable."
+      ]
+    }
+  ]
+}

@@ -101,6 +101,8 @@ The model call and the judge call each route through an **engine**. Pick with
 | `litellm` (default) | `litellm.completion` | API keys / env vars |
 | `codex` | OpenAI Codex CLI (`codex exec`) | local Codex login, bills the OpenAI plan |
 | `claude-cli` | Claude Code CLI (`claude -p`) | local Claude login, bills the Claude plan |
+| `claude-agentic` | Claude Code CLI with a db workspace + Bash | local Claude login |
+| `codex-agentic` | Codex CLI with a db workspace under a read-only sandbox | local Codex login |
 
 CLI engines run each call as a subprocess with `cwd=/tmp` (so no project
 `CLAUDE.md`/MCP context leaks in) and a hard `--case-timeout` (default 300s,
@@ -138,6 +140,22 @@ uv run python -m evals.harness.runner --model claude-opus-4-8 \
 `report_{model}_{engine}.json/.md` into `DIR` (leaving `--out` behavior intact).
 The report records engine, model, reasoning_effort, judge engine/model, start/finish
 timestamps, and per-case retry/error info.
+
+### Agentic engines — measure the model-in-CLI-harness ceiling
+
+`claude-agentic` and `codex-agentic` do **not** run pure text completions. Each
+case gets a private temp workspace containing a copy of the db as `eval_data.db`,
+and the CLI agent answers by exploring/querying it with its own tools (Claude with
+only the Bash tool enabled; Codex under a `read-only` sandbox). The prompt is
+minimal and identical for both CLIs — no Byaan system prompt or schema docs — so
+each harness's native behavior is what gets measured. The graded answer is the
+text after the last `FINAL ANSWER:` line (fallback: the full response); the LLM
+judge still sees the full reasoning. These engines emit no gradeable one-shot SQL,
+so `sql_pass` is `n/a`. Hard per-case timeouts are 300s (claude) / 420s (codex),
+concurrency capped at 4. Supply a non-agentic `--judge-engine` (e.g. `codex`).
+
+`--resume` skips cases already present in the target report JSON, runs only the
+rest, and merges them back in — safe to re-invoke after a partial/interrupted run.
 
 ## Interpreting the report
 
