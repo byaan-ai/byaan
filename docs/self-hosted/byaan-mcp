@@ -7,14 +7,25 @@
 # Byaan user the session acts as, and every session start is audit-logged.
 #
 # Usage: byaan-mcp <user-email> [tenant-slug]
+# Set BYAAN_CONTAINER to skip auto-detection and target a specific container.
 set -euo pipefail
 
 EMAIL="${1:?Usage: byaan-mcp <user-email> [tenant-slug]}"
 TENANT="${2:-}"
 
-CONTAINER=$(docker ps --format '{{.Names}}' | grep -E '^byaan(-blue|-green)?$' | head -1)
+CONTAINER="${BYAAN_CONTAINER:-}"
+if [ -z "$CONTAINER" ]; then
+    CONTAINER=$(docker ps --format '{{.Names}}' | grep -E '^byaan(-blue|-green)?$' | head -1 || true)
+fi
+if [ -z "$CONTAINER" ]; then
+    # Compose deployments auto-name containers (e.g. byaan-hosted-server-1)
+    CONTAINER=$(docker ps --filter 'label=com.docker.compose.service=server' --format '{{.Names}}' | grep -E '^byaan' | head -1 || true)
+fi
 if [ -z "$CONTAINER" ]; then
     echo "No running byaan container found" >&2
+    echo "Running containers:" >&2
+    docker ps --format '  {{.Names}}' >&2
+    echo "Set BYAAN_CONTAINER=<name> to target a specific container." >&2
     exit 1
 fi
 

@@ -183,8 +183,20 @@ claude mcp add-json byaan '{
 
 If your user belongs to multiple workspaces, pass the tenant slug as a second argument: `"args": ["you@org.com", "my-workspace"]`.
 
+To register from your laptop over SSH instead of on the server itself:
+
+```bash
+claude mcp add-json byaan '{
+  "type": "stdio",
+  "command": "ssh",
+  "args": ["your-server", "byaan-mcp", "youeamil@org.com"]
+}' --scope user
+```
+
 Notes:
 
+- The wrapper auto-detects the running container: first the `byaan`/`byaan-blue`/`byaan-green` names used by `start.sh`, then Compose-managed server containers (e.g. `byaan-hosted-server-1`). If detection picks the wrong one, set `BYAAN_CONTAINER=<name>` in the wrapper's environment.
+- After updating the wrapper script, re-copy it to `/usr/local/bin/` on each host.
 - `BYAAN_MCP_USER` selects which Byaan user the session acts as; learnings, notebooks, and saved queries are attributed to that user. Session starts are audit-logged in the backend log.
 - Host admins can set any email here — by design. Anyone with Docker access already has the database credentials, so the host is the trust boundary; this adds attribution, not a new privilege.
 - For remote access (without SSH), use the HTTP MCP endpoint instead: `https://your-domain/api/mcp/` with `Authorization: Bearer <byaan API key>` generated in Settings.
