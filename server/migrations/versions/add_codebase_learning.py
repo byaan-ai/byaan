@@ -1,6 +1,6 @@
 """add codebase learning foundations
 
-Revision ID: add_codebase_learning_foundations
+Revision ID: add_codebase_learning
 Revises: add_skill_loop_settings
 Create Date: 2026-07-09
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 from fastapi_users_db_sqlalchemy.generics import GUID
 
-revision = "add_codebase_learning_foundations"
+revision = "add_codebase_learning"
 down_revision = "add_skill_loop_settings"
 branch_labels = None
 depends_on = None

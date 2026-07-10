@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC, datetime, timedelta
+import os
+import socket
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import case, desc, func, or_, select
+from sqlalchemy import case, desc, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from server.auth.tenant_context import set_tenant_id
 from server.db.session import AsyncSessionFactory
@@ -15,6 +18,7 @@ from server.models.llm_connections import LLMConnection
 from server.models.messages import Message
 from server.models.notebooks import Notebook
 from server.models.queries import Query
+from server.models.skill_loop_lease import SkillLoopLease
 from server.models.skill_loop_settings import SkillLoopSettings
 from server.models.skill_suggestion import SkillSuggestion
 from server.models.slack_conversation import SlackConversation
@@ -43,6 +47,7 @@ CONVERSATION_TURN_LIMIT = 30
 SYSTEM_NOTEBOOK_NAME = "Byaan System — Skill Loop"
 STARTUP_DELAY_SECONDS = 90
 VALID_VERDICTS = ("confirmed", "mistake", "ambiguous")
+LEASE_ID = 1
 
 
 class ConversationEvaluationService:
@@ -54,8 +59,7 @@ class ConversationEvaluationService:
         self._interval: int = 1800
         self._max_evals_per_day: int = 20
         self._digest_hour: int = 17
-        self._last_digest_date = None
-        self._last_digest_by_tenant: dict[UUID, object] = {}
+        self._manual_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         if self._running:
@@ -88,13 +92,51 @@ class ConversationEvaluationService:
 
         while self._running:
             try:
-                await self._tick()
-                await self._maybe_send_digests()
-                await self._code_sync_tick()
+                if await self._claim_tick_lease():
+                    await self._tick()
+                    await self._maybe_send_digests()
+                    await self._code_sync_tick()
             except Exception as e:
                 logger.error(f"Skill loop error: {e}", exc_info=True)
 
             await asyncio.sleep(self._interval)
+
+    def _lease_holder(self) -> str:
+        return f"{socket.gethostname()}:{os.getpid()}"
+
+    async def _claim_tick_lease(self) -> bool:
+        """Claim the cross-process tick lease so only one worker runs the tick body."""
+        ttl = max(self._interval * 0.9, 1)
+        async with AsyncSessionFactory() as session:
+            return await self._acquire_lease(session, self._lease_holder(), ttl)
+
+    async def _acquire_lease(self, session, holder: str, ttl_seconds: float) -> bool:
+        now = datetime.now(UTC).replace(tzinfo=None)
+        expires = now + timedelta(seconds=ttl_seconds)
+        result = await session.execute(
+            update(SkillLoopLease)
+            .where(SkillLoopLease.id == LEASE_ID)
+            .where(
+                or_(
+                    SkillLoopLease.expires_at.is_(None),
+                    SkillLoopLease.expires_at < now,
+                    SkillLoopLease.holder == holder,
+                )
+            )
+            .values(holder=holder, expires_at=expires)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            await session.commit()
+            return True
+        await session.rollback()
+        try:
+            session.add(SkillLoopLease(id=LEASE_ID, holder=holder, expires_at=expires))
+            await session.commit()
+            return True
+        except IntegrityError:
+            await session.rollback()
+            return False
 
     async def _code_sync_tick(self) -> None:
         """Run the commit-drift sync loop; never let its failures break conversation evaluation."""
@@ -119,13 +161,33 @@ class ConversationEvaluationService:
             return
 
         logger.info(f"Skill loop evaluating {len(candidates)} candidate notebook(s)")
+        await self._evaluate_candidates(candidates, trigger="scheduled")
+
+    async def _evaluate_candidates(self, candidates: list[dict], trigger: str) -> None:
         for candidate in candidates:
             try:
-                await self.evaluate_now(candidate["notebook_id"], candidate["tenant_id"], trigger="scheduled")
+                await self.evaluate_now(candidate["notebook_id"], candidate["tenant_id"], trigger=trigger)
             except Exception as e:
                 logger.error(f"Failed to evaluate notebook {candidate['notebook_id']}: {e}", exc_info=True)
 
-    async def find_candidate_notebooks(self, session, limit: int) -> list[dict]:
+    async def run_tenant_sweep(self, tenant_id: UUID) -> dict:
+        """Manually triggered sweep of one tenant's candidate notebooks; evaluations run in the background."""
+        async with AsyncSessionFactory() as session:
+            used = await self._evaluations_today(session)
+            remaining = self._max_evals_per_day - used
+            if remaining <= 0:
+                return {"queued": 0, "note": "Daily evaluation budget exhausted"}
+            candidates = await self.find_candidate_notebooks(session, remaining, tenant_id=tenant_id)
+
+        if not candidates:
+            return {"queued": 0, "note": "No conversations awaiting evaluation"}
+
+        task = asyncio.create_task(self._evaluate_candidates(candidates, trigger="manual"))
+        self._manual_tasks.add(task)
+        task.add_done_callback(self._manual_tasks.discard)
+        return {"queued": len(candidates)}
+
+    async def find_candidate_notebooks(self, session, limit: int, tenant_id: UUID | None = None) -> list[dict]:
         """Notebooks whose latest message is stale and newer than their last evaluation.
 
         Slack-originated notebooks are prioritized. Returns dicts with notebook_id and tenant_id.
@@ -171,6 +233,8 @@ class ConversationEvaluationService:
             .order_by(desc("is_slack"), last_msg.c.last_msg.asc())
             .limit(limit)
         )
+        if tenant_id is not None:
+            query = query.where(Notebook.tenant_id == tenant_id)
         result = await session.execute(query)
         return [{"notebook_id": row[0], "tenant_id": row[1], "is_slack": bool(row[3])} for row in result.all()]
 
@@ -344,19 +408,28 @@ class ConversationEvaluationService:
             message=instruction,
             notebook_id=notebook.id,
             llm_connection_id=llm_connection_id,
+            is_preview=True,
         )
 
-        parts: list[str] = []
-        async for event in stream_handoff_agent_response(agent_request, session, tenant_id=tenant_id):
-            if not event.startswith("data: "):
-                continue
-            try:
-                data = json.loads(event[6:])
-            except json.JSONDecodeError:
-                continue
-            if data.get("type") == "content":
-                parts.append(data.get("text", ""))
-        return "".join(parts)
+        async def _consume() -> str:
+            parts: list[str] = []
+            async for event in stream_handoff_agent_response(agent_request, session, tenant_id=tenant_id):
+                if not event.startswith("data: "):
+                    continue
+                try:
+                    data = json.loads(event[6:])
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "content":
+                    parts.append(data.get("text", ""))
+            return "".join(parts)
+
+        timeout = int(get_skill_loop_config()["agent_timeout_seconds"])
+        try:
+            return await asyncio.wait_for(_consume(), timeout=timeout)
+        except TimeoutError:
+            logger.warning(f"Skill-loop agent timed out after {timeout}s for notebook {notebook.id}; treating as no-op")
+            return ""
 
     async def _resolve_llm_connection(self, session, tenant_id: UUID, notebook: Notebook) -> UUID | None:
         result = await session.execute(
@@ -418,10 +491,26 @@ class ConversationEvaluationService:
         for tenant_id in due:
             try:
                 async with AsyncSessionFactory() as session:
+                    if not await self._claim_digest(session, tenant_id, now.date()):
+                        continue
                     await self.send_tenant_digest(session, tenant_id)
-                self._last_digest_by_tenant[tenant_id] = now.date()
             except Exception as e:
                 logger.error(f"Failed to send skill digest for tenant {tenant_id}: {e}", exc_info=True)
+
+    async def _claim_digest(self, session, tenant_id: UUID, today: date) -> bool:
+        """Atomically mark today's digest as sent for a tenant; True iff this caller won the claim."""
+        settings_repo = SkillLoopSettingsRepository(session)
+        if await settings_repo.get(tenant_id) is None:
+            await settings_repo.upsert(tenant_id)
+        result = await session.execute(
+            update(SkillLoopSettings)
+            .where(SkillLoopSettings.tenant_id == tenant_id)
+            .where(or_(SkillLoopSettings.last_digest_date.is_(None), SkillLoopSettings.last_digest_date < today))
+            .values(last_digest_date=today)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+        return result.rowcount == 1
 
     async def _tenants_due_for_digest(self, session, now: datetime) -> list[UUID]:
         """Tenants that have activity today and whose per-tenant digest is enabled and past its hour."""
@@ -433,7 +522,7 @@ class ConversationEvaluationService:
                 continue
             if now.hour < settings.digest_hour:
                 continue
-            if self._last_digest_by_tenant.get(tenant_id) == now.date():
+            if settings.last_digest_date == now.date():
                 continue
             due.append(tenant_id)
         return due

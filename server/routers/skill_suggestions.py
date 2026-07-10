@@ -37,6 +37,8 @@ async def _skill_names(session: AsyncSession, suggestions: list[SkillSuggestion]
 def _to_response(suggestion: SkillSuggestion, skill_names: dict[UUID, str]) -> dict:
     data = SkillSuggestionResponse.model_validate(suggestion)
     data.skill_name = skill_names.get(suggestion.skill_id) if suggestion.skill_id else None
+    if data.status == "reviewing":
+        data.status = "pending"
     return data.model_dump()
 
 

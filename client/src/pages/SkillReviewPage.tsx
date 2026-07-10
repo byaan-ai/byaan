@@ -473,6 +473,21 @@ function SkillLoopSettingsDialog({
   const updateMutation = useUpdateSkillLoopSettings()
 
   const [form, setForm] = useState<SkillLoopSettings | null>(null)
+  const [runningNow, setRunningNow] = useState(false)
+  const [runNowMessage, setRunNowMessage] = useState<string | null>(null)
+
+  const handleRunNow = async () => {
+    setRunningNow(true)
+    setRunNowMessage(null)
+    try {
+      const result = await SkillLoopSettingsService.runNow()
+      setRunNowMessage(result.message || result.note || `Queued ${result.queued ?? 0} conversation(s) for evaluation`)
+    } catch (e) {
+      setRunNowMessage(e instanceof Error ? e.message : 'Failed to start evaluation')
+    } finally {
+      setRunningNow(false)
+    }
+  }
 
   useEffect(() => {
     if (settings) {
@@ -532,6 +547,20 @@ function SkillLoopSettingsDialog({
                   The loop is disabled server-wide (SKILL_LOOP_ENABLED=false). These settings take effect once it's re-enabled.
                 </p>
               )}
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-xs text-gray-500">
+                  {runNowMessage || 'Evaluate idle conversations now instead of waiting for the next cycle.'}
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleRunNow}
+                  disabled={runningNow}
+                  className="flex-shrink-0 border-[#555555] text-white hover:bg-[#3a3a3a]"
+                >
+                  {runningNow ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Run now'}
+                </Button>
+              </div>
             </div>
 
             {/* Slack reviews */}

@@ -69,6 +69,7 @@ IGNORED_BASENAMES = (
     "composer.lock",
 )
 HIGH_VALUE_MARKERS = ("models/", "migrations/", "schemas/", "config", "constants")
+MAX_REPOS_PER_TICK = 25
 
 
 def _is_ignorable_path(path: str) -> bool:
@@ -149,6 +150,10 @@ class RepoSyncService:
         if not repos:
             return
 
+        if len(repos) > MAX_REPOS_PER_TICK:
+            logger.info(f"Repo sync: {len(repos)} repos eligible, processing first {MAX_REPOS_PER_TICK} this tick")
+            repos = repos[:MAX_REPOS_PER_TICK]
+
         settings_repo = SkillLoopSettingsRepository(session)
         enabled_by_tenant: dict[UUID, bool] = {}
 
@@ -165,6 +170,7 @@ class RepoSyncService:
                 await self._sync_repo(session, repo, cfg)
             except Exception as e:
                 logger.error(f"Repo sync failed for {repo.repo_full_name}: {e}", exc_info=True)
+                await session.rollback()
 
     async def _eligible_repos(self, session: AsyncSession) -> list[GitHubRepository]:
         query = select(GitHubRepository).where(

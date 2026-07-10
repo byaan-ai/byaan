@@ -13,6 +13,7 @@ from server.models.slack_conversation import SlackConversation
 from server.models.slack_workspace import SlackWorkspace
 from server.models.tenant import Tenant
 from server.repositories.custom_skill import CustomSkillRepository
+from server.repositories.skill_suggestion import SkillSuggestionRepository
 from server.services.skill_suggestion_service import SkillSuggestionService
 
 
@@ -223,3 +224,52 @@ async def test_notebook_list_shows_slack_source(test_client, test_session):
     assert items["From Slack"]["source"] == "slack"
     assert "slack_thread_title" in items["From Slack"]
     assert items["From App"]["source"] == "app"
+
+
+@pytest.mark.asyncio
+async def test_claim_for_review_is_single_winner(seeded):
+    session, tenant, skill = seeded["session"], seeded["tenant"], seeded["skill"]
+    suggestion = await _make_edit_suggestion(session, tenant, skill)
+    repo = SkillSuggestionRepository(session)
+
+    assert await repo.claim_for_review(suggestion.id, tenant.id) is True
+    assert await repo.claim_for_review(suggestion.id, tenant.id) is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_approve_one_applies_one_rejected(seeded):
+    session, tenant, skill = seeded["session"], seeded["tenant"], seeded["skill"]
+    suggestion = await _make_edit_suggestion(session, tenant, skill, proposed="v2 concurrent")
+    service = SkillSuggestionService(session)
+
+    applied, version = await service.approve(suggestion.id, tenant.id, reviewed_via="app")
+    assert applied.status == "applied"
+    assert version == 1
+
+    with pytest.raises(ValueError, match="not pending"):
+        await service.approve(suggestion.id, tenant.id, reviewed_via="slack")
+
+
+@pytest.mark.asyncio
+async def test_approve_failure_restores_to_pending(seeded):
+    session, tenant, skill = seeded["session"], seeded["tenant"], seeded["skill"]
+    service = SkillSuggestionService(session)
+    suggestion = await service.create_suggestion(
+        tenant_id=tenant.id,
+        suggestion_type="edit",
+        title="Broken edit",
+        rationale="missing instructions",
+        confidence="low",
+        skill_id=skill.id,
+        patch={"section": "overview", "before": "a", "after": "b"},
+        proposed_instructions=None,
+    )
+    suggestion_id = suggestion.id
+    tenant_id = tenant.id
+
+    with pytest.raises(ValueError, match="No instructions"):
+        await service.approve(suggestion_id, tenant_id, reviewed_via="app")
+
+    session.expire_all()
+    row = (await session.execute(select(SkillSuggestion).where(SkillSuggestion.id == suggestion_id))).scalar_one()
+    assert row.status == "pending"

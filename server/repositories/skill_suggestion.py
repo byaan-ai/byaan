@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.models.skill_suggestion import SkillSuggestion
@@ -103,6 +103,36 @@ class SkillSuggestionRepository:
         if superseded:
             await self._session.flush()
         return superseded
+
+    async def claim_for_review(self, suggestion_id: UUID, tenant_id: UUID) -> bool:
+        """Atomically move a pending suggestion to the transient 'reviewing' state.
+
+        Returns True only for the caller that won the claim, preventing two concurrent
+        approvals/rejections (e.g. Slack + app) from both proceeding.
+        """
+        result = await self._session.execute(
+            update(SkillSuggestion)
+            .where(SkillSuggestion.id == suggestion_id)
+            .where(SkillSuggestion.tenant_id == tenant_id)
+            .where(SkillSuggestion.status == "pending")
+            .values(status="reviewing")
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.commit()
+        return result.rowcount == 1
+
+    async def restore_to_pending(self, suggestion_id: UUID, tenant_id: UUID) -> None:
+        """Release a claim back to 'pending' after an apply fails mid-flight."""
+        await self._session.rollback()
+        await self._session.execute(
+            update(SkillSuggestion)
+            .where(SkillSuggestion.id == suggestion_id)
+            .where(SkillSuggestion.tenant_id == tenant_id)
+            .where(SkillSuggestion.status == "reviewing")
+            .values(status="pending")
+            .execution_options(synchronize_session=False)
+        )
+        await self._session.commit()
 
     async def save(self, suggestion: SkillSuggestion) -> SkillSuggestion:
         self._session.add(suggestion)

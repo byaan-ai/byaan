@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import AuthContext, require_scope
 from server.auth.scopes import Scope
 from server.db.session import get_async_session
+from server.models.notebooks import Notebook
 from server.models.skill_loop_settings import SkillLoopSettings
 from server.models.slack_workspace import SlackWorkspace
 from server.repositories.skill_loop_settings import SkillLoopSettingsRepository
 from server.repositories.slack_workspace import SlackWorkspaceRepository
-from server.schemas.skill_loop import SkillLoopSettingsUpdate
+from server.schemas.skill_loop import SkillLoopRunNowRequest, SkillLoopSettingsUpdate
 from server.schemas.standard_response import success_response
+from server.services.conversation_evaluation_service import skill_loop_service
 from server.services.slack_agent_service import SlackAgentService
 from server.services.slack_service import SlackService
 from server.utils.config_loader import get_skill_loop_config
@@ -67,6 +70,29 @@ async def update_skill_loop_settings(
             workspace = await SlackWorkspaceRepository(session).update(workspace.id, reviewers_channel_id=channel)
 
     return success_response(data=_to_data(settings, workspace), message=message)
+
+
+@router.post("/skill-loop/run-now")
+async def run_skill_loop_now(
+    payload: SkillLoopRunNowRequest | None = None,
+    auth: AuthContext = Depends(require_scope(Scope.TENANT_MANAGE_ROLES)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    """Manually trigger the learning loop: one notebook synchronously, or a tenant-wide sweep in the background."""
+    notebook_id = payload.notebook_id if payload else None
+    if notebook_id is not None:
+        result = await session.execute(
+            select(Notebook).where(Notebook.id == notebook_id, Notebook.tenant_id == auth.tenant_id)
+        )
+        if result.scalars().first() is None:
+            raise HTTPException(status_code=404, detail="Notebook not found")
+        verdict = await skill_loop_service.evaluate_now(notebook_id, auth.tenant_id, trigger="manual")
+        return success_response(data={"verdict": verdict}, message=f"Evaluation completed: {verdict}")
+
+    sweep = await skill_loop_service.run_tenant_sweep(auth.tenant_id)
+    queued = sweep.get("queued", 0)
+    message = sweep.get("note") or f"Queued {queued} conversation(s) for evaluation"
+    return success_response(data=sweep, message=message)
 
 
 @router.get("/skill-loop/slack-channels")

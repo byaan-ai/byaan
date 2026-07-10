@@ -153,6 +153,33 @@ def check_database_has_tables(database_url: str) -> bool:
         return False
 
 
+def _ensure_wide_alembic_version_column(database_url: str) -> None:
+    """Ensure alembic_version.version_num can hold long revision ids on PostgreSQL.
+
+    Alembic creates version_num as VARCHAR(32); revision ids longer than that
+    (e.g. human-readable slugs) overflow the column and roll back the whole
+    upgrade. SQLite ignores the length so this only bites PostgreSQL. Pre-creating
+    / widening the table before upgrade covers both fresh and existing databases.
+    """
+    if "postgresql" not in database_url:
+        return
+
+    sync_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+    engine = create_engine(sync_url, echo=False)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS alembic_version ("
+                    "version_num VARCHAR(255) NOT NULL, "
+                    "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+                )
+            )
+            conn.execute(text("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)"))
+    finally:
+        engine.dispose()
+
+
 def run_migrations() -> None:
     """
     Run Alembic migrations to ensure database schema is up-to-date.
@@ -199,6 +226,10 @@ def run_migrations() -> None:
             logger.info("=" * 60)
             logger.info("📦 Database needs initialization. This may take a moment...")
             logger.info("📦 Creating database schema from migrations...")
+
+        # Ensure the alembic_version column is wide enough for long revision ids
+        # before upgrading (otherwise the final stamp overflows and rolls back).
+        _ensure_wide_alembic_version_column(database_url)
 
         # Get Alembic config
         logger.info("🔧 Configuring migration system...")

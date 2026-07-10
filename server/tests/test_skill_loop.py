@@ -256,6 +256,34 @@ async def test_candidate_excludes_fresh_notebook(test_session):
     assert all(c["notebook_id"] != fresh.id for c in candidates)
 
 
+async def test_candidate_tenant_filter(test_session):
+    tenant_a = await _seed_tenant(test_session)
+
+    other_user = User(
+        id=uuid4(),
+        email=f"owner-{uuid4().hex[:6]}@test.com",
+        hashed_password="x",
+        is_active=True,
+        is_verified=True,
+        is_superuser=False,
+    )
+    test_session.add(other_user)
+    await test_session.flush()
+    tenant_b = Tenant(id=uuid4(), name="Beta", slug=f"beta-{uuid4().hex[:6]}", owner_id=other_user.id)
+    test_session.add(tenant_b)
+    await test_session.commit()
+
+    nb_a = await _seed_notebook(test_session, tenant_a, [("user", "q"), ("assistant", "a")])
+    nb_b = await _seed_notebook(test_session, tenant_b, [("user", "q"), ("assistant", "a")])
+    svc = _service()
+
+    unscoped = await svc.find_candidate_notebooks(test_session, limit=10)
+    assert {c["notebook_id"] for c in unscoped} >= {nb_a.id, nb_b.id}
+
+    scoped = await svc.find_candidate_notebooks(test_session, limit=10, tenant_id=tenant_a.id)
+    assert {c["notebook_id"] for c in scoped} == {nb_a.id}
+
+
 def test_digest_template_contains_stats():
     stats = {"evaluated": 7, "confirmed": 4, "mistake": 2, "questions": 1}
     suggestions = [{"title": "Exclude refunds", "skill_name": "Revenue rules"}]

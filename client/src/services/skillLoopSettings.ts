@@ -70,6 +70,12 @@ export interface SkillLoopSlackChannels {
   channels: Array<{ id: string; name: string }>
 }
 
+export interface SkillLoopRunNowResult {
+  queued?: number
+  note?: string
+  message?: string
+}
+
 export const SkillLoopSettingsService = {
   async get(): Promise<SkillLoopSettings> {
     const res = await apiFetch('/skill-loop/settings')
@@ -79,6 +85,11 @@ export const SkillLoopSettingsService = {
   async getSlackChannels(): Promise<SkillLoopSlackChannels> {
     const res = await apiFetch('/skill-loop/slack-channels')
     return res.data as SkillLoopSlackChannels
+  },
+
+  async runNow(): Promise<SkillLoopRunNowResult> {
+    const res = await apiFetch('/skill-loop/run-now', { method: 'POST' })
+    return { ...(res.data as SkillLoopRunNowResult), message: res.message }
   },
 
   async update(update: SkillLoopSettingsUpdate): Promise<SkillLoopSettings> {

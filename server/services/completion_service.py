@@ -180,6 +180,11 @@ class CompletionService:
                 f"Could not create model instance for LLM connection {llm_connection_id}",
             )
 
+        from server.services.codex_responses_model import CodexResponsesModel
+
+        if isinstance(model_instance, CodexResponsesModel):
+            return await CompletionService._complete_with_agent_model(model_instance, prompt, system_prompt)
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -189,6 +194,10 @@ class CompletionService:
             "model": model_instance.model,
             "messages": messages,
         }
+        if getattr(model_instance, "api_key", None):
+            completion_kwargs["api_key"] = model_instance.api_key
+        if getattr(model_instance, "base_url", None):
+            completion_kwargs["base_url"] = model_instance.base_url
         if supports_custom_temperature(model_instance.model):
             completion_kwargs["temperature"] = 0
 
@@ -198,3 +207,22 @@ class CompletionService:
         if not stripped:
             raise CompletionError("empty", "LiteLLM returned empty content")
         return stripped
+
+    @staticmethod
+    async def _complete_with_agent_model(model_instance, prompt: str, system_prompt: str | None) -> str:
+        """Single-turn completion through the Agents SDK for models that need its request handling (Codex)."""
+        from agents import Agent, ModelSettings, Runner
+
+        agent = Agent(
+            name="completion",
+            instructions=system_prompt or "You are a helpful assistant. Answer directly with the requested output.",
+            model=model_instance,
+            model_settings=ModelSettings(store=False),
+        )
+        result = Runner.run_streamed(agent, prompt, max_turns=1)
+        async for _ in result.stream_events():
+            pass
+        output = result.final_output.strip() if isinstance(result.final_output, str) else ""
+        if not output:
+            raise CompletionError("empty", "Agent model returned empty content")
+        return output

@@ -91,50 +91,59 @@ class SkillSuggestionService:
         suggestion = await self._repo.get(suggestion_id, tenant_id)
         if not suggestion:
             raise ValueError("Suggestion not found")
-        if suggestion.status != "pending":
+        if not await self._repo.claim_for_review(suggestion_id, tenant_id):
             raise ValueError(f"Suggestion is not pending (current status: {suggestion.status})")
 
-        new_version: int | None = None
+        try:
+            new_version: int | None = None
 
-        if suggestion.suggestion_type == "edit":
-            if not suggestion.skill_id:
-                raise ValueError("Edit suggestion has no target skill")
-            skill = await self._skill_repo.get(suggestion.skill_id, tenant_id)
-            if not skill:
-                raise ValueError("Target skill not found")
-            instructions = final_instructions or suggestion.proposed_instructions
-            if not instructions:
-                raise ValueError("No instructions to apply for edit suggestion")
-            snapshot = await self._version_repo.snapshot_skill(skill, changed_by="loop", suggestion_id=suggestion.id)
-            new_version = snapshot.version
-            skill.instructions = instructions
-        elif suggestion.suggestion_type == "new_skill":
-            if not suggestion.proposed_instructions:
-                raise ValueError("New skill suggestion has no proposed instructions")
-            owner_id = await self._tenant_owner_id(tenant_id)
-            skill = await self._skill_repo.create(
-                tenant_id=tenant_id,
-                created_by=owner_id,
-                name=suggestion.title[:100],
-                description=(suggestion.rationale or suggestion.title)[:500],
-                instructions=suggestion.proposed_instructions,
-                scope="org",
-                skill_type="general",
+            if suggestion.suggestion_type == "edit":
+                if not suggestion.skill_id:
+                    raise ValueError("Edit suggestion has no target skill")
+                skill = await self._skill_repo.get(suggestion.skill_id, tenant_id)
+                if not skill:
+                    raise ValueError("Target skill not found")
+                instructions = final_instructions or suggestion.proposed_instructions
+                if not instructions:
+                    raise ValueError("No instructions to apply for edit suggestion")
+                snapshot = await self._version_repo.snapshot_skill(
+                    skill, changed_by="loop", suggestion_id=suggestion.id
+                )
+                new_version = snapshot.version
+                skill.instructions = instructions
+            elif suggestion.suggestion_type == "new_skill":
+                if not suggestion.proposed_instructions:
+                    raise ValueError("New skill suggestion has no proposed instructions")
+                owner_id = await self._tenant_owner_id(tenant_id)
+                skill = await self._skill_repo.create(
+                    tenant_id=tenant_id,
+                    created_by=owner_id,
+                    name=suggestion.title[:100],
+                    description=(suggestion.rationale or suggestion.title)[:500],
+                    instructions=suggestion.proposed_instructions,
+                    scope="org",
+                    skill_type="general",
+                )
+                snapshot = await self._version_repo.snapshot_skill(
+                    skill, changed_by="loop", suggestion_id=suggestion.id
+                )
+                new_version = snapshot.version
+                suggestion.skill_id = skill.id
+
+            self._stamp_review(
+                suggestion,
+                status="applied",
+                reviewed_by=reviewed_by,
+                reviewed_via=reviewed_via,
+                reviewer_slack_user_id=reviewer_slack_user_id,
+                reviewer_display_name=reviewer_display_name,
             )
-            snapshot = await self._version_repo.snapshot_skill(skill, changed_by="loop", suggestion_id=suggestion.id)
-            new_version = snapshot.version
-            suggestion.skill_id = skill.id
 
-        self._stamp_review(
-            suggestion,
-            status="applied",
-            reviewed_by=reviewed_by,
-            reviewed_via=reviewed_via,
-            reviewer_slack_user_id=reviewer_slack_user_id,
-            reviewer_display_name=reviewer_display_name,
-        )
+            await self._session.commit()
+        except Exception:
+            await self._repo.restore_to_pending(suggestion_id, tenant_id)
+            raise
 
-        await self._session.commit()
         await self._session.refresh(suggestion)
         return suggestion, new_version
 
@@ -152,20 +161,25 @@ class SkillSuggestionService:
         suggestion = await self._repo.get(suggestion_id, tenant_id)
         if not suggestion:
             raise ValueError("Suggestion not found")
-        if suggestion.status != "pending":
+        if not await self._repo.claim_for_review(suggestion_id, tenant_id):
             raise ValueError(f"Suggestion is not pending (current status: {suggestion.status})")
 
-        self._stamp_review(
-            suggestion,
-            status="rejected",
-            reviewed_by=reviewed_by,
-            reviewed_via=reviewed_via,
-            reviewer_slack_user_id=reviewer_slack_user_id,
-            reviewer_display_name=reviewer_display_name,
-            review_note=reason,
-        )
+        try:
+            self._stamp_review(
+                suggestion,
+                status="rejected",
+                reviewed_by=reviewed_by,
+                reviewed_via=reviewed_via,
+                reviewer_slack_user_id=reviewer_slack_user_id,
+                reviewer_display_name=reviewer_display_name,
+                review_note=reason,
+            )
 
-        await self._session.commit()
+            await self._session.commit()
+        except Exception:
+            await self._repo.restore_to_pending(suggestion_id, tenant_id)
+            raise
+
         await self._session.refresh(suggestion)
         return suggestion
 
