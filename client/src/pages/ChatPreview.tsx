@@ -671,7 +671,7 @@ export default function ChatPreview() {
   // Check if this is a new notebook (not created yet)
   // Use pathname check instead of parameter since /notebook/new has no :id parameter
   const isNewNotebook = location.pathname === '/notebook/new'
-  const { isSelfHosted } = useAppConfig()
+  const { isSelfHosted, features } = useAppConfig()
 
   // State for new notebook datasource selection
   const [selectedDatasourceId, setSelectedDatasourceId] = useState<string | null>(null)
@@ -4011,7 +4011,7 @@ Can you help me fix this query?`
                       latestVersionNum={latestVersionNum}
                       onVersionChange={handleVersionChange}
                       isExportingPdf={isExportingPdf}
-                      onExportPdf={handleExportPdf}
+                      onExportPdf={features.external_sharing_enabled ? handleExportPdf : undefined}
                       isExportingHtml={isExportingHtml}
                       onExportHtml={handleExportCompiledHtml}
                       onShare={isSelfHosted || isTauriApp() ? handleShare : undefined}

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 
-const WORKER_URL = "https://byaan-waitlist-worker.hadi-a50.workers.dev";
+const WORKER_URL = import.meta.env.VITE_WORKER_URL as string | undefined;
 
 const Share = () => {
   const { id } = useParams<{ id: string }>();
@@ -14,7 +14,7 @@ const Share = () => {
   const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
-    if (!id) {
+    if (!id || !WORKER_URL) {
       setError(true);
       setLoading(false);
       return;

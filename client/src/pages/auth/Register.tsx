@@ -215,7 +215,6 @@ export default function Register() {
             </div>
           )}
 
-          {/* Google Sign-In Button */}
           {features.google_oauth_enabled && (
             <div className={features.local_auth_enabled ? (isFromInvitation ? "mb-4" : "mb-6") : ""}>
               <GoogleSignInButton

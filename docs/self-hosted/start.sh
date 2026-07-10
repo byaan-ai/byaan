@@ -485,6 +485,17 @@ start() {
         save_state "$ACTIVE" "$RESOLVED_VERSION"
     fi
 
+    # Confirm the container is actually alive before claiming success.
+    sleep 3
+    if ! container_running; then
+        print_error "Byaan container exited shortly after start. Recent logs:"
+        echo ""
+        run_docker logs --tail 50 "$CONTAINER_NAME" || true
+        echo ""
+        print_info "Run './start.sh logs' for the full output and fix the configuration in .env."
+        exit 1
+    fi
+
     echo ""
     print_success "Byaan is running!"
     echo ""

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 type DeploymentMode = 'local' | 'self_hosted'
 
 interface FeatureFlags {
+  worker_features_enabled: boolean
   external_sharing_enabled: boolean
   notebook_import_enabled: boolean
   public_registration_enabled: boolean
@@ -27,6 +28,7 @@ interface AppConfig {
 }
 
 const defaultFeatures: FeatureFlags = {
+  worker_features_enabled: false,
   external_sharing_enabled: false,
   notebook_import_enabled: false,
   public_registration_enabled: false,

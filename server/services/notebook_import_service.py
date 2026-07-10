@@ -132,9 +132,9 @@ class NotebookImportService:
         if not (len(share_id) == 36 and share_id.count("-") == 4):
             raise ValueError("Invalid share ID format. Expected a UUID like xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
 
-        # Build worker API URL
-        config = get_waitlist_config()
-        worker_base = config.get("worker_url") or "https://byaan-waitlist-worker.hadi-a50.workers.dev"
+        worker_base = get_waitlist_config().get("worker_url")
+        if not worker_base:
+            raise ValueError("Notebook import is not enabled in this deployment.")
         api_url = f"{worker_base}/api/notebook/{share_id}"
 
         async with httpx.AsyncClient(timeout=30.0) as client:

@@ -129,6 +129,8 @@ class CreditSyncService:
 
     async def _fetch_sync_from_worker(self, api_key: str, max_retries: int = 2) -> dict | None:
         """Fetch sync data from Worker /api/sync endpoint with retry logic"""
+        if not waitlist_service.base_url:
+            return None
         for attempt in range(max_retries + 1):
             try:
                 async with httpx.AsyncClient() as client:

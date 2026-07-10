@@ -217,6 +217,14 @@ Open `http://your-server:8080` (or your `DOMAIN`). Sign in as the master admin y
 
 > **Note:** SMTP is optional. Without it, invitations are still created and the admin shares the generated link manually from the Members page. To send invitation emails automatically, add `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, and `SMTP_USE_TLS` to `.env`. See [`docs/self-hosted/env.example`](docs/self-hosted/env.example) for the full reference.
 
+> **Optional managed features.** A few features run on a Byaan-managed Cloudflare Worker and are **disabled by default** in community and self-hosted deployments:
+> - PDF export of dashboards
+> - Public share links (dashboard + notebook)
+> - AI dashboard screenshots used by the agent (e.g. when it wants to "see" a chart)
+> - PNG previews attached to Slack replies and scheduled Slack reports (the HTML dashboard file and text summary are still posted — only the inline image is skipped)
+>
+> Everything else (queries, dashboards, invitations, RBAC, Slack Q&A, scheduled reports, in-workspace sharing) works out of the box. To enable the worker-backed add-ons, contact `support@byaan.ai` for a `WORKER_URL` and set it in `.env`.
+
 **What you get:**
 
 - Multi-user auth with invitations and RBAC roles (SMTP optional — share invitation links manually if email isn't configured)

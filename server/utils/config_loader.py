@@ -132,33 +132,29 @@ def get_posthog_config() -> dict[str, str | None]:
 
 def get_waitlist_config() -> dict[str, str | None]:
     """
-    Get waitlist configuration from config.json or environment variable.
-    Prioritizes config.json (for production builds), falls back to .env (for development).
+    Get waitlist configuration.
+
+    In frozen Mac/Desktop builds (PyInstaller), reads `worker_url` from the
+    bundled `config.json`. In every other deployment (Docker community,
+    self-hosted, dev), reads strictly from `WORKER_URL` env so customers can
+    enable/disable worker features via `.env` without a baked-in fallback.
     """
+    import os
+
     try:
-        import os
-
-        # Try config.json first (production)
-        config = load_config()
-        waitlist_config = config.get("waitlist", {})
-        worker_url = waitlist_config.get("worker_url")
-
-        # Fall back to environment variable (development)
-        if not worker_url:
+        if getattr(sys, "frozen", False):
+            config = load_config()
+            worker_url = config.get("waitlist", {}).get("worker_url") or os.getenv("WORKER_URL")
+        else:
             worker_url = os.getenv("WORKER_URL")
 
-        return {
-            "worker_url": worker_url,
-        }
+        return {"worker_url": worker_url}
     except Exception as e:
-        import os
-
         logger.error(
             f"Failed to get waitlist config: {str(e)}",
             exc_info=True,
             posthog_context={"function": "get_waitlist_config"},
         )
-        # Fall back to environment variable
         return {"worker_url": os.getenv("WORKER_URL")}
 
 

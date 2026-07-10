@@ -15,8 +15,7 @@ import { rewriteDashboardHtmlForBackend, ensureBaseHref, getBackendUrlForHtmlPro
 import { useStore } from '../../stores/useStore'
 import { isTauriApp, saveBlobToFile } from '../../lib/tauri-api'
 import { showToast } from '../../utils/toast'
-import html2canvas from 'html2canvas'
-import jsPDF from 'jspdf'
+import { useAppConfig } from '../../hooks/useAppConfig'
 import { DashboardFilterSidebar } from '../DashboardFilterSidebar'
 import { FilterPreflightPanel } from '../FilterPreflightPanel'
 import { ActiveFiltersBar } from '../ActiveFiltersBar'
@@ -217,6 +216,7 @@ function FolderAccordion({ folder, isExpanded, onToggle, onDashboardClick, forma
 
 export default function SharedDashboardsSection({ onLoadingChange, onError, deepLinkDashboardId }: SharedDashboardsSectionProps) {
   const navigate = useNavigate()
+  const { features } = useAppConfig()
   const [dashboardData, setDashboardData] = useState<DashboardsByFolder | null>(null)
   const [loading, setLoading] = useState(true)
   const [selectedDashboard, setSelectedDashboard] = useState<ViewerDashboardDetail | null>(null)
@@ -805,7 +805,10 @@ export default function SharedDashboardsSection({ onLoadingChange, onError, deep
   }
 
   const handleDownloadPdf = async () => {
-    if (!selectedDashboard || !processedHtml) return
+    if (!selectedDashboard?.notebook_id) {
+      showToast.error('PDF export is not available for this dashboard')
+      return
+    }
 
     setIsExportingPdf(true)
     try {
@@ -815,99 +818,25 @@ export default function SharedDashboardsSection({ onLoadingChange, onError, deep
       const timestamp = now.toISOString().slice(0, 10)
       const fileName = `${sanitizedName}_v${selectedDashboard.version || 1}_${timestamp}.pdf`
 
-      const iframe = document.createElement('iframe')
-      iframe.style.position = 'fixed'
-      iframe.style.left = '0'
-      iframe.style.top = '0'
-      iframe.style.width = '1920px'
-      iframe.style.height = '1080px'
-      iframe.style.border = 'none'
-      iframe.style.zIndex = '-9999'
-      iframe.style.opacity = '0'
-      iframe.style.pointerEvents = 'none'
-      document.body.appendChild(iframe)
+      const blob = await ApiService.exportNotebookPdf(selectedDashboard.notebook_id, selectedDashboard.version)
 
-      try {
-        iframe.srcdoc = processedHtml
-
-        await new Promise<void>((resolve, reject) => {
-          iframe.onload = () => resolve()
-          iframe.onerror = () => reject(new Error('Failed to load dashboard HTML'))
-          setTimeout(() => reject(new Error('Timeout loading dashboard HTML')), 30000)
-        })
-
-        await new Promise(resolve => setTimeout(resolve, 2000))
-
-        const iframeDoc = iframe.contentDocument
-        if (!iframeDoc?.body) {
-          throw new Error('Cannot access iframe content')
-        }
-
-        const body = iframeDoc.body
-        const dimensions = {
-          width: Math.max(body.scrollWidth, body.offsetWidth, iframeDoc.documentElement.clientWidth),
-          height: Math.max(body.scrollHeight, body.offsetHeight, iframeDoc.documentElement.clientHeight)
-        }
-
-        const canvas = await html2canvas(body, {
-          width: dimensions.width,
-          height: dimensions.height,
-          windowWidth: dimensions.width,
-          windowHeight: dimensions.height,
-          scale: 2,
-          useCORS: true,
-          allowTaint: false,
-          backgroundColor: '#ffffff',
-          logging: false
-        })
-
-        const imgData = canvas.toDataURL('image/png')
-        const pxToMm = 0.264583
-        const pdfWidth = dimensions.width * pxToMm
-        const pdfHeight = dimensions.height * pxToMm
-        const orientation = dimensions.width > dimensions.height ? 'landscape' : 'portrait'
-
-        const pdf = new jsPDF({
-          orientation: orientation as 'portrait' | 'landscape',
-          unit: 'mm',
-          format: [pdfWidth, pdfHeight],
-          compress: true
-        })
-
-        pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight)
-
-        const blob = pdf.output('blob')
-
-        if (isTauriApp()) {
-          const filePath = await saveBlobToFile(blob, fileName)
-          useStore.getState().addDownload({
-            fileName,
-            fileType: 'pdf',
-            filePath,
-            status: 'success',
-          })
-        } else {
-          const url = URL.createObjectURL(blob)
-          const a = document.createElement('a')
-          a.href = url
-          a.download = fileName
-          document.body.appendChild(a)
-          a.click()
-          document.body.removeChild(a)
-          URL.revokeObjectURL(url)
-
-          useStore.getState().addDownload({
-            fileName,
-            fileType: 'pdf',
-            status: 'success',
-          })
-        }
-      } finally {
-        document.body.removeChild(iframe)
+      if (isTauriApp()) {
+        const filePath = await saveBlobToFile(blob, fileName)
+        useStore.getState().addDownload({ fileName, fileType: 'pdf', filePath, status: 'success' })
+      } else {
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = fileName
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+        useStore.getState().addDownload({ fileName, fileType: 'pdf', status: 'success' })
       }
     } catch (error) {
       console.error('Failed to generate PDF:', error)
-      showToast.error('Failed to generate PDF')
+      showToast.error(error instanceof Error ? error.message : 'Failed to generate PDF')
     } finally {
       setIsExportingPdf(false)
     }
@@ -1060,15 +989,17 @@ export default function SharedDashboardsSection({ onLoadingChange, onError, deep
                   <FileDown className={`w-4 h-4 ${isExportingHtml ? 'animate-pulse' : ''}`} />
                   <span>HTML</span>
                 </button>
-                <button
-                  onClick={handleDownloadPdf}
-                  disabled={isExportingPdf}
-                  className="flex items-center gap-2 px-3 py-1.5 text-xs bg-transparent hover:bg-[#2a2a2a] text-white border border-[#404040] rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="Download PDF"
-                >
-                  <Download className={`w-4 h-4 ${isExportingPdf ? 'animate-pulse' : ''}`} />
-                  <span>PDF</span>
-                </button>
+                {features.external_sharing_enabled && (
+                  <button
+                    onClick={handleDownloadPdf}
+                    disabled={isExportingPdf}
+                    className="flex items-center gap-2 px-3 py-1.5 text-xs bg-transparent hover:bg-[#2a2a2a] text-white border border-[#404040] rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Download PDF"
+                  >
+                    <Download className={`w-4 h-4 ${isExportingPdf ? 'animate-pulse' : ''}`} />
+                    <span>PDF</span>
+                  </button>
+                )}
                 <button
                   onClick={handleRefreshCache}
                   disabled={isRefreshing}

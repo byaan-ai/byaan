@@ -3,6 +3,7 @@ import type { StoreState } from '../useStore'
 import { ApiService } from '../../services/api'
 
 export interface FeatureFlags {
+  worker_features_enabled: boolean
   external_sharing_enabled: boolean
   notebook_import_enabled: boolean
   public_registration_enabled: boolean

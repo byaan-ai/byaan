@@ -12,7 +12,7 @@ import HomePage from './pages/HomePage'
 import FoldersPage from './pages/FoldersPage'
 import FolderDetailPage from './pages/FolderDetailPage'
 import GitHubIntegrations from './pages/GitHubIntegrations'
-import { Login, Register, ForgotPassword, ResetPassword, CheckEmail, AcceptInvitation } from './pages/auth'
+import { Login, Register, ForgotPassword, ResetPassword, CheckEmail, AcceptInvitation, SetPassword } from './pages/auth'
 import SetupWorkspace from './pages/auth/SetupWorkspace'
 import { AuthGuard } from './components/AuthGuard'
 import { RoleGuard } from './components/RoleGuard'
@@ -100,6 +100,7 @@ function App() {
           <Route path="/forgot-password" element={<AuthGuard guestOnly><ForgotPassword /></AuthGuard>} />
           <Route path="/reset-password" element={<AuthGuard guestOnly><ResetPassword /></AuthGuard>} />
           <Route path="/check-email" element={<AuthGuard guestOnly><CheckEmail /></AuthGuard>} />
+          <Route path="/set-password" element={<AuthGuard guestOnly><SetPassword /></AuthGuard>} />
           <Route path="/accept-invitation" element={<AcceptInvitation />} />
 
           {/* Onboarding route - protected but skips tenant check */}

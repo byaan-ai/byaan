@@ -19,13 +19,17 @@ from server.utils.deployment import is_feature_enabled
 router = APIRouter()
 logger = get_logger(__name__)
 
-DEFAULT_WORKER_URL = "https://byaan-waitlist-worker.hadi-a50.workers.dev"
-
 
 def get_worker_url() -> str:
-    """Get worker URL from config, with fallback to default."""
+    """Get worker URL from env config. Callers must ensure worker features are enabled first."""
     config = get_waitlist_config()
-    return config.get("worker_url") or DEFAULT_WORKER_URL
+    worker_url = config.get("worker_url")
+    if not worker_url:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Worker-backed features are not enabled in this deployment.",
+        )
+    return worker_url
 
 
 def check_sharing_available():
@@ -49,6 +53,8 @@ async def export_pdf(
 
     This generates a PDF from the dashboard HTML using browser rendering.
     """
+    check_sharing_available()
+
     from server.services.pdf_service import PDFService, PDFServiceError
 
     notebook = await NotebookService.get_notebook(session, notebook_id)

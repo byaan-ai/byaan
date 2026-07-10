@@ -4402,7 +4402,7 @@ export class ApiService {
     tenant_id: string;
     role: string;
     user_exists: boolean;
-    user_verified: boolean
+    user_verified: boolean;
   }> {
     try {
       const response = await apiFetch(`${API_BASE_URL}/invitations/verify?token=${encodeURIComponent(token)}`)
@@ -4417,6 +4417,18 @@ export class ApiService {
     } catch (error) {
       console.error('Error verifying invitation:', error)
       throw error
+    }
+  }
+
+  static async setPasswordWithInvitation(invitationToken: string, password: string): Promise<void> {
+    const response = await apiFetch(`${API_BASE_URL}/auth/set-password-with-invitation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invitation_token: invitationToken, password }),
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to set password')
     }
   }
 

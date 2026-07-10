@@ -153,7 +153,6 @@ async def google_auth(
                         detail="Registration is by invitation only. Please contact your administrator.",
                     )
 
-            # Create new user
             user = User(
                 email=email,
                 google_id=google_id,
@@ -161,7 +160,7 @@ async def google_auth(
                 avatar_url=google_user.get("picture"),
                 hashed_password=user_manager.password_helper.hash(user_manager.password_helper.generate()),
                 is_active=True,
-                is_verified=True,  # Google has verified the email
+                is_verified=True,
             )
             session.add(user)
             await session.commit()
@@ -394,6 +393,77 @@ async def register_with_invitation(
     await session.refresh(user)
 
     return UserRead.model_validate(user)
+
+
+class SetPasswordWithInvitationRequest(BaseModel):
+    invitation_token: str
+    password: str
+
+
+@router.post("/auth/set-password-with-invitation", tags=["auth"])
+async def set_password_with_invitation(
+    data: SetPasswordWithInvitationRequest,
+    session: AsyncSession = Depends(get_async_session),
+    user_manager: UserManager = Depends(get_user_manager),
+):
+    """Set password for an invited user when Google OAuth isn't configured.
+    Disabled when Google OAuth is available — invitees must complete via Google."""
+
+    from server.utils.config_loader import get_google_oauth_config
+
+    if bool(get_google_oauth_config().get("client_id")):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Password setup is disabled. Please complete sign-in with Google.",
+        )
+
+    if len(data.password) < 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters",
+        )
+
+    token_hash_value = RefreshTokenService.hash_token(data.invitation_token)
+
+    result = await session.execute(select(VerificationToken).where(VerificationToken.token_hash == token_hash_value))
+    verification_token = result.scalar_one_or_none()
+
+    if not verification_token or verification_token.expires_at < datetime.utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired invitation token",
+        )
+
+    if verification_token.verified_at:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invitation link has already been used",
+        )
+
+    result = await session.execute(
+        select(TenantInvitation)
+        .where(TenantInvitation.token_id == verification_token.id)
+        .where(TenantInvitation.status == InvitationStatus.PENDING.value)
+    )
+    invitation = result.scalar_one_or_none()
+
+    if not invitation:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No pending invitation found",
+        )
+
+    user = await user_manager.user_db.get_by_email(invitation.email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found for this invitation",
+        )
+
+    user.hashed_password = user_manager.password_helper.hash(data.password)
+    await session.commit()
+
+    return success_response(data=None, message="Password set successfully")
 
 
 class RegisterRequest(BaseModel):

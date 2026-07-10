@@ -104,6 +104,23 @@ Recommended for team deployments. Configure Google OAuth, then set `HIDE_EMAIL_A
 | `VITE_GOOGLE_CLIENT_ID` | Same as GOOGLE_CLIENT_ID (for frontend) |
 | `HIDE_EMAIL_AUTH` | Set to `true` to hide email/password login when Google OAuth is configured |
 
+### Managed Worker Features (Optional)
+
+A few features rely on Byaan-managed infrastructure (a hosted Cloudflare Worker) and stay **disabled by default** on self-hosted deployments:
+
+- **PDF export** of dashboards
+- **Public share links** (dashboard + notebook)
+- **AI dashboard screenshots** — used by the agent when it wants to see what a chart looks like
+- **PNG previews in Slack** — both `@byaan` replies in Slack threads and scheduled Slack reports normally attach an inline PNG preview of the dashboard. Without the worker the bot still posts the **interactive HTML dashboard file** and the **text summary**; only the inline image is skipped.
+
+Everything else — querying your data, building dashboards, team invitations, RBAC, Slack Q&A and scheduled reports (text + HTML), in-app sharing within your workspace — works without it.
+
+If you want these worker-backed features enabled, contact `support@byaan.ai` and we'll provision a worker endpoint for your deployment. Then add it to your `.env`:
+
+| Variable | Description |
+|----------|-------------|
+| `WORKER_URL` | Provided by Byaan when you request the feature add-on. Leave empty to keep the features disabled. |
+
 ### Email/SMTP (Optional)
 
 Configures automatic email delivery for team invitations. **Without SMTP, invitations still work** — the admin copies the generated invitation link from the Members page and shares it manually. Configure SMTP only if you want invitation emails sent automatically.

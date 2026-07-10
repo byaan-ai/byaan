@@ -266,7 +266,6 @@ export default function Login() {
             </div>
           )}
 
-          {/* Google Sign-In Button */}
           {features.google_oauth_enabled && (
             <div className={features.local_auth_enabled ? "mb-6" : ""}>
               <GoogleSignInButton

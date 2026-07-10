@@ -1473,6 +1473,18 @@ async def generate_dashboard_screenshot(ctx: RunContextWrapper[Any], dashboard_i
         JSON string with success status and base64-encoded PNG image as data URL
     """
     try:
+        from server.utils.deployment import is_feature_enabled
+
+        if not is_feature_enabled("worker_features_enabled"):
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "Dashboard screenshot is not enabled in this deployment. Contact your administrator.",
+                },
+                indent=2,
+                default=str,
+            )
+
         logger.info(f"Generating dashboard screenshot for {dashboard_id}")
 
         notebook_id_uuid = UUID(dashboard_id)

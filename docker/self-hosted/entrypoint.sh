@@ -282,10 +282,9 @@ if [ -z "$APP_SECRET" ]; then
     exit 1
 fi
 
-if [ -z "$WORKER_URL" ]; then
-    echo "ERROR: WORKER_URL is required for self-hosted mode. Set it in your .env."
-    exit 1
-fi
+# WORKER_URL is optional. When unset, worker-backed features (PDF export,
+# public share links, AI dashboard screenshots) stay disabled gracefully.
+export WORKER_URL="${WORKER_URL:-}"
 
 # Pass through user-provided env vars
 export APP_SECRET

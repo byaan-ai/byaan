@@ -525,6 +525,15 @@ User's question:
                 extra={"posthog_context": {"notebook_id": str(notebook_id)}},
             )
 
+        from server.utils.deployment import is_feature_enabled
+
+        if not is_feature_enabled("worker_features_enabled"):
+            logger.info(
+                f"Skipping dashboard PNG preview for notebook {notebook_id}: worker features disabled. "
+                "HTML dashboard file already posted."
+            )
+            return
+
         try:
             logger.info(f"Starting screenshot generation for notebook {notebook_id}")
 

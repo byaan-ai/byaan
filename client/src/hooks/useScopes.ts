@@ -4,6 +4,7 @@ import { Scopes, type ScopeType } from '../constants/scopes'
 import type { FeatureFlags } from '../stores/slices/tenantSlice'
 
 const defaultFeatures: FeatureFlags = {
+  worker_features_enabled: false,
   external_sharing_enabled: false,
   notebook_import_enabled: false,
   public_registration_enabled: false,

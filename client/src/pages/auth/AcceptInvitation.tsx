@@ -3,11 +3,13 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { ApiService } from '../../services/api'
 import { useStore } from '../../stores/useStore'
+import { useAppConfig } from '../../hooks/useAppConfig'
 
 export default function AcceptInvitation() {
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
-  const { isAuthenticated, fetchTenants, switchTenant, user, logout } = useStore()
+  const { fetchTenants, switchTenant, user, logout } = useStore()
+  const { features } = useAppConfig()
   const [status, setStatus] = useState<'loading' | 'success' | 'error' | 'redirecting' | 'email_mismatch'>('loading')
   const [errorMessage, setErrorMessage] = useState('')
   const [invitationInfo, setInvitationInfo] = useState<{
@@ -68,27 +70,17 @@ export default function AcceptInvitation() {
       // Determine where to redirect based on user existence
       setStatus('redirecting')
 
-      if (invitationData.user_exists) {
-        // User already has an account - redirect to login
-        setTimeout(() => {
-          navigate('/login?from=invitation', {
-            state: {
-              invitationEmail: invitationData.email,
-              tenantName: invitationData.tenant_name
-            }
-          })
-        }, 1500)
-      } else {
-        // New user - redirect to register
-        setTimeout(() => {
-          navigate('/register?from=invitation', {
-            state: {
-              invitationEmail: invitationData.email,
-              tenantName: invitationData.tenant_name
-            }
-          })
-        }, 1500)
-      }
+      const target = invitationData.user_exists
+        ? (features.google_oauth_enabled ? '/login?from=invitation' : '/set-password?from=invitation')
+        : '/register?from=invitation'
+      setTimeout(() => {
+        navigate(target, {
+          state: {
+            invitationEmail: invitationData.email,
+            tenantName: invitationData.tenant_name
+          }
+        })
+      }, 1500)
     } catch (error) {
       setStatus('error')
       setErrorMessage(error instanceof Error ? error.message : 'Failed to process invitation')
@@ -207,21 +199,15 @@ export default function AcceptInvitation() {
                   }
 
                   setTimeout(() => {
-                    if (invitationInfo.user_exists) {
-                      navigate('/login?from=invitation', {
-                        state: {
-                          invitationEmail: invitationInfo.email,
-                          tenantName: invitationInfo.tenant_name
-                        }
-                      })
-                    } else {
-                      navigate('/register?from=invitation', {
-                        state: {
-                          invitationEmail: invitationInfo.email,
-                          tenantName: invitationInfo.tenant_name
-                        }
-                      })
-                    }
+                    const target = invitationInfo.user_exists
+                      ? (features.google_oauth_enabled ? '/login?from=invitation' : '/set-password?from=invitation')
+                      : '/register?from=invitation'
+                    navigate(target, {
+                      state: {
+                        invitationEmail: invitationInfo.email,
+                        tenantName: invitationInfo.tenant_name
+                      }
+                    })
                   }, 100)
                 }}
                 className="w-full px-6 py-3 bg-brand-orange text-white rounded-md hover:bg-brand-orange/90 transition-colors font-medium"

@@ -319,45 +319,45 @@ async def create_tenant(
         session.add(member)
         await session.flush()  # Flush to get tenant.id before calling worker
 
-        # Register API key with Cloudflare worker
-        try:
-            config = get_waitlist_config()
-            worker_url = config.get("worker_url", "https://byaan-waitlist-worker.hadi-a50.workers.dev")
+        worker_url = get_waitlist_config().get("worker_url")
+        if worker_url:
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        f"{worker_url}/api/keys/register",
+                        json={"email": user.email},
+                        timeout=10.0,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    api_key = data.get("api_key")
 
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{worker_url}/api/keys/register",
-                    json={"email": user.email},
-                    timeout=10.0,
+                if not api_key:
+                    raise ValueError("Worker did not return API key")
+
+                set_tenant_id(tenant.id)
+
+                await SettingsService.upsert_setting(
+                    session=session,
+                    setting_key="api_key",
+                    setting_value=api_key,
+                    description="API key for Cloudflare worker authentication",
+                    is_encrypted=False,
                 )
-                response.raise_for_status()
-                data = response.json()
-                api_key = data.get("api_key")
 
-            if not api_key:
-                raise ValueError("Worker did not return API key")
+                logger.info(f"Created personal tenant '{tenant.slug}' for user {user.email} with API key")
 
-            # Set tenant context to ensure setting is created for this tenant
-            set_tenant_id(tenant.id)
-
-            # Save API key to settings table (tenant_id automatically injected by repository)
-            await SettingsService.upsert_setting(
-                session=session,
-                setting_key="api_key",
-                setting_value=api_key,
-                description="API key for Cloudflare worker authentication",
-                is_encrypted=False,
-            )
-
-            logger.info(f"Created personal tenant '{tenant.slug}' for user {user.email} with API key")
-
-        except Exception as e:
-            logger.error(f"Failed to register API key with worker: {str(e)}")
-            # Rollback and raise - tenant creation should fail if we can't get API key
-            await session.rollback()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to register API key: {str(e)}",
+            except Exception as e:
+                logger.error(f"Failed to register API key with worker: {str(e)}")
+                await session.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to register API key: {str(e)}",
+                )
+        else:
+            logger.info(
+                f"Created personal tenant '{tenant.slug}' for user {user.email} without worker API key "
+                "(WORKER_URL not configured)"
             )
 
         await session.commit()

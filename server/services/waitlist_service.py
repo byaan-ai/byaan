@@ -28,21 +28,23 @@ from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_WORKER_URL = "https://byaan-waitlist-worker.hadi-a50.workers.dev"
 DEFAULT_TENANT_ID = UUID("00000000-0000-0000-0000-000000000001")
 DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 class WaitlistService:
-    """Service for managing waitlist via Cloudflare Worker"""
+    """Service for managing waitlist via Cloudflare Worker.
+
+    `base_url` is empty when WORKER_URL is not configured; callers must guard
+    every network call so worker-backed features stay quietly disabled.
+    """
 
     def __init__(self):
         config = get_waitlist_config()
-        self.base_url = config.get("worker_url", "")
-        self.worker_url = self.base_url  # Alias for compatibility
+        self.base_url = config.get("worker_url") or ""
+        self.worker_url = self.base_url
         if not self.base_url:
-            self.base_url = DEFAULT_WORKER_URL
-            logger.warning("Waitlist Worker URL is not configured!")
+            logger.info("WORKER_URL not configured; waitlist/credit features disabled.")
 
     async def join_waitlist(self, email: str, session: AsyncSession, name: str | None = None) -> dict:
         """
@@ -50,6 +52,8 @@ class WaitlistService:
         then we create the local User + Tenant + settings + LLM connection.
         Same path for new and returning users — Worker handles idempotency.
         """
+        if not self.base_url:
+            raise RuntimeError("WORKER_URL is not configured; waitlist signup is unavailable in this deployment.")
         async with httpx.AsyncClient() as client:
             response = await client.post(
                 f"{self.base_url}/api/waitlist/join",
@@ -378,6 +382,8 @@ class WaitlistService:
 
         Returns: OpenRouter API key string or None if not found
         """
+        if not self.base_url:
+            return None
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.get(

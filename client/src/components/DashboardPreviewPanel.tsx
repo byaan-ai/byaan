@@ -448,14 +448,16 @@ export function DashboardPreviewPanel({
               <>
                 <div className="fixed inset-0 z-10" onClick={() => setShowMoreMenu(false)} />
                 <div className="absolute top-full mt-1 right-0 w-44 bg-[#1a1a1a] border border-[#404040] rounded-lg shadow-xl z-20 py-1">
-                  <button
-                    onClick={() => { onExportPdf?.(); setShowMoreMenu(false) }}
-                    disabled={isExportingPdf}
-                    className="w-full text-left px-3 py-2 text-xs text-gray-300 hover:bg-[#1f1f1f] transition-colors flex items-center gap-2 disabled:opacity-50"
-                  >
-                    {isExportingPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
-                    Export PDF
-                  </button>
+                  {onExportPdf && (
+                    <button
+                      onClick={() => { onExportPdf?.(); setShowMoreMenu(false) }}
+                      disabled={isExportingPdf}
+                      className="w-full text-left px-3 py-2 text-xs text-gray-300 hover:bg-[#1f1f1f] transition-colors flex items-center gap-2 disabled:opacity-50"
+                    >
+                      {isExportingPdf ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <FileDown className="w-3.5 h-3.5" />}
+                      Export PDF
+                    </button>
+                  )}
                   <button
                     onClick={() => { onExportHtml?.(); setShowMoreMenu(false) }}
                     disabled={isExportingHtml}
@@ -659,15 +661,17 @@ export function DashboardPreviewPanel({
           <span className="text-gray-500 font-mono text-[10px] truncate">{generationIndicatorMessage}</span>
         )}
         <div className="flex-1" />
-        <button
-          onClick={onExportPdf}
-          disabled={isExportingPdf}
-          className="text-gray-400 hover:text-white transition-colors px-2 py-0.5 rounded disabled:opacity-50 inline-flex items-center gap-1"
-          title="Export PDF"
-        >
-          {isExportingPdf ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileDown className="w-3 h-3" />}
-          PDF
-        </button>
+        {onExportPdf && (
+          <button
+            onClick={onExportPdf}
+            disabled={isExportingPdf}
+            className="text-gray-400 hover:text-white transition-colors px-2 py-0.5 rounded disabled:opacity-50 inline-flex items-center gap-1"
+            title="Export PDF"
+          >
+            {isExportingPdf ? <Loader2 className="w-3 h-3 animate-spin" /> : <FileDown className="w-3 h-3" />}
+            PDF
+          </button>
+        )}
         <button
           onClick={onExportHtml}
           disabled={isExportingHtml}

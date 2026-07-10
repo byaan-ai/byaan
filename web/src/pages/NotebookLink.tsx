@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { useDownload } from "../hooks/useDownload";
 import byaanLogo from "../assets/byaan-logo-orange.png";
 
-const WORKER_URL = "https://byaan-waitlist-worker.hadi-a50.workers.dev";
+const WORKER_URL = import.meta.env.VITE_WORKER_URL as string | undefined;
 
 const NotebookLink = () => {
   const { id } = useParams<{ id: string }>();
@@ -13,9 +13,9 @@ const NotebookLink = () => {
   const [checkingExistence, setCheckingExistence] = useState(true);
   const [notFound, setNotFound] = useState(false);
 
-  // Check if notebook share exists
   useEffect(() => {
-    if (!id) {
+    if (!id || !WORKER_URL) {
+      setNotFound(!WORKER_URL);
       setCheckingExistence(false);
       return;
     }

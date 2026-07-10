@@ -632,6 +632,17 @@ TRANSFORMED TEXT:"""
             text_summary: Text summary to post as initial_comment
             session: Database session
         """
+        from server.utils.deployment import is_feature_enabled
+
+        if not is_feature_enabled("worker_features_enabled"):
+            logger.info(
+                f"Skipping scheduled report screenshot for notebook {notebook_id}: worker features disabled. "
+                "Posting text summary only."
+            )
+            blocks, fallback = markdown_to_slack_blocks(text_summary)
+            await slack_client.post_message(channel=channel_id, text=fallback, blocks=blocks)
+            return
+
         try:
             logger.info(f"Generating screenshot for scheduled report (notebook {notebook_id})")
 
