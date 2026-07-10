@@ -194,10 +194,12 @@ class CustomSkillRepository:
         existing = result.scalar_one_or_none()
 
         if existing:
-            existing.name = name
-            existing.description = description
-            existing.instructions = instructions
-            await self._session.commit()
+            updates = {"name": name, "description": description, "instructions": instructions}
+            if any(getattr(existing, field) != updates[field] for field in _CONTENT_FIELDS):
+                await SkillVersionRepository(self._session).snapshot_skill(existing, changed_by="loop")
+                for field, value in updates.items():
+                    setattr(existing, field, value)
+                await self._session.commit()
             await self._session.refresh(existing, ["creator"])
             return existing
 

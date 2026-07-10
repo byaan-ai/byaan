@@ -454,11 +454,16 @@ def get_skill_loop_config() -> dict[str, bool | int]:
             logger.warning(f"Invalid {name} value, falling back to {default}")
             return default
 
+    code_sync_enabled = os.getenv("SKILL_LOOP_CODE_SYNC_ENABLED", "true").lower() not in ("0", "false", "no")
+
     return {
         "enabled": enabled,
         "interval_seconds": _int("SKILL_LOOP_INTERVAL_SECONDS", 1800),
         "max_evals_per_day": _int("SKILL_LOOP_MAX_EVALS_PER_DAY", 20),
         "digest_hour": _int("SKILL_LOOP_DIGEST_HOUR", 17),
+        "code_sync_enabled": code_sync_enabled,
+        "code_sessions_per_day": _int("SKILL_LOOP_CODE_SESSIONS_PER_DAY", 10),
+        "code_max_skills_per_tick": _int("SKILL_LOOP_CODE_MAX_SKILLS_PER_TICK", 3),
     }
 
 

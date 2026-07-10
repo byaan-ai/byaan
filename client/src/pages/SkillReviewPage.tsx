@@ -13,6 +13,8 @@ import type { SkillSuggestion, SuggestionType, SuggestionStatus, EvidenceItem } 
 
 type TypeBadgeStyle = { label: string; className: string }
 
+const CODE_BADGE_CLASS = 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20'
+
 function getTypeBadge(type: SuggestionType): TypeBadgeStyle {
   switch (type) {
     case 'edit':
@@ -61,6 +63,22 @@ function sourceOriginLabel(origin: string | undefined): string {
   return origin
 }
 
+function isCodebaseSource(source: SkillSuggestion['source']): boolean {
+  return source?.origin?.toLowerCase() === 'codebase'
+}
+
+function repoShortName(repoFullName: string | null | undefined): string {
+  if (!repoFullName) return ''
+  const parts = repoFullName.split('/').filter(Boolean)
+  return parts.length ? parts[parts.length - 1] : ''
+}
+
+function sourceListLabel(source: SkillSuggestion['source']): string {
+  if (!source) return ''
+  if (isCodebaseSource(source)) return repoShortName(source.repo_full_name) || 'Codebase'
+  return sourceOriginLabel(source.origin)
+}
+
 function isEvidenceArray(evidence: SkillSuggestion['evidence']): evidence is EvidenceItem[] {
   return Array.isArray(evidence)
 }
@@ -99,6 +117,20 @@ function DiffView({ section, before, after }: { section: string; before: string;
 }
 
 function ConversationLink({ suggestion }: { suggestion: SkillSuggestion }) {
+  if (isCodebaseSource(suggestion.source)) {
+    const compareUrl = suggestion.source?.compare_url
+    if (!compareUrl) return null
+    return (
+      <a
+        href={compareUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="inline-flex items-center gap-1.5 text-sm text-brand-orange hover:underline"
+      >
+        <ExternalLink className="w-3.5 h-3.5" /> View diff on GitHub ↗
+      </a>
+    )
+  }
   const threadUrl = suggestion.source?.thread_url
   const notebookId = suggestion.source?.notebook_id
   if (threadUrl) {
@@ -259,6 +291,7 @@ export default function SkillReviewPage() {
                 const typeBadge = getTypeBadge(s.suggestion_type)
                 const isResolved = s.status !== 'pending'
                 const isSelected = s.id === selectedId
+                const isCodeSource = isCodebaseSource(s.source)
                 return (
                   <button
                     key={s.id}
@@ -271,15 +304,22 @@ export default function SkillReviewPage() {
                   >
                     <div className="flex items-start justify-between gap-2 mb-1.5">
                       <span className="text-sm font-medium text-white line-clamp-2">{s.title}</span>
-                      <span className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadge.className}`}>
-                        {typeBadge.label}
-                      </span>
+                      <div className="flex-shrink-0 flex items-center gap-1">
+                        {isCodeSource && (
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${CODE_BADGE_CLASS}`}>
+                            Code
+                          </span>
+                        )}
+                        <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadge.className}`}>
+                          {typeBadge.label}
+                        </span>
+                      </div>
                     </div>
                     {s.skill_name && (
                       <p className="text-xs text-gray-400 truncate">{s.skill_name}</p>
                     )}
                     <div className="flex items-center gap-2 mt-1.5 text-[11px] text-gray-500">
-                      {s.source?.origin && <span>{sourceOriginLabel(s.source.origin)}</span>}
+                      {sourceListLabel(s.source) && <span>{sourceListLabel(s.source)}</span>}
                       {(s.source?.date || s.created_at) && (
                         <span>{formatDate(s.source?.date || s.created_at)}</span>
                       )}
@@ -663,6 +703,8 @@ function SuggestionDetail({
   const typeBadge = getTypeBadge(suggestion.suggestion_type)
   const isPending = suggestion.status === 'pending'
   const isClarification = suggestion.suggestion_type === 'clarification'
+  const isCodeSource = isCodebaseSource(suggestion.source)
+  const changedFiles = Array.isArray(suggestion.source?.files) ? suggestion.source.files : []
 
   return (
     <div className="max-w-3xl mx-auto px-8 py-6 space-y-6">
@@ -676,14 +718,36 @@ function SuggestionDetail({
         </div>
         <div className="flex items-center gap-2 mt-2 flex-wrap text-xs text-gray-400">
           <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${typeBadge.className}`}>{typeBadge.label}</span>
+          {isCodeSource && (
+            <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${CODE_BADGE_CLASS}`}>Code</span>
+          )}
           {suggestion.skill_name && <span className="text-gray-300">{suggestion.skill_name}</span>}
           <span className="text-gray-600">•</span>
           <span className="capitalize">{suggestion.confidence} confidence</span>
-          {suggestion.source?.origin && (
+          {isCodeSource ? (
             <>
-              <span className="text-gray-600">•</span>
-              <span>{sourceOriginLabel(suggestion.source.origin)}</span>
+              {suggestion.source?.repo_full_name && (
+                <>
+                  <span className="text-gray-600">•</span>
+                  <span className="font-mono text-gray-300">{suggestion.source.repo_full_name}</span>
+                </>
+              )}
+              {suggestion.source?.base_sha && suggestion.source?.head_sha && (
+                <>
+                  <span className="text-gray-600">•</span>
+                  <span className="font-mono text-gray-400">
+                    {suggestion.source.base_sha.slice(0, 7)} → {suggestion.source.head_sha.slice(0, 7)}
+                  </span>
+                </>
+              )}
             </>
+          ) : (
+            suggestion.source?.origin && (
+              <>
+                <span className="text-gray-600">•</span>
+                <span>{sourceOriginLabel(suggestion.source.origin)}</span>
+              </>
+            )
           )}
           <span className="text-gray-600">•</span>
           <span>{formatDate(suggestion.source?.date || suggestion.created_at)}</span>
@@ -743,6 +807,21 @@ function SuggestionDetail({
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Proposed change</h3>
           <DiffView section={suggestion.patch.section} before={suggestion.patch.before} after={suggestion.patch.after} />
+        </section>
+      )}
+
+      {/* Files changed (codebase) */}
+      {isCodeSource && changedFiles.length > 0 && (
+        <section>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Files changed</h3>
+          <div className="rounded-lg border border-gray-800 bg-[#1a1a1a] p-3 space-y-1 font-mono text-xs text-gray-300">
+            {changedFiles.slice(0, 10).map((file, i) => (
+              <div key={i} className="truncate">{file}</div>
+            ))}
+            {changedFiles.length > 10 && (
+              <div className="text-gray-500">+{changedFiles.length - 10} more</div>
+            )}
+          </div>
         </section>
       )}
 

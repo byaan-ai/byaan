@@ -72,6 +72,12 @@ export interface SuggestionSource {
   notebook_id?: string
   participants?: string[]
   date?: string
+  repo_id?: string
+  repo_full_name?: string
+  base_sha?: string
+  head_sha?: string
+  compare_url?: string
+  files?: string[]
 }
 
 export interface SkillSuggestion {

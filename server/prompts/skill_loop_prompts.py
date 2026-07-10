@@ -93,6 +93,116 @@ After your analysis, END your reply with a single fenced ```json block, and noth
 """
 
 
+def _format_citations(citations: list[dict]) -> str:
+    if not citations:
+        return "(no citations)"
+    lines = []
+    for c in citations:
+        start = c.get("start_line")
+        end = c.get("end_line")
+        loc = f"{c.get('path')}:{start}-{end}" if start else str(c.get("path"))
+        lines.append(
+            f"- claim_key={c.get('claim_key')} | status={c.get('status')} | {loc}\n"
+            f"  snippet:\n{(c.get('snippet') or '').strip()}"
+        )
+    return "\n".join(lines)
+
+
+def _format_patches(patches: list[dict]) -> str:
+    if not patches:
+        return "(no diff patches available)"
+    blocks = []
+    for p in patches:
+        patch = p.get("patch")
+        body = patch if patch else "(patch omitted — file too large or binary)"
+        blocks.append(f"### {p.get('filename')} (status={p.get('status')})\n```diff\n{body}\n```")
+    return "\n\n".join(blocks)
+
+
+def build_code_reverify_prompt(
+    skill_name: str,
+    skill_instructions: str,
+    citations: list[dict],
+    patches: list[dict],
+) -> str:
+    """Instruction for re-verifying a skill's code-derived claims after a commit drift.
+
+    The agent decides, using ONLY the provided citations and diff patches, whether the skill's
+    claims still hold, and proposes a single surgical edit when they do not.
+    """
+    citations_text = _format_citations(citations)
+    patches_text = _format_patches(patches)
+
+    return f"""## CODE DRIFT RE-VERIFICATION MODE
+
+A skill's instructions cite specific code. Some cited files changed in a recent commit and their
+snippets could no longer be located. Decide whether the skill's claims are STILL TRUE, CHANGED, or
+REMOVED — using ONLY the evidence below. Do not query databases or invent facts.
+
+SKILL: {skill_name}
+
+CURRENT SKILL INSTRUCTIONS:
+{skill_instructions.strip()}
+
+CITED CODE (claims to re-check):
+{citations_text}
+
+RELEVANT DIFF PATCHES:
+{patches_text}
+
+For each claim, judge from the diff whether it is still-true, changed, or removed. Only propose an
+edit if a claim is now wrong or stale; keep the edit minimal and grounded in the diff.
+
+END your reply with a single fenced ```json block, and nothing after it:
+
+```json
+{{
+  "still_valid": true | false,
+  "summary": "one to three sentence plain-language conclusion",
+  "edit": null | {{
+    "section": "the skill heading/section to change",
+    "before": "verbatim text being replaced",
+    "after": "the replacement text",
+    "proposed_instructions": "the FULL post-edit instructions text for the skill"
+  }},
+  "confidence": "low" | "medium" | "high"
+}}
+```
+"""
+
+
+def build_code_newfact_prompt(patches: list[dict]) -> str:
+    """Instruction for probing whether a diff introduces a new query-relevant fact worth a skill.
+
+    Cheap v1 probe over high-value changed files (models, migrations, schemas, config, constants)
+    that no existing citation covers.
+    """
+    patches_text = _format_patches(patches)
+
+    return f"""## NEW-FACT PROBE MODE
+
+The following high-value files changed and are NOT covered by any existing skill citation. Decide
+whether this change introduces a NEW query-relevant fact (a new enum value, scope, config flag,
+constant, or launch-relevant behavior) that an analyst assistant should know. Use ONLY the diff.
+
+DIFF PATCHES:
+{patches_text}
+
+Be conservative: only worth a new fact if it clearly changes how data should be queried or
+interpreted. End your reply with a single fenced ```json block, and nothing after it:
+
+```json
+{{
+  "worth_new_fact": true | false,
+  "title": "short imperative title for the new fact",
+  "rationale": "why this fact matters for querying/interpreting data",
+  "proposed_instructions": "the FULL instructions text for a small new skill capturing the fact",
+  "confidence": "low" | "medium" | "high"
+}}
+```
+"""
+
+
 def build_proposer_refuter_prompt(findings: dict, custom_skills: list[dict[str, str]]) -> str:
     """Instruction for the combined proposer + adversarial refuter session.
 

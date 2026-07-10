@@ -23,6 +23,7 @@ from server.models.query_cache import QueryCache
 from server.models.refresh_token import RefreshToken
 from server.models.schedules import Schedule, ScheduleRun
 from server.models.settings import Setting
+from server.models.skill_citation import SkillCitation
 from server.models.skill_credentials import SkillCredential
 from server.models.skill_loop_settings import SkillLoopSettings
 from server.models.skill_suggestion import SkillSuggestion
@@ -68,6 +69,7 @@ __all__ = [
     "Schedule",
     "ScheduleRun",
     "Setting",
+    "SkillCitation",
     "SkillCredential",
     "SkillLoopSettings",
     "SkillSuggestion",

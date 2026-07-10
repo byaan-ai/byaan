@@ -40,6 +40,7 @@ logger = get_logger(__name__)
 
 STALE_MINUTES = 30
 CONVERSATION_TURN_LIMIT = 30
+SYSTEM_NOTEBOOK_NAME = "Byaan System — Skill Loop"
 STARTUP_DELAY_SECONDS = 90
 VALID_VERDICTS = ("confirmed", "mistake", "ambiguous")
 
@@ -89,10 +90,21 @@ class ConversationEvaluationService:
             try:
                 await self._tick()
                 await self._maybe_send_digests()
+                await self._code_sync_tick()
             except Exception as e:
                 logger.error(f"Skill loop error: {e}", exc_info=True)
 
             await asyncio.sleep(self._interval)
+
+    async def _code_sync_tick(self) -> None:
+        """Run the commit-drift sync loop; never let its failures break conversation evaluation."""
+        try:
+            from server.services.repo_sync_service import repo_sync_service
+
+            async with AsyncSessionFactory() as session:
+                await repo_sync_service.tick(session)
+        except Exception as e:
+            logger.error(f"Repo sync tick failed: {e}", exc_info=True)
 
     async def _tick(self) -> None:
         async with AsyncSessionFactory() as session:
@@ -153,6 +165,7 @@ class ConversationEvaluationService:
             .join(last_msg, last_msg.c.notebook_id == Notebook.id)
             .outerjoin(last_eval, last_eval.c.notebook_id == Notebook.id)
             .where(last_msg.c.last_msg < cutoff)
+            .where(Notebook.notebook_name != SYSTEM_NOTEBOOK_NAME)
             .where(Notebook.tenant_id.not_in(select(disabled_tenants.c.tenant_id)))
             .where(or_(last_eval.c.last_eval.is_(None), last_msg.c.last_msg > last_eval.c.last_eval))
             .order_by(desc("is_slack"), last_msg.c.last_msg.asc())
