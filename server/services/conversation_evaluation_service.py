@@ -15,6 +15,7 @@ from server.models.llm_connections import LLMConnection
 from server.models.messages import Message
 from server.models.notebooks import Notebook
 from server.models.queries import Query
+from server.models.skill_loop_settings import SkillLoopSettings
 from server.models.skill_suggestion import SkillSuggestion
 from server.models.slack_conversation import SlackConversation
 from server.models.slack_workspace import SlackWorkspace
@@ -27,6 +28,7 @@ from server.prompts.skill_loop_prompts import (
     parse_last_json_block,
 )
 from server.repositories.custom_skill import CustomSkillRepository
+from server.repositories.skill_loop_settings import SkillLoopSettingsRepository
 from server.repositories.skill_suggestion import SkillSuggestionRepository
 from server.schemas.agent import AgentRequest
 from server.services.message_service import MessageService
@@ -52,6 +54,7 @@ class ConversationEvaluationService:
         self._max_evals_per_day: int = 20
         self._digest_hour: int = 17
         self._last_digest_date = None
+        self._last_digest_by_tenant: dict[UUID, object] = {}
 
     async def start(self) -> None:
         if self._running:
@@ -143,11 +146,14 @@ class ConversationEvaluationService:
         )
         is_slack = case((Notebook.id.in_(select(slack_notebooks.c.notebook_id)), 1), else_=0).label("is_slack")
 
+        disabled_tenants = select(SkillLoopSettings.tenant_id).where(SkillLoopSettings.enabled.is_(False)).subquery()
+
         query = (
             select(Notebook.id, Notebook.tenant_id, last_msg.c.last_msg, is_slack)
             .join(last_msg, last_msg.c.notebook_id == Notebook.id)
             .outerjoin(last_eval, last_eval.c.notebook_id == Notebook.id)
             .where(last_msg.c.last_msg < cutoff)
+            .where(Notebook.tenant_id.not_in(select(disabled_tenants.c.tenant_id)))
             .where(or_(last_eval.c.last_eval.is_(None), last_msg.c.last_msg > last_eval.c.last_eval))
             .order_by(desc("is_slack"), last_msg.c.last_msg.asc())
             .limit(limit)
@@ -393,23 +399,31 @@ class ConversationEvaluationService:
 
     async def _maybe_send_digests(self) -> None:
         now = datetime.now()
-        if now.hour < self._digest_hour:
-            return
-        if self._last_digest_date == now.date():
-            return
-        await self._send_digests()
-        self._last_digest_date = now.date()
-
-    async def _send_digests(self) -> None:
         async with AsyncSessionFactory() as session:
-            tenant_ids = await self._tenants_needing_digest(session)
+            due = await self._tenants_due_for_digest(session, now)
 
-        for tenant_id in tenant_ids:
+        for tenant_id in due:
             try:
                 async with AsyncSessionFactory() as session:
                     await self.send_tenant_digest(session, tenant_id)
+                self._last_digest_by_tenant[tenant_id] = now.date()
             except Exception as e:
                 logger.error(f"Failed to send skill digest for tenant {tenant_id}: {e}", exc_info=True)
+
+    async def _tenants_due_for_digest(self, session, now: datetime) -> list[UUID]:
+        """Tenants that have activity today and whose per-tenant digest is enabled and past its hour."""
+        settings_repo = SkillLoopSettingsRepository(session)
+        due: list[UUID] = []
+        for tenant_id in await self._tenants_needing_digest(session):
+            settings = await settings_repo.get_or_defaults(tenant_id)
+            if not settings.enabled or not settings.digest_enabled:
+                continue
+            if now.hour < settings.digest_hour:
+                continue
+            if self._last_digest_by_tenant.get(tenant_id) == now.date():
+                continue
+            due.append(tenant_id)
+        return due
 
     async def _tenants_needing_digest(self, session) -> list[UUID]:
         start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)

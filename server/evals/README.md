@@ -91,6 +91,54 @@ credentials supplied via the usual litellm environment variables.
 Outputs `report.json` (per-case results + aggregates) and a sibling
 `report.md` summary table.
 
+## 3b. Engines — benchmark locally-authenticated CLIs (no API keys)
+
+The model call and the judge call each route through an **engine**. Pick with
+`--engine` (and optionally `--judge-engine`, defaulting to `--engine`):
+
+| Engine | Backend | Auth |
+| --- | --- | --- |
+| `litellm` (default) | `litellm.completion` | API keys / env vars |
+| `codex` | OpenAI Codex CLI (`codex exec`) | local Codex login, bills the OpenAI plan |
+| `claude-cli` | Claude Code CLI (`claude -p`) | local Claude login, bills the Claude plan |
+
+CLI engines run each call as a subprocess with `cwd=/tmp` (so no project
+`CLAUDE.md`/MCP context leaks in) and a hard `--case-timeout` (default 300s,
+killed on expiry). Effective concurrency for CLI engines is capped at 3 even if
+`--concurrency` is higher. Each case gets **1 retry** on empty/errored output,
+recorded per-case as `retries`/`error`.
+
+Isolation flags used:
+- **codex**: `codex exec --model <m> [-c model_reasoning_effort=<effort>]
+  --sandbox read-only --skip-git-repo-check -o <tmpfile> "<system+user prompt>"`.
+  Codex has no system-prompt flag, so system + user are combined with a clear
+  separator; the final assistant message is read back from the unique tmpfile.
+- **claude-cli**: `claude -p --model <m> --system-prompt <sys> --strict-mcp-config
+  --mcp-config '{"mcpServers":{}}' --setting-sources '' [--effort <effort>]
+  --disallowedTools Bash Edit Write Read Glob Grep WebFetch WebSearch NotebookEdit Task`.
+  The user prompt is delivered on **stdin**; the reply is read from stdout.
+
+```bash
+# Codex (gpt-5.6-sol), low reasoning, deterministic-only cases
+uv run python -m evals.harness.runner --model gpt-5.6-sol \
+    --engine codex --reasoning-effort low \
+    --cases evals/cases/cases_v1.jsonl --db evals/synthetic/eval_data.db \
+    --mode prompt-only --category sql_correctness --limit 1
+
+# Claude Code CLI (claude-opus-4-8)
+uv run python -m evals.harness.runner --model claude-opus-4-8 \
+    --engine claude-cli \
+    --cases evals/cases/cases_v1.jsonl --db evals/synthetic/eval_data.db \
+    --mode prompt-only --out-dir reports/
+```
+
+`--reasoning-effort` accepts `low|medium|high|xhigh` (mapped to
+`model_reasoning_effort` for codex and `--effort` for claude-cli; passed as
+`reasoning_effort` to litellm when supported). `--out-dir DIR` writes
+`report_{model}_{engine}.json/.md` into `DIR` (leaving `--out` behavior intact).
+The report records engine, model, reasoning_effort, judge engine/model, start/finish
+timestamps, and per-case retry/error info.
+
 ## Interpreting the report
 
 - **overall / by_category pass_rate** — the headline. Each category maps to a

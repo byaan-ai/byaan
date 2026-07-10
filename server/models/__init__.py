@@ -24,6 +24,7 @@ from server.models.refresh_token import RefreshToken
 from server.models.schedules import Schedule, ScheduleRun
 from server.models.settings import Setting
 from server.models.skill_credentials import SkillCredential
+from server.models.skill_loop_settings import SkillLoopSettings
 from server.models.skill_suggestion import SkillSuggestion
 from server.models.skill_version import SkillVersion
 from server.models.slack_conversation import SlackConversation
@@ -68,6 +69,7 @@ __all__ = [
     "ScheduleRun",
     "Setting",
     "SkillCredential",
+    "SkillLoopSettings",
     "SkillSuggestion",
     "SkillVersion",
     "SlackConversation",

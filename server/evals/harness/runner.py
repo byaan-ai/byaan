@@ -19,12 +19,13 @@ import json
 import re
 import sqlite3
 import sys
-import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 
 from evals.harness import graders
+from evals.harness.engines import ENGINE_CHOICES, Engine, get_engine
 from evals.harness.judge import judge_answer
 from evals.harness.models import CaseResult, EvalCase
 from pydantic import ValidationError
@@ -146,24 +147,8 @@ def execute_sql_readonly(db_path: str, sql: str) -> tuple[float | None, str | No
     return None, f"non-numeric result: {value!r}"
 
 
-def call_model(model: str, system_prompt: str, user_message: str) -> tuple[str, dict, float]:
-    import litellm
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
-    ]
-    started = time.time()
-    response = litellm.completion(model=model, messages=messages, temperature=0)
-    latency = time.time() - started
-    content = response.choices[0].message.content or ""
-    usage = {}
-    if getattr(response, "usage", None):
-        usage = {
-            "prompt_tokens": getattr(response.usage, "prompt_tokens", None),
-            "completion_tokens": getattr(response.usage, "completion_tokens", None),
-        }
-    return content, usage, latency
+def _sanitize(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-") or "model"
 
 
 def grade_case(
@@ -207,34 +192,55 @@ def grade_case(
 
 
 def run_case_prompt_only(
-    case: EvalCase, model: str, db_path: str, system_prompt: str, ground_truth: dict, judge_model: str | None
+    case: EvalCase,
+    model: str,
+    db_path: str,
+    system_prompt: str,
+    ground_truth: dict,
+    engine: Engine,
+    judge_engine: Engine,
+    judge_model: str | None,
+    reasoning_effort: str | None = None,
+    timeout: float = 300.0,
 ) -> CaseResult:
     user_message = build_user_message(case)
-    try:
-        answer, usage, latency = call_model(model, system_prompt, user_message)
-    except Exception as exc:  # noqa: BLE001
+
+    retries = 0
+    response = engine.complete(system_prompt, user_message, model, reasoning_effort, timeout)
+    if response.raw_error or not response.text.strip():
+        retries = 1
+        response = engine.complete(system_prompt, user_message, model, reasoning_effort, timeout)
+
+    if response.raw_error or not response.text.strip():
         return CaseResult(
             id=case.id,
             category=case.category,
             difficulty=case.difficulty,
             expected_type=case.expected.type,
-            error=f"model call failed: {exc}",
+            retries=retries,
+            latency_seconds=response.latency_s,
+            error=f"model call failed: {response.raw_error or 'empty output'}",
         )
 
+    answer = response.text
     sql = extract_sql(answer)
     sql_result, sql_err = (None, None)
     if sql:
         sql_result, sql_err = execute_sql_readonly(db_path, sql)
 
     result = grade_case(case, answer, sql, sql_result, ground_truth)
-    result.latency_seconds = round(latency, 3)
-    result.prompt_tokens = usage.get("prompt_tokens")
-    result.completion_tokens = usage.get("completion_tokens")
+    result.latency_seconds = response.latency_s
+    result.retries = retries
+    if response.usage:
+        result.prompt_tokens = response.usage.get("prompt_tokens")
+        result.completion_tokens = response.usage.get("completion_tokens")
     if sql_err:
         result.notes.append(f"sql_exec: {sql_err}")
 
     if case.grading in ("judge", "both") and case.judge_rubric and judge_model:
-        verdict = judge_answer(case.judge_rubric, user_message, answer, judge_model)
+        verdict = judge_answer(
+            case.judge_rubric, user_message, answer, judge_model, judge_engine, reasoning_effort, timeout
+        )
         result.judge_pass = verdict["pass"]
         result.notes.append(f"judge: {verdict['reason']}")
         if case.grading == "judge":
@@ -309,8 +315,15 @@ def aggregate(results: list[CaseResult]) -> dict:
     }
 
 
-def render_markdown(model: str, aggregates: dict, results: list[CaseResult]) -> str:
-    lines = ["# Byaan Eval Report", "", f"Model: `{model}`", ""]
+def render_markdown(meta: dict, aggregates: dict, results: list[CaseResult]) -> str:
+    lines = ["# Byaan Eval Report", ""]
+    lines.append(f"Model: `{meta['model']}` · Engine: `{meta['engine']}`")
+    if meta.get("reasoning_effort"):
+        lines.append(f"Reasoning effort: `{meta['reasoning_effort']}`")
+    if meta.get("judge_model"):
+        lines.append(f"Judge: `{meta['judge_model']}` via `{meta['judge_engine']}`")
+    lines.append(f"Started: {meta['started_at']} · Finished: {meta['finished_at']}")
+    lines.append("")
     overall = aggregates["overall"]
     lines.append(f"Overall: **{overall['passed']}/{overall['total']}** ({overall['pass_rate']:.0%})")
     lines.append("")
@@ -323,12 +336,13 @@ def render_markdown(model: str, aggregates: dict, results: list[CaseResult]) -> 
     lines.append("")
     lines.append("## Cases")
     lines.append("")
-    lines.append("| ID | Category | Type | Pass | Answer | SQL | Judge |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| ID | Category | Type | Pass | Answer | SQL | Judge | Retry | Error |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for r in results:
+        err = (r.error or "").replace("|", "/")[:60]
         lines.append(
             f"| {r.id} | {r.category} | {r.expected_type} | {'✅' if r.passed else '❌'} | "
-            f"{_cell(r.answer_pass)} | {_cell(r.sql_pass)} | {_cell(r.judge_pass)} |"
+            f"{_cell(r.answer_pass)} | {_cell(r.sql_pass)} | {_cell(r.judge_pass)} | {r.retries} | {err} |"
         )
     return "\n".join(lines) + "\n"
 
@@ -347,10 +361,15 @@ def main() -> int:
     parser.add_argument("--ground-truth", type=str, default="evals/synthetic/ground_truth.json")
     parser.add_argument("--mode", choices=["dry", "prompt-only"], default="dry")
     parser.add_argument("--out", type=str, default="report.json")
+    parser.add_argument("--out-dir", type=str, default=None)
     parser.add_argument("--judge-model", type=str, default=None)
     parser.add_argument("--category", type=str, default=None)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--concurrency", type=int, default=4)
+    parser.add_argument("--engine", choices=ENGINE_CHOICES, default="litellm")
+    parser.add_argument("--judge-engine", choices=ENGINE_CHOICES, default=None)
+    parser.add_argument("--reasoning-effort", type=str, default=None)
+    parser.add_argument("--case-timeout", type=float, default=300.0)
     args = parser.parse_args()
 
     cases, load_errors = load_cases(args.cases)
@@ -385,28 +404,69 @@ def main() -> int:
 
     system_prompt = build_system_prompt(args.db, args.model)
 
-    def _run(case: EvalCase) -> CaseResult:
-        return run_case_prompt_only(case, args.model, args.db, system_prompt, ground_truth, args.judge_model)
+    engine = get_engine(args.engine)
+    judge_engine_name = args.judge_engine or args.engine
+    judge_engine = get_engine(judge_engine_name)
 
+    concurrency = args.concurrency
+    if engine.max_concurrency is not None:
+        concurrency = min(concurrency, engine.max_concurrency)
+
+    def _run(case: EvalCase) -> CaseResult:
+        return run_case_prompt_only(
+            case,
+            args.model,
+            args.db,
+            system_prompt,
+            ground_truth,
+            engine,
+            judge_engine,
+            args.judge_model,
+            args.reasoning_effort,
+            args.case_timeout,
+        )
+
+    started_at = datetime.now(UTC).isoformat()
     results: list[CaseResult]
-    if args.concurrency > 1:
-        with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+    if concurrency > 1:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
             results = list(pool.map(_run, cases))
     else:
         results = [_run(c) for c in cases]
+    finished_at = datetime.now(UTC).isoformat()
 
     aggregates = aggregate(results)
-    report = {
+    meta = {
         "model": args.model,
+        "engine": args.engine,
+        "reasoning_effort": args.reasoning_effort,
+        "judge_model": args.judge_model,
+        "judge_engine": judge_engine_name if args.judge_model else None,
         "mode": args.mode,
+        "concurrency": concurrency,
+        "case_timeout": args.case_timeout,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    report = {
+        **meta,
         "cases_run": len(results),
         "aggregates": aggregates,
         "results": [r.model_dump() for r in results],
     }
-    out_path = Path(args.out)
+
+    if args.out_dir:
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"report_{_sanitize(args.model)}_{args.engine}"
+        out_path = out_dir / f"{stem}.json"
+        md_path = out_dir / f"{stem}.md"
+    else:
+        out_path = Path(args.out)
+        md_path = out_path.with_suffix(".md")
+
     out_path.write_text(json.dumps(report, indent=2) + "\n")
-    md_path = out_path.with_suffix(".md")
-    md_path.write_text(render_markdown(args.model, aggregates, results))
+    md_path.write_text(render_markdown(meta, aggregates, results))
 
     overall = aggregates["overall"]
     print(f"Wrote {out_path} and {md_path}")

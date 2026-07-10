@@ -1,8 +1,13 @@
-"""LLM-judge grader: a single litellm call returning {pass, reason}."""
+"""LLM-judge grader: one engine call returning {pass, reason}.
+
+Litellm keeps temperature-0 semantics; CLI engines just complete and parse.
+"""
 
 from __future__ import annotations
 
 import json
+
+from evals.harness.engines import Engine
 
 JUDGE_SYSTEM = (
     "You are a strict grader for a business-intelligence assistant. "
@@ -37,17 +42,23 @@ def _parse_judge_response(content: str) -> dict:
         return {"pass": False, "reason": f"unparseable judge response: {content[:200]}"}
 
 
-def judge_answer(rubric: str, question: str, answer: str, judge_model: str) -> dict:
-    """Single temperature-0 litellm call. Returns {pass: bool, reason: str}."""
-    import litellm
-
-    messages = [
-        {"role": "system", "content": JUDGE_SYSTEM},
-        {"role": "user", "content": build_judge_prompt(rubric, question, answer)},
-    ]
-    try:
-        response = litellm.completion(model=judge_model, messages=messages, temperature=0)
-        content = response.choices[0].message.content or ""
-    except Exception as exc:  # noqa: BLE001
-        return {"pass": False, "reason": f"judge call failed: {exc}"}
-    return _parse_judge_response(content)
+def judge_answer(
+    rubric: str,
+    question: str,
+    answer: str,
+    judge_model: str,
+    engine: Engine,
+    reasoning_effort: str | None = None,
+    timeout: float = 300.0,
+) -> dict:
+    """Single judge call through ``engine``. Returns {pass: bool, reason: str}."""
+    response = engine.complete(
+        system_prompt=JUDGE_SYSTEM,
+        user_prompt=build_judge_prompt(rubric, question, answer),
+        model=judge_model,
+        reasoning_effort=reasoning_effort,
+        timeout=timeout,
+    )
+    if response.raw_error:
+        return {"pass": False, "reason": f"judge call failed: {response.raw_error}"}
+    return _parse_judge_response(response.text)

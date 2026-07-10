@@ -1,9 +1,14 @@
 import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { Check, X, Pencil, ExternalLink, MessageCircleQuestion, Loader2, Sparkles } from 'lucide-react'
+import { Check, X, Pencil, ExternalLink, MessageCircleQuestion, Loader2, Sparkles, Settings } from 'lucide-react'
 import { Button } from '../components/ui/button'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog'
+import { Switch } from '../components/ui/switch'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select'
+import { SkillLoopSettingsService } from '../services/skillLoopSettings'
 import { useSkillSuggestions, useApproveSuggestion, useRejectSuggestion } from '../hooks/useSkillSuggestions'
+import { useSkillLoopSettings, useUpdateSkillLoopSettings } from '../hooks/useSkillLoopSettings'
+import type { SkillLoopSettings, SkillLoopSettingsUpdate } from '../services/skillLoopSettings'
 import type { SkillSuggestion, SuggestionType, SuggestionStatus, EvidenceItem } from '../services/skillSuggestions'
 
 type TypeBadgeStyle = { label: string; className: string }
@@ -123,6 +128,7 @@ function ConversationLink({ suggestion }: { suggestion: SkillSuggestion }) {
 
 export default function SkillReviewPage() {
   const [showResolved, setShowResolved] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [approveConfirmOpen, setApproveConfirmOpen] = useState(false)
   const [editModalOpen, setEditModalOpen] = useState(false)
@@ -214,15 +220,24 @@ export default function SkillReviewPage() {
               <p className="text-xs text-gray-400">Review and apply learnings suggested by the AI</p>
             </div>
           </div>
-          <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showResolved}
-              onChange={(e) => setShowResolved(e.target.checked)}
-              className="accent-brand-orange"
-            />
-            Show resolved
-          </label>
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 text-sm text-gray-400 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showResolved}
+                onChange={(e) => setShowResolved(e.target.checked)}
+                className="accent-brand-orange"
+              />
+              Show resolved
+            </label>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="flex items-center gap-1.5 text-sm text-gray-400 hover:text-white transition-colors"
+              title="Skill loop settings"
+            >
+              <Settings className="w-4 h-4" /> Settings
+            </button>
+          </div>
         </div>
       </div>
 
@@ -400,7 +415,234 @@ export default function SkillReviewPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Settings */}
+      <SkillLoopSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
+  )
+}
+
+function SkillLoopSettingsDialog({
+  open,
+  onOpenChange,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const { data: settings, isLoading } = useSkillLoopSettings()
+  const updateMutation = useUpdateSkillLoopSettings()
+
+  const [form, setForm] = useState<SkillLoopSettings | null>(null)
+
+  useEffect(() => {
+    if (settings) {
+      setForm(settings)
+    }
+  }, [settings])
+
+  const changedFields = useMemo<SkillLoopSettingsUpdate>(() => {
+    if (!settings || !form) return {}
+    const diff: SkillLoopSettingsUpdate = {}
+    if (form.enabled !== settings.enabled) diff.enabled = form.enabled
+    if (form.digest_enabled !== settings.digest_enabled) diff.digest_enabled = form.digest_enabled
+    if (form.digest_hour !== settings.digest_hour) diff.digest_hour = form.digest_hour
+    if (form.slack_reviewers_channel_id !== settings.slack_reviewers_channel_id) {
+      diff.slack_reviewers_channel_id = form.slack_reviewers_channel_id
+    }
+    return diff
+  }, [settings, form])
+
+  const hasChanges = Object.keys(changedFields).length > 0
+
+  const handleSave = () => {
+    if (!hasChanges) return
+    updateMutation.mutate(changedFields)
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={(o) => { if (!updateMutation.isPending) onOpenChange(o) }}>
+      <DialogContent className="max-w-lg bg-[#2a2a2a] border-[#444444]">
+        <DialogHeader>
+          <DialogTitle className="text-white">Skill loop settings</DialogTitle>
+        </DialogHeader>
+        {isLoading || !form ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-5 h-5 text-brand-orange animate-spin" />
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {/* Automatic suggestions */}
+            <div className="space-y-3">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-sm font-medium text-white">Automatic skill suggestions</p>
+                  <p className="text-xs text-gray-400 mt-1 leading-relaxed">
+                    Byaan evaluates finished conversations in the background and suggests skill edits.
+                    Suggestions always require approval — nothing is applied automatically.
+                  </p>
+                </div>
+                <Switch
+                  checked={form.enabled}
+                  onCheckedChange={(checked) => setForm({ ...form, enabled: checked })}
+                  disabled={updateMutation.isPending}
+                />
+              </div>
+              {!form.loop_globally_enabled && (
+                <p className="text-xs text-amber-400/80">
+                  The loop is disabled server-wide (SKILL_LOOP_ENABLED=false). These settings take effect once it's re-enabled.
+                </p>
+              )}
+            </div>
+
+            {/* Slack reviews */}
+            <div className="space-y-2 pt-2 border-t border-gray-800">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Slack reviews</p>
+              {form.slack_workspace_connected ? (
+                <div className="space-y-1.5">
+                  <label className="text-sm text-gray-300">Reviewers channel</label>
+                  <SlackReviewChannelField
+                    value={form.slack_reviewers_channel_id}
+                    onChange={(v) => setForm({ ...form, slack_reviewers_channel_id: v })}
+                    disabled={updateMutation.isPending}
+                  />
+                </div>
+              ) : (
+                <p className="text-sm text-gray-500">Connect Slack to review suggestions from a channel.</p>
+              )}
+            </div>
+
+            {/* Email digest */}
+            <div className="space-y-3 pt-2 border-t border-gray-800">
+              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Email digest</p>
+              <div className="flex items-start justify-between gap-4">
+                <p className="text-xs text-gray-400 leading-relaxed">
+                  Daily summary emailed to workspace owners and admins.
+                </p>
+                <Switch
+                  checked={form.digest_enabled}
+                  onCheckedChange={(checked) => setForm({ ...form, digest_enabled: checked })}
+                  disabled={updateMutation.isPending}
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="text-sm text-gray-300">Send at</label>
+                <select
+                  value={form.digest_hour}
+                  onChange={(e) => setForm({ ...form, digest_hour: Number(e.target.value) })}
+                  disabled={updateMutation.isPending || !form.digest_enabled}
+                  className="rounded-md bg-[#1a1a1a] border border-[#555555] text-white text-sm p-2 focus:border-brand-orange focus:ring-1 focus:ring-brand-orange/50 focus:outline-none disabled:opacity-50 custom-scrollbar"
+                >
+                  {Array.from({ length: 24 }, (_, h) => (
+                    <option key={h} value={h}>
+                      {String(h).padStart(2, '0')}:00
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-gray-800">
+              <Button
+                variant="outline"
+                onClick={() => onOpenChange(false)}
+                disabled={updateMutation.isPending}
+                className="border-[#555555] text-white hover:bg-[#3a3a3a]"
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="brand-primary"
+                onClick={handleSave}
+                disabled={updateMutation.isPending || !hasChanges}
+              >
+                {updateMutation.isPending ? 'Saving...' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SlackReviewChannelField({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string | null
+  onChange: (v: string | null) => void
+  disabled: boolean
+}) {
+  const [channels, setChannels] = useState<Array<{ id: string; name: string }>>([])
+  const [loading, setLoading] = useState(true)
+  const [failed, setFailed] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    setLoading(true)
+    setFailed(false)
+    SkillLoopSettingsService.getSlackChannels()
+      .then((res) => { if (active) setChannels(res.channels) })
+      .catch(() => { if (active) setFailed(true) })
+      .finally(() => { if (active) setLoading(false) })
+    return () => { active = false }
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-gray-400 py-2">
+        <Loader2 className="w-4 h-4 animate-spin" /> Loading channels…
+      </div>
+    )
+  }
+
+  const usableChannels = channels.filter((c) => c.id?.trim())
+
+  if (failed || usableChannels.length === 0) {
+    return (
+      <div className="space-y-1.5">
+        <input
+          type="text"
+          value={value ?? ''}
+          onChange={(e) => onChange(e.target.value.trim() === '' ? null : e.target.value)}
+          disabled={disabled}
+          placeholder="C0123456789 — leave empty to post into the original thread"
+          className="w-full rounded-md bg-[#1a1a1a] border border-[#555555] text-white text-sm p-2.5 focus:border-brand-orange focus:ring-1 focus:ring-brand-orange/50 focus:outline-none disabled:opacity-50"
+        />
+        <p className="text-xs text-gray-500">
+          {failed
+            ? "Couldn't load channels — paste a channel ID instead."
+            : 'No channels found — paste a channel ID instead.'}
+        </p>
+      </div>
+    )
+  }
+
+  const knownIds = new Set(usableChannels.map((c) => c.id))
+  const unknownId = value && !knownIds.has(value) ? value : null
+
+  return (
+    <Select
+      value={value ?? '_none'}
+      onValueChange={(v) => onChange(v === '_none' ? null : v)}
+      disabled={disabled}
+    >
+      <SelectTrigger className="w-full bg-[#1a1a1a] border-[#555555] text-white text-sm disabled:opacity-50">
+        <SelectValue />
+      </SelectTrigger>
+      <SelectContent className="bg-[#1a1a1a] border-[#555555] text-white max-h-60">
+        <SelectItem value="_none" className="text-sm">Post in original thread</SelectItem>
+        {usableChannels.map((channel) => (
+          <SelectItem key={channel.id} value={channel.id} className="text-sm">#{channel.name}</SelectItem>
+        ))}
+        {unknownId && (
+          <SelectItem value={unknownId} className="text-sm">
+            #unknown ({unknownId.length > 7 ? `${unknownId.slice(0, 7)}…` : unknownId})
+          </SelectItem>
+        )}
+      </SelectContent>
+    </Select>
   )
 }
 

@@ -55,5 +55,6 @@ class CaseResult(BaseModel):
     latency_seconds: float | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
+    retries: int = 0
     error: str | None = None
     notes: list[str] = Field(default_factory=list)

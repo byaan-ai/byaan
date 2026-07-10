@@ -74,6 +74,7 @@ from server.routers import raw_query as raw_query_router
 from server.routers import schedules as schedules_router
 from server.routers import scopes as scopes_router
 from server.routers import settings as settings_router
+from server.routers import skill_loop as skill_loop_router
 from server.routers import skill_suggestions as skill_suggestions_router
 from server.routers import skills as skills_router
 from server.routers import slack as slack_router
@@ -196,7 +197,7 @@ async def app_lifespan(app: FastAPI):
             await skill_loop_service.start()
             logger.info(f"🧠 Skill loop service started: {time.perf_counter() - start:.3f}s")
         else:
-            logger.info("⏭️  Skill loop service skipped (SKILL_LOOP_ENABLED not set)")
+            logger.info("⏭️  Skill loop service disabled (SKILL_LOOP_ENABLED=false)")
 
         migration_status["message"] = "Backend ready"
         logger.info("✅ Backend initialization completed successfully")
@@ -590,6 +591,8 @@ app.include_router(skills_router.router, prefix="/api", tags=["skills"])
 app.include_router(custom_skills_router.router, prefix="/api", tags=["custom-skills"])
 
 app.include_router(skill_suggestions_router.router, prefix="/api", tags=["skill-suggestions"])
+
+app.include_router(skill_loop_router.router, prefix="/api", tags=["skill-loop"])
 
 app.include_router(slack_router.router, prefix="/api", tags=["slack"])
 

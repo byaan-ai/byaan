@@ -438,12 +438,14 @@ def get_skill_loop_config() -> dict[str, bool | int]:
     """
     Get skill-learning-loop configuration from environment variables.
 
+    The loop is on by default; SKILL_LOOP_ENABLED=false acts as an emergency kill-switch.
+
     Returns:
         Dict with enabled flag, tick interval, per-day evaluation cap, and digest hour.
     """
     import os
 
-    enabled = os.getenv("SKILL_LOOP_ENABLED", "false").lower() in ("1", "true", "yes")
+    enabled = os.getenv("SKILL_LOOP_ENABLED", "true").lower() not in ("0", "false", "no")
 
     def _int(name: str, default: int) -> int:
         try:
