@@ -304,7 +304,7 @@ async def test_approve_flow_end_to_end(review_ctx):
 
 
 @pytest.mark.asyncio
-async def test_non_member_email_is_unauthorized(review_ctx):
+async def test_non_member_email_can_approve(review_ctx):
     ctx = review_ctx
     ctx["monkeypatch"].setattr(
         SlackService,
@@ -323,13 +323,14 @@ async def test_non_member_email_is_unauthorized(review_ctx):
     session = ctx["session"]
     fresh = await session.get(SkillSuggestion, ctx["suggestion"].id, populate_existing=True)
     await session.refresh(fresh)
-    assert fresh.status == "pending"
-    assert not ctx["replaced"]
-    assert ctx["ephemerals"] and "Only reviewers" in ctx["ephemerals"][0]
+    assert fresh.status == "applied"
+    assert fresh.reviewed_by is None
+    assert fresh.reviewer_display_name == "Mallory"
+    assert ctx["replaced"], "expected the original message to be rewritten"
 
 
 @pytest.mark.asyncio
-async def test_unknown_user_is_unauthorized(review_ctx):
+async def test_unknown_user_can_approve(review_ctx):
     ctx = review_ctx
     ctx["monkeypatch"].setattr(SlackService, "get_user_info", lambda self, uid: _async_return(None))
 
@@ -344,8 +345,10 @@ async def test_unknown_user_is_unauthorized(review_ctx):
     session = ctx["session"]
     fresh = await session.get(SkillSuggestion, ctx["suggestion"].id, populate_existing=True)
     await session.refresh(fresh)
-    assert fresh.status == "pending"
-    assert ctx["ephemerals"] and "Only reviewers" in ctx["ephemerals"][0]
+    assert fresh.status == "applied"
+    assert fresh.reviewed_by is None
+    assert fresh.reviewer_display_name == "U_GHOST"
+    assert ctx["replaced"], "expected the original message to be rewritten"
 
 
 @pytest.mark.asyncio
