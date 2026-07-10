@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.models.skill_suggestion import SkillSuggestion
 from server.models.slack_workspace import SlackWorkspace
-from server.models.tenant_member import TenantMember, TenantRole
+from server.models.tenant_member import TenantMember
 from server.models.user import User
 from server.repositories.custom_skill import CustomSkillRepository
 from server.repositories.skill_suggestion import SkillSuggestionRepository
@@ -34,8 +34,6 @@ ACTION_APPROVE = "skill_suggestion_approve"
 ACTION_REJECT = "skill_suggestion_reject"
 ACTION_DISCUSS = "skill_suggestion_discuss"
 ACTION_ACK = "skill_suggestion_ack"
-
-_REVIEWER_ROLES = {TenantRole.OWNER.value, TenantRole.ADMIN.value}
 
 
 def _frontend_url() -> str:
@@ -63,21 +61,18 @@ async def _skill_name(session: AsyncSession, suggestion: SkillSuggestion) -> str
     return suggestion.title
 
 
-async def _match_member(session: AsyncSession, tenant_id: UUID, email: str | None) -> tuple[User | None, str | None]:
-    """Resolve a Byaan user + tenant role from a Slack profile email."""
+async def _match_member(session: AsyncSession, tenant_id: UUID, email: str | None) -> User | None:
+    """Resolve a Byaan user from a Slack profile email for reviewer attribution."""
     if not email:
-        return None, None
+        return None
     stmt = (
-        select(User, TenantMember.role)
+        select(User)
         .join(TenantMember, TenantMember.user_id == User.id)
         .where(TenantMember.tenant_id == tenant_id)
         .where(func.lower(User.email) == email.lower())
     )
     result = await session.execute(stmt)
-    row = result.first()
-    if not row:
-        return None, None
-    return row[0], row[1]
+    return result.scalars().first()
 
 
 def _patch_diff_block(patch: dict | None) -> str:
@@ -277,14 +272,7 @@ async def handle_suggestion_action(
 
             user_info = await slack.get_user_info(slack_user_id)
             email = user_info.get("email") if user_info else None
-            reviewer_user, role = await _match_member(session, tenant_id, email)
-
-            if role not in _REVIEWER_ROLES:
-                await _post_ephemeral(
-                    response_url,
-                    "Only reviewers can approve skill edits. Ask an admin to add you.",
-                )
-                return
+            reviewer_user = await _match_member(session, tenant_id, email)
 
             reviewer_name = (user_info or {}).get("name") or slack_user_id
             service = SkillSuggestionService(session)
