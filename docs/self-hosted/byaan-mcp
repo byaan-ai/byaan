@@ -29,9 +29,20 @@ if [ -z "$CONTAINER" ]; then
     exit 1
 fi
 
-exec docker exec -i \
-    -w /app/server \
-    -e BYAAN_MCP_USER="$EMAIL" \
-    ${TENANT:+-e BYAAN_MCP_TENANT="$TENANT"} \
-    "$CONTAINER" \
+EXEC_ARGS=(-i -w /app/server -e BYAAN_MCP_USER="$EMAIL")
+[ -n "$TENANT" ] && EXEC_ARGS+=(-e BYAAN_MCP_TENANT="$TENANT")
+
+# The self-hosted entrypoint exports DATABASE_URL and APP_MODE at runtime, so
+# exec sessions don't inherit them; rebuild them from the persisted credentials
+# and run as the byaan user so created files stay writable by the backend.
+if CREDS=$(docker exec "$CONTAINER" cat /data/.db_credentials 2>/dev/null) && [ -n "$CREDS" ]; then
+    DB_NAME=$(docker exec "$CONTAINER" printenv POSTGRES_DB 2>/dev/null || true)
+    EXEC_ARGS+=(
+        -u byaan
+        -e DATABASE_URL="postgresql+asyncpg://${CREDS%%:*}:${CREDS#*:}@localhost:5432/${DB_NAME:-byaan}"
+        -e APP_MODE=self-hosted
+    )
+fi
+
+exec docker exec "${EXEC_ARGS[@]}" "$CONTAINER" \
     uv run --frozen --no-sync python -m server.mcp.stdio_server

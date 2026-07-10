@@ -189,7 +189,7 @@ To register from your laptop over SSH instead of on the server itself:
 claude mcp add-json byaan '{
   "type": "stdio",
   "command": "ssh",
-  "args": ["your-server", "byaan-mcp", "youeamil@org.com"]
+  "args": ["your-server", "byaan-mcp", "you@org.com"]
 }' --scope user
 ```
 
