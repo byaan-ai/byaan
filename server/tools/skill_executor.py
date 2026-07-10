@@ -127,11 +127,12 @@ async def _execute_aws_request(
     config: SkillConfig, credentials: dict, action: str, params: dict
 ) -> tuple[dict | None, str | None]:
     """Execute an AWS API request via boto3. Returns (response_data, error_json)."""
+    use_default_chain = credentials.get("auth_mode") == "iam_role"
     aws_access_key_id = credentials.get("aws_access_key_id", "")
     aws_secret_access_key = credentials.get("aws_secret_access_key", "")
     aws_region = credentials.get("aws_region", "us-east-1")
 
-    if not aws_access_key_id or not aws_secret_access_key:
+    if not use_default_chain and (not aws_access_key_id or not aws_secret_access_key):
         return None, json.dumps(
             {"success": False, "error": "AWS credentials (access key and secret key) are required."}
         )
@@ -142,15 +143,20 @@ async def _execute_aws_request(
 
     def _call_boto3():
         import boto3
-        from botocore.exceptions import BotoCoreError, ClientError
+        from botocore.exceptions import BotoCoreError, ClientError, NoCredentialsError
 
         try:
-            client = boto3.client(
-                service_name,
-                aws_access_key_id=aws_access_key_id,
-                aws_secret_access_key=aws_secret_access_key,
-                region_name=aws_region,
-            )
+            if use_default_chain:
+                # AWS default credential chain: env vars -> shared config -> IMDS
+                # instance profile / ECS task role. No long-lived keys stored.
+                client = boto3.client(service_name, region_name=aws_region)
+            else:
+                client = boto3.client(
+                    service_name,
+                    aws_access_key_id=aws_access_key_id,
+                    aws_secret_access_key=aws_secret_access_key,
+                    region_name=aws_region,
+                )
             method_name = _camel_to_snake(action)
             method = getattr(client, method_name, None)
             if not method:
@@ -167,6 +173,17 @@ async def _execute_aws_request(
             error_code = e.response["Error"]["Code"]
             error_msg = e.response["Error"]["Message"]
             return None, json.dumps({"success": False, "error": f"AWS {error_code}: {error_msg}"})
+        except NoCredentialsError:
+            return None, json.dumps(
+                {
+                    "success": False,
+                    "error": (
+                        "No AWS credentials found via the default chain. Attach an IAM role with "
+                        "CloudWatch Logs read access to this instance/task (on EC2, containers also need "
+                        "IMDSv2 hop limit 2), or switch the skill to access keys."
+                    ),
+                }
+            )
         except BotoCoreError as e:
             return None, json.dumps({"success": False, "error": f"AWS error: {str(e)}"})
         except Exception as e:

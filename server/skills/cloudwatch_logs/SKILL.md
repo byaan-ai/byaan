@@ -14,14 +14,30 @@ api:
     type: aws
 
 credentials:
+  - key: auth_mode
+    label: Authentication
+    type: select
+    default: access_keys
+    options:
+      - value: access_keys
+        label: Access keys
+      - value: iam_role
+        label: Instance IAM role (auto)
+    help: "Use IAM access keys, or — when Byaan runs on AWS — the instance's IAM role via the default credential chain (no keys stored)."
   - key: aws_access_key_id
     label: Access Key ID
     placeholder: "AKIA..."
     help: "AWS Console → IAM → Users → [your user] → Security credentials → Create access key. Starts with 'AKIA'."
+    depends_on:
+      key: auth_mode
+      value: access_keys
   - key: aws_secret_access_key
     label: Secret Access Key
     placeholder: "wJalr..."
     help: "Shown once when creating the access key. If lost, create a new key pair in IAM → Security credentials."
+    depends_on:
+      key: auth_mode
+      value: access_keys
   - key: aws_region
     label: Region
     placeholder: "us-east-1"
@@ -41,11 +57,25 @@ Use the AWS CloudWatch Logs API to query log groups, search log events, and run 
 
 This skill requires **read-only** access to AWS CloudWatch Logs. No write or delete permissions are needed — Byaan only reads your logs, it never modifies them.
 
-### What you need
+### Choose an authentication mode
 
-An **IAM user** with programmatic access (Access Key ID + Secret Access Key). This user only needs read permissions on CloudWatch Logs. We recommend creating a dedicated IAM user for Byaan rather than reusing an admin or broad-access account.
+- **Instance IAM role (recommended when Byaan runs on AWS)** — no keys to create, store, or rotate. Byaan uses the AWS default credential chain (EC2 instance profile / ECS task role / env credentials). Select "Instance IAM role (auto)" and set only the Region.
+- **Access keys** — for Byaan deployments outside AWS. An **IAM user** with programmatic access (Access Key ID + Secret Access Key) and read-only CloudWatch Logs permissions. Create a dedicated IAM user for Byaan rather than reusing an admin account.
 
-### Step-by-step
+### Option A: Instance IAM role
+
+1. In the **AWS Console → IAM → Roles**, create (or reuse) a role for the EC2 instance / ECS task running Byaan
+2. Attach the `CloudWatchLogsReadOnlyAccess` managed policy, or the custom read-only policy shown below
+3. Attach the role to the instance (EC2 → Instance → Actions → Security → Modify IAM role) or the ECS task definition
+4. **If Byaan runs in Docker on EC2** (the standard self-hosted setup), the container must be able to reach instance metadata. IMDSv2's default hop limit of 1 blocks containers — raise it once:
+
+```
+aws ec2 modify-instance-metadata-options --instance-id i-xxxx --http-put-response-hop-limit 2 --http-tokens required
+```
+
+5. In Byaan, go to **Settings > Skills > CloudWatch Logs**, choose **Instance IAM role (auto)**, and set the **Region**
+
+### Option B: Access keys — step-by-step
 
 1. In the **AWS Console → IAM → Users**, create a new user (e.g., `byaan-cloudwatch-reader`)
 2. Attach the **AWS managed policy** `CloudWatchLogsReadOnlyAccess`, or create a custom policy with these specific actions:
@@ -584,7 +614,8 @@ CloudWatch query results can be saved for dashboard use:
 
 | Error | Likely Cause | Fix |
 |-------|-------------|-----|
-| `AccessDeniedException` | IAM user lacks required permissions | Ensure the IAM policy includes `logs:DescribeLogGroups`, `logs:FilterLogEvents`, `logs:StartQuery`, `logs:GetQueryResults`, and other required actions |
+| `AccessDeniedException` | IAM user/role lacks required permissions | Ensure the IAM policy includes `logs:DescribeLogGroups`, `logs:FilterLogEvents`, `logs:StartQuery`, `logs:GetQueryResults`, and other required actions |
+| `No AWS credentials found via the default chain` | IAM role mode selected but no role attached, or the container cannot reach instance metadata | Attach a role with the read-only policy to the instance/task. On EC2 with Docker, set the IMDSv2 hop limit to 2 |
 | Empty results | Time range doesn't cover log activity, or wrong log group name | Verify `startTime`/`endTime` bracket the expected log period. Use `DescribeLogGroups` to confirm the exact log group name |
 | Empty results (Insights) | `startTime`/`endTime` in wrong unit | `StartQuery` uses epoch **seconds**, not milliseconds |
 | `ResourceNotFoundException` | Log group doesn't exist in this region | Check the region in skill settings. CloudWatch Logs are regional — logs in `us-east-1` won't appear when querying `eu-west-1` |

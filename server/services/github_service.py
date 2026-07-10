@@ -352,6 +352,57 @@ async def get_latest_commit_sha(token: str, owner: str, repo: str, branch: str) 
         return response.json()["sha"]
 
 
+COMPARE_MAX_FILES = 300
+COMPARE_MAX_PATCH_BYTES = 4096
+
+
+async def compare_commits(token: str, repo_full_name: str, base_sha: str, head_sha: str) -> dict | None:
+    """Compare two commits via the GitHub compare API.
+
+    Returns a dict of changed files (patches capped at ~4KB each, file list capped at 300
+    with a ``truncated`` flag), or ``None`` when the compare cannot be resolved (404, base/head
+    not found, or a too-large diff GitHub refuses to serve).
+    """
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{GITHUB_API_BASE}/repos/{repo_full_name}/compare/{base_sha}...{head_sha}",
+            headers={**GITHUB_HEADERS, "Authorization": f"Bearer {token}"},
+        )
+        if response.status_code == 404:
+            logger.warning("[GITHUB COMPARE] %s %s...%s not found", repo_full_name, base_sha[:8], head_sha[:8])
+            return None
+        if response.status_code in (413, 422):
+            logger.warning("[GITHUB COMPARE] %s diff too large or unprocessable", repo_full_name)
+            return None
+        response.raise_for_status()
+        _check_rate_limit(response)
+        data = response.json()
+
+        raw_files = data.get("files") or []
+        truncated = len(raw_files) > COMPARE_MAX_FILES
+        files = []
+        for raw in raw_files[:COMPARE_MAX_FILES]:
+            patch = raw.get("patch")
+            if patch is not None and len(patch.encode("utf-8")) > COMPARE_MAX_PATCH_BYTES:
+                patch = patch.encode("utf-8")[:COMPARE_MAX_PATCH_BYTES].decode("utf-8", errors="ignore")
+            files.append(
+                {
+                    "filename": raw.get("filename"),
+                    "status": raw.get("status"),
+                    "patch": patch,
+                    "additions": raw.get("additions", 0),
+                    "deletions": raw.get("deletions", 0),
+                }
+            )
+
+        return {
+            "files": files,
+            "total_commits": data.get("total_commits", 0),
+            "html_url": data.get("html_url", ""),
+            "truncated": truncated,
+        }
+
+
 async def is_oauth_configured(session: AsyncSession | None = None) -> bool:
     client_id, _ = await get_github_oauth_credentials(session)
     return bool(client_id)

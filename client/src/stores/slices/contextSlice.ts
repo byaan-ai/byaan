@@ -9,6 +9,10 @@ export interface CredentialField {
   placeholder: string
   help: string
   optional?: boolean
+  type?: string
+  options?: { value: string; label: string }[]
+  default?: string
+  depends_on?: { key: string; value: string }
 }
 
 export interface SkillStatus {
@@ -85,7 +89,7 @@ export interface LearningRecord {
 
 export interface ContextSlice {
   isSidebarOpen: boolean
-  activeSection: 'instructions' | 'skills' | 'style' | 'database' | 'learnings'
+  activeSection: 'instructions' | 'skills' | 'style' | 'database' | 'learnings' | 'suggestions'
   selectedDatasourceId: string | null
   databaseContext: DatabaseContext[]
   datasourceSchemas: Record<string, any>
@@ -102,10 +106,10 @@ export interface ContextSlice {
   pendingSkillId: string | null
 
   toggleSidebar: () => void
-  openSidebar: (section?: 'instructions' | 'skills' | 'style' | 'database' | 'learnings', skillId?: string) => void
+  openSidebar: (section?: 'instructions' | 'skills' | 'style' | 'database' | 'learnings' | 'suggestions', skillId?: string) => void
   setPendingSkillId: (id: string | null) => void
   closeSidebar: () => void
-  setActiveSection: (section: 'instructions' | 'skills' | 'style' | 'database' | 'learnings') => void
+  setActiveSection: (section: 'instructions' | 'skills' | 'style' | 'database' | 'learnings' | 'suggestions') => void
   setSelectedDatasource: (datasourceId: string) => void
 
   loadDatasourceSchema: (datasourceId: string, schema: any) => void

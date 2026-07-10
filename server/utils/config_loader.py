@@ -434,6 +434,41 @@ def get_smtp_config() -> dict[str, str | bool | int | None]:
     }
 
 
+def get_skill_loop_config() -> dict[str, bool | int]:
+    """
+    Get skill-learning-loop configuration from environment variables.
+
+    The loop is on by default; SKILL_LOOP_ENABLED=false acts as an emergency kill-switch.
+
+    Returns:
+        Dict with enabled flag, tick interval, per-day evaluation cap, and digest hour.
+    """
+    import os
+
+    enabled = os.getenv("SKILL_LOOP_ENABLED", "true").lower() not in ("0", "false", "no")
+
+    def _int(name: str, default: int) -> int:
+        try:
+            return int(os.getenv(name, str(default)))
+        except ValueError:
+            logger.warning(f"Invalid {name} value, falling back to {default}")
+            return default
+
+    code_sync_enabled = os.getenv("SKILL_LOOP_CODE_SYNC_ENABLED", "true").lower() not in ("0", "false", "no")
+
+    return {
+        "enabled": enabled,
+        "interval_seconds": _int("SKILL_LOOP_INTERVAL_SECONDS", 1800),
+        "max_evals_per_day": _int("SKILL_LOOP_MAX_EVALS_PER_DAY", 20),
+        "digest_hour": _int("SKILL_LOOP_DIGEST_HOUR", 17),
+        "code_sync_enabled": code_sync_enabled,
+        "code_sync_interval_seconds": _int("SKILL_LOOP_CODE_SYNC_INTERVAL_SECONDS", 86400),
+        "code_sessions_per_day": _int("SKILL_LOOP_CODE_SESSIONS_PER_DAY", 10),
+        "code_max_skills_per_tick": _int("SKILL_LOOP_CODE_MAX_SKILLS_PER_TICK", 3),
+        "agent_timeout_seconds": _int("SKILL_LOOP_AGENT_TIMEOUT_SECONDS", 300),
+    }
+
+
 def get_public_base_url() -> str:
     """
     Get public base URL for generating shared dashboard links.

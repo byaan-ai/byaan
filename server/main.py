@@ -74,6 +74,8 @@ from server.routers import raw_query as raw_query_router
 from server.routers import schedules as schedules_router
 from server.routers import scopes as scopes_router
 from server.routers import settings as settings_router
+from server.routers import skill_loop as skill_loop_router
+from server.routers import skill_suggestions as skill_suggestions_router
 from server.routers import skills as skills_router
 from server.routers import slack as slack_router
 from server.routers import tenant as tenant_router
@@ -81,11 +83,12 @@ from server.routers import user_preferences as user_preferences_router
 from server.routers import users as users_router
 from server.routers import waitlist as waitlist_router
 from server.schemas.standard_response import error_response, success_response
+from server.services.conversation_evaluation_service import skill_loop_service
 from server.services.credit_sync_service import credit_sync_service
 from server.services.dashboard_refresh_service import dashboard_refresh_service
 from server.services.posthog_service import PostHogService
 from server.services.schedule_runner_service import schedule_runner_service
-from server.utils.config_loader import is_community_mode, is_self_hosted
+from server.utils.config_loader import get_skill_loop_config, is_community_mode, is_self_hosted
 from server.utils.custom_logger import configure_log_redaction, get_logger
 
 logging.basicConfig(
@@ -189,6 +192,13 @@ async def app_lifespan(app: FastAPI):
         await schedule_runner_service.start()
         logger.info(f"⏰ Schedule runner service started: {time.perf_counter() - start:.3f}s")
 
+        if get_skill_loop_config()["enabled"]:
+            start = time.perf_counter()
+            await skill_loop_service.start()
+            logger.info(f"🧠 Skill loop service started: {time.perf_counter() - start:.3f}s")
+        else:
+            logger.info("⏭️  Skill loop service disabled (SKILL_LOOP_ENABLED=false)")
+
         migration_status["message"] = "Backend ready"
         logger.info("✅ Backend initialization completed successfully")
         logger.info(f"⏱️  TOTAL STARTUP TIME: {time.perf_counter() - total_start:.3f}s")
@@ -239,6 +249,9 @@ async def shutdown_event():
 
         # Stop schedule runner service
         await schedule_runner_service.stop()
+
+        # Stop skill loop service
+        await skill_loop_service.stop()
 
         # Shutdown PostHog
         PostHogService.shutdown()
@@ -576,6 +589,10 @@ app.include_router(learnings_router.router, prefix="/api", tags=["learnings"])
 app.include_router(skills_router.router, prefix="/api", tags=["skills"])
 
 app.include_router(custom_skills_router.router, prefix="/api", tags=["custom-skills"])
+
+app.include_router(skill_suggestions_router.router, prefix="/api", tags=["skill-suggestions"])
+
+app.include_router(skill_loop_router.router, prefix="/api", tags=["skill-loop"])
 
 app.include_router(slack_router.router, prefix="/api", tags=["slack"])
 

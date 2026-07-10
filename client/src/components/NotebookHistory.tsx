@@ -265,8 +265,18 @@ export default function NotebookHistory({ onNotebookClick }: NotebookHistoryProp
                             onClick={(e) => e.preventDefault()}
                           />
                         ) : (
-                          <div className="text-sm font-medium truncate" title={notebook.notebook_name}>
-                            {notebook.notebook_name}
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            {notebook.source === 'slack' && (
+                              <span className="flex-shrink-0 px-1 py-0.5 rounded text-[9px] font-medium bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                                Slack
+                              </span>
+                            )}
+                            <div
+                              className="text-sm font-medium truncate"
+                              title={notebook.source === 'slack' ? (notebook.slack_thread_title || notebook.notebook_name) : notebook.notebook_name}
+                            >
+                              {notebook.source === 'slack' ? (notebook.slack_thread_title || notebook.notebook_name) : notebook.notebook_name}
+                            </div>
                           </div>
                         )}
                       </Link>

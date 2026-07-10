@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { Check, LogOut, ChevronUp, Building2, Users, Bot, MessageSquare, Clock, Key, Github, BarChart3 } from 'lucide-react'
+import { Check, LogOut, ChevronUp, Building2, Users, Bot, MessageSquare, Clock, Key, Github, BarChart3, Sparkles } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../stores/useStore'
 import { useScopes } from '@/hooks/useScopes'
 import { useSlackConfig } from '@/hooks/useSlackConfig'
 import { useSchedules } from '@/hooks/useSchedules'
+import { usePendingSuggestionCount } from '../hooks/useSkillSuggestions'
 import { ApiService } from '@/services/api'
 import { useAppConfig } from '@/hooks/useAppConfig'
 import { isTauriApp } from '@/lib/tauri-api'
@@ -33,6 +34,7 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
     ? slackConfig
     : { isConnected: false, loading: false }
   const { data: schedules = [] } = useSchedules()
+  const { data: pendingSuggestionCount = 0 } = usePendingSuggestionCount()
   const navigate = useNavigate()
   const [isOpen, setIsOpen] = useState(false)
   const [slackModalOpen, setSlackModalOpen] = useState(false)
@@ -134,6 +136,11 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
 
   const handleGitHubClick = () => {
     navigate('/github')
+    setIsOpen(false)
+  }
+
+  const handleSkillReviewClick = () => {
+    navigate('/skill-review')
     setIsOpen(false)
   }
 
@@ -272,6 +279,20 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
               >
                 <Github className="w-4 h-4" />
                 <span className="text-sm">GitHub</span>
+              </button>
+            )}
+            {!isViewer && (
+              <button
+                onClick={handleSkillReviewClick}
+                className="w-full px-3 py-2.5 flex items-center gap-3 hover:bg-[#333333] transition-colors text-white"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span className="text-sm flex-1 text-left">Skill Review</span>
+                {pendingSuggestionCount > 0 && (
+                  <span className="text-xs bg-brand-orange/20 text-brand-orange px-1.5 py-0.5 rounded-full">
+                    {pendingSuggestionCount}
+                  </span>
+                )}
               </button>
             )}
             {isSelfHosted && canManageTeam && (

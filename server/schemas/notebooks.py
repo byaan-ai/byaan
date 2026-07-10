@@ -27,6 +27,8 @@ class NotebookRead(BaseModel):
     created_by: UUID | None = None
     created_at: datetime
     updated_at: datetime
+    source: str = "app"
+    slack_thread_title: str | None = None
 
     model_config = {
         "from_attributes": True,

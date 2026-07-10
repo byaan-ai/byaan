@@ -138,6 +138,7 @@ class SlackAgentService:
                 thread_ts=thread_ts or event_ts,
                 user_id=user_id,
                 session=session,
+                text=question,
             )
 
             llm_connection_id = workspace.default_llm_connection_id
@@ -238,12 +239,23 @@ class SlackAgentService:
         return text.strip()
 
     @staticmethod
+    def _derive_thread_title(text: str | None) -> str | None:
+        """Whitespace-collapse the inbound text into a short thread title."""
+        if not text:
+            return None
+        collapsed = " ".join(text.split())
+        if not collapsed:
+            return None
+        return collapsed[:120]
+
+    @staticmethod
     async def _get_or_create_conversation(
         workspace: SlackWorkspace,
         channel_id: str,
         thread_ts: str | None,
         user_id: str,
         session: AsyncSession,
+        text: str | None = None,
     ) -> SlackConversation:
         """Get existing conversation or create a new one."""
         from sqlalchemy import select
@@ -261,16 +273,21 @@ class SlackAgentService:
         result = await session.execute(query)
         conversation = result.scalar_one_or_none()
 
+        title = SlackAgentService._derive_thread_title(text)
+
         if not conversation:
             conversation = SlackConversation(
                 slack_workspace_id=workspace.id,
                 slack_channel_id=channel_id,
                 slack_thread_ts=thread_ts,
                 slack_user_id=user_id,
+                thread_title=title,
             )
             session.add(conversation)
             await session.commit()
             await session.refresh(conversation)
+        elif title and not conversation.thread_title:
+            conversation.thread_title = title
 
         conversation.last_activity_at = datetime.now()
         await session.commit()
@@ -811,6 +828,7 @@ User's question:
                     thread_ts=thread_ts,
                     user_id=user_id,
                     session=session,
+                    text=cleaned_text,
                 )
 
                 slack_prompt = await SlackAgentService._build_followup_prompt(

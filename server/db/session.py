@@ -105,10 +105,9 @@ async def ensure_database_encoding() -> None:
         logger.warning(f"Could not check database encoding (non-fatal): {e}")
 
 
-# Only set SQLite PRAGMA for local mode (SQLite)
 # SQLite needs this to enforce foreign key constraints (disabled by default)
-# PostgreSQL (hosted mode) enforces foreign keys by default
-if not is_self_hosted():
+# PostgreSQL enforces foreign keys by default, so gate on dialect not deployment mode
+if async_engine.dialect.name == "sqlite":
 
     @event.listens_for(async_engine.sync_engine, "connect")
     def _set_sqlite_pragma(dbapi_connection, connection_record):  # type: ignore[no-untyped-def]

@@ -11,6 +11,8 @@ from server.templates.emails import (
     get_invitation_email_text,
     get_password_reset_email_html,
     get_password_reset_email_text,
+    get_skill_digest_html,
+    get_skill_digest_text,
     get_verification_email_html,
     get_verification_email_text,
 )
@@ -123,6 +125,33 @@ class EmailService:
         return await self._send_email(
             to_email=to_email,
             subject=f"You've been invited to join {tenant_name} on Byaan",
+            html=html_content,
+            text=text_content,
+        )
+
+    async def send_skill_digest_email(
+        self,
+        to_email: str,
+        tenant_name: str,
+        stats: dict,
+        suggestions: list[dict],
+        frontend_url: str,
+    ) -> dict:
+        html_content = get_skill_digest_html(
+            tenant_name=tenant_name,
+            stats=stats,
+            suggestions=suggestions,
+            frontend_url=frontend_url,
+        )
+        text_content = get_skill_digest_text(
+            tenant_name=tenant_name,
+            stats=stats,
+            suggestions=suggestions,
+            frontend_url=frontend_url,
+        )
+        return await self._send_email(
+            to_email=to_email,
+            subject=f"Skill Learning Digest - {tenant_name}",
             html=html_content,
             text=text_content,
         )
@@ -260,6 +289,33 @@ class SMTPEmailService:
         return await self._send_email(
             to_email=to_email,
             subject=f"You've been invited to join {tenant_name} on Byaan",
+            html=html_content,
+            text=text_content,
+        )
+
+    async def send_skill_digest_email(
+        self,
+        to_email: str,
+        tenant_name: str,
+        stats: dict,
+        suggestions: list[dict],
+        frontend_url: str,
+    ) -> dict:
+        html_content = get_skill_digest_html(
+            tenant_name=tenant_name,
+            stats=stats,
+            suggestions=suggestions,
+            frontend_url=frontend_url,
+        )
+        text_content = get_skill_digest_text(
+            tenant_name=tenant_name,
+            stats=stats,
+            suggestions=suggestions,
+            frontend_url=frontend_url,
+        )
+        return await self._send_email(
+            to_email=to_email,
+            subject=f"Skill Learning Digest - {tenant_name}",
             html=html_content,
             text=text_content,
         )

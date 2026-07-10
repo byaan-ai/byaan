@@ -19,6 +19,7 @@ from server.services.crypto_service import CryptoService
 from server.services.slack_agent_service import SlackAgentService
 from server.services.slack_service import SlackService
 from server.services.slack_signature_service import SlackSignatureError, SlackSignatureService
+from server.services.slack_suggestion_service import handle_suggestion_action
 from server.utils.custom_logger import get_logger
 from server.utils.deployment import is_feature_enabled
 from server.utils.slack_chart_detector import SlackChartDetector
@@ -330,6 +331,20 @@ async def slack_interactivity(
                 _process_download_excel,
                 team_id=team_id,
                 table_data=value_data,
+            )
+
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        elif action_id in ("skill_suggestion_approve", "skill_suggestion_reject", "skill_suggestion_discuss"):
+            value_data = json.loads(action.get("value", "{}"))
+
+            background_tasks.add_task(
+                handle_suggestion_action,
+                action_id=action_id,
+                suggestion_id=value_data.get("suggestion_id"),
+                slack_user_id=payload.get("user", {}).get("id"),
+                response_url=payload.get("response_url"),
+                team_id=team_id,
             )
 
             return JSONResponse(status_code=200, content={"ok": True})

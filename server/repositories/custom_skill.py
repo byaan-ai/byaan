@@ -8,6 +8,9 @@ from sqlalchemy.orm import selectinload
 
 from server.models.custom_skill import CustomSkill
 from server.models.user import User
+from server.repositories.skill_version import SkillVersionRepository
+
+_CONTENT_FIELDS = ("name", "description", "instructions")
 
 
 class CustomSkillRepository:
@@ -106,6 +109,9 @@ class CustomSkillRepository:
         if skill.created_by != user_id:
             return None
 
+        if any(field in updates and getattr(skill, field) != updates[field] for field in _CONTENT_FIELDS):
+            await SkillVersionRepository(self._session).snapshot_skill(skill, changed_by="user")
+
         for key, value in updates.items():
             if hasattr(skill, key) and key not in ("id", "tenant_id", "created_by", "created_at"):
                 setattr(skill, key, value)
@@ -188,10 +194,12 @@ class CustomSkillRepository:
         existing = result.scalar_one_or_none()
 
         if existing:
-            existing.name = name
-            existing.description = description
-            existing.instructions = instructions
-            await self._session.commit()
+            updates = {"name": name, "description": description, "instructions": instructions}
+            if any(getattr(existing, field) != updates[field] for field in _CONTENT_FIELDS):
+                await SkillVersionRepository(self._session).snapshot_skill(existing, changed_by="loop")
+                for field, value in updates.items():
+                    setattr(existing, field, value)
+                await self._session.commit()
             await self._session.refresh(existing, ["creator"])
             return existing
 

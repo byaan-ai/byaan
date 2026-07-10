@@ -17,15 +17,29 @@ Workarounds for Codex API with store=False:
 from __future__ import annotations
 
 import copy
+import dataclasses
 from collections.abc import AsyncIterator
 from typing import Any
 
+from agents import ModelSettings
 from agents.models.openai_responses import OpenAIResponsesModel
 from openai.types.responses import ResponseCompletedEvent, ResponseOutputItemDoneEvent
 
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _force_store_false(args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """Codex rejects requests unless store=False; enforce it regardless of caller settings."""
+
+    def fix(ms: ModelSettings) -> ModelSettings:
+        return ms if ms.store is False else dataclasses.replace(ms, store=False)
+
+    new_args = tuple(fix(a) if isinstance(a, ModelSettings) else a for a in args)
+    if isinstance(kwargs.get("model_settings"), ModelSettings):
+        kwargs = {**kwargs, "model_settings": fix(kwargs["model_settings"])}
+    return new_args, kwargs
 
 
 def _strip_item_ids(input_items: list[Any]) -> list[Any]:
@@ -49,7 +63,12 @@ def _strip_item_ids(input_items: list[Any]) -> list[Any]:
 class CodexResponsesModel(OpenAIResponsesModel):
     """OpenAIResponsesModel with fixes for Codex store=False quirks."""
 
+    async def get_response(self, *args: Any, **kwargs: Any) -> Any:
+        args, kwargs = _force_store_false(args, kwargs)
+        return await super().get_response(*args, **kwargs)
+
     async def stream_response(self, *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        args, kwargs = _force_store_false(args, kwargs)
         if "previous_response_id" in kwargs and kwargs["previous_response_id"]:
             logger.info("[CODEX FIX] Stripping previous_response_id (store=False)")
             kwargs["previous_response_id"] = None

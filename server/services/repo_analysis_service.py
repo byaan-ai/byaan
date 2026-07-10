@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from uuid import UUID
 
 from server.db.session import AsyncSessionFactory
+from server.prompts.repo_fact_prompts import (
+    FACT_EXTRACTION_SYSTEM,
+    FACT_FAMILIES,
+    build_fact_extraction_prompt,
+    parse_last_json_array,
+)
 from server.repositories.custom_skill import CustomSkillRepository
 from server.repositories.github_repository import GitHubRepoRepository
+from server.repositories.skill_citation import SkillCitationRepository
 from server.services import github_service
 from server.services.completion_service import CompletionError, CompletionService
 from server.services.unified_agent import is_using_claude_code_auth
@@ -250,6 +258,211 @@ SKILL_PROMPTS = {
     },
 }
 
+DATA_TRUTHS_FOCUS = [
+    "model",
+    "models",
+    "migration",
+    "schema",
+    "enum",
+    "constant",
+    "config",
+    "settings",
+    "entity",
+    "prisma/schema.prisma",
+]
+
+_FAMILY_TITLES = {
+    "enum": "Enums & Value Sets",
+    "scope": "Tenancy & Scoping",
+    "config": "Config-Driven Definitions",
+    "launch": "Launch & Go-Live Constants",
+    "semantics": "Field Semantics",
+    "join": "Joins & Relationships",
+    "provenance": "Data Provenance & Gotchas",
+}
+
+_MAX_SNIPPET_CHARS = 500
+
+
+def _normalize_ws(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _normalize_with_line_map(content: str) -> tuple[str, list[int]]:
+    """Whitespace-normalized content plus a per-char map back to the 1-based source line."""
+    norm: list[str] = []
+    line_map: list[int] = []
+    line = 1
+    prev_ws = False
+    for ch in content:
+        if ch.isspace():
+            if not prev_ws:
+                norm.append(" ")
+                line_map.append(line)
+            prev_ws = True
+            if ch == "\n":
+                line += 1
+        else:
+            norm.append(ch)
+            line_map.append(line)
+            prev_ws = False
+    return "".join(norm), line_map
+
+
+def _ground_snippet(content: str, snippet: str) -> tuple[int, int] | None:
+    """Verify snippet appears verbatim (whitespace-normalized) in content.
+
+    Returns the recomputed (start_line, end_line) from the actual match position, or None when
+    the snippet is not found — the anti-hallucination guard drops such claims.
+    """
+    norm_snippet = _normalize_ws(snippet)
+    if not norm_snippet:
+        return None
+    norm_content, line_map = _normalize_with_line_map(content)
+    idx = norm_content.find(norm_snippet)
+    if idx == -1:
+        return None
+    end_idx = idx + len(norm_snippet) - 1
+    return line_map[idx], line_map[end_idx]
+
+
+def _render_data_truths_markdown(claims: list[dict]) -> str:
+    lines = ["# Data Truths & Conventions", ""]
+    for family, title in _FAMILY_TITLES.items():
+        family_claims = [c for c in claims if c["family"] == family]
+        if not family_claims:
+            continue
+        lines.append(f"## {title}")
+        for c in family_claims:
+            cite = f"{c['path']}:{c['start_line']}-{c['end_line']}"
+            lines.append(f"- {c['claim']} — Query rule: {c['query_rule']} (cited: {cite})")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _ground_claims(claims: list[dict], file_contents: dict[str, str]) -> tuple[list[dict], int]:
+    grounded: list[dict] = []
+    dropped = 0
+    for claim in claims:
+        if not isinstance(claim, dict):
+            dropped += 1
+            continue
+        family = claim.get("family")
+        path = claim.get("path")
+        snippet = claim.get("snippet")
+        claim_text = claim.get("claim")
+        query_rule = claim.get("query_rule")
+        claim_key = claim.get("claim_key")
+        if family not in FACT_FAMILIES or not path or not snippet or not claim_text or not query_rule:
+            dropped += 1
+            continue
+        content = file_contents.get(path)
+        if not content:
+            dropped += 1
+            continue
+        lines = _ground_snippet(content, snippet)
+        if lines is None:
+            dropped += 1
+            continue
+        start_line, end_line = lines
+        grounded.append(
+            {
+                "claim_key": (claim_key or "").strip() or None,
+                "family": family,
+                "claim": str(claim_text).strip(),
+                "query_rule": str(query_rule).strip(),
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "snippet": str(snippet)[:_MAX_SNIPPET_CHARS],
+            }
+        )
+    return grounded, dropped
+
+
+async def _run_data_truths_pass(
+    repo_id: UUID,
+    tenant_id: UUID,
+    user_id: UUID,
+    llm_connection_id: str,
+    use_claude_sdk: bool,
+    repo_full_name: str,
+    data_truths_paths: list[str],
+    file_contents: dict[str, str],
+    commit_sha: str,
+) -> None:
+    """Compile grounded code facts into a deterministic 'data_truths' skill plus citations.
+
+    Failure-isolated: any problem logs and returns without raising, so the other passes and the
+    overall analysis are unaffected. Keyed per repo, so it is multi-repo safe.
+    """
+    files = [(path, file_contents[path]) for path in data_truths_paths if path in file_contents]
+    if not files:
+        logger.info(f"[ANALYSIS] data_truths for {repo_full_name}: no file content, skipping")
+        return
+
+    prompt = build_fact_extraction_prompt(files)
+
+    async with AsyncSessionFactory() as session:
+        try:
+            raw = await CompletionService.complete(
+                prompt=prompt,
+                llm_connection_id=llm_connection_id,
+                session=session,
+                system_prompt=FACT_EXTRACTION_SYSTEM,
+                use_claude_sdk=use_claude_sdk,
+            )
+        except CompletionError as err:
+            logger.error(f"[ANALYSIS] data_truths completion failed for {repo_full_name}: {err.reason} — {err.message}")
+            return
+
+        claims = parse_last_json_array(raw or "")
+        if claims is None:
+            logger.warning(f"[ANALYSIS] data_truths for {repo_full_name}: could not parse json array, skipping pass")
+            return
+
+        grounded, dropped = _ground_claims(claims, file_contents)
+        if dropped:
+            logger.info(f"[ANALYSIS] data_truths for {repo_full_name}: dropped {dropped} ungrounded/invalid claims")
+        if not grounded:
+            logger.info(f"[ANALYSIS] data_truths for {repo_full_name}: no grounded claims, skipping")
+            return
+
+        markdown = _render_data_truths_markdown(grounded)
+        description = (
+            f"Use for {repo_full_name} data truths & conventions: enum value sets, tenancy scoping, "
+            f"config-driven definitions, launch constants, field semantics, join keys, data provenance."
+        )[:500]
+
+        skill_repo = CustomSkillRepository(session)
+        skill = await skill_repo.upsert_github_skill(
+            tenant_id=tenant_id,
+            created_by=user_id,
+            github_repo_id=repo_id,
+            github_analysis_type="data_truths",
+            name="Data Truths & Conventions",
+            description=description,
+            instructions=markdown,
+        )
+
+        citations = [
+            {
+                "repo_id": repo_id,
+                "path": claim["path"],
+                "start_line": claim["start_line"],
+                "end_line": claim["end_line"],
+                "blob_sha": None,
+                "commit_sha": commit_sha,
+                "snippet_hash": hashlib.sha256(_normalize_ws(claim["snippet"]).encode("utf-8")).hexdigest(),
+                "snippet": claim["snippet"],
+                "claim_key": claim["claim_key"],
+                "status": "valid",
+            }
+            for claim in grounded
+        ]
+        await SkillCitationRepository(session).bulk_replace_for_skill(skill.id, citations)
+        logger.info(f"[ANALYSIS] data_truths for {repo_full_name}: {len(grounded)} claims, {len(citations)} citations")
+
 
 async def analyze_repository(
     repo_id: UUID,
@@ -283,12 +496,16 @@ async def analyze_repository(
             for skill_type, config in SKILL_PROMPTS.items():
                 skill_file_lists[skill_type] = _select_key_files(blob_paths, focus_boost=config.get("focus"))
 
-            all_paths: list[str] = list(dict.fromkeys(path for files in skill_file_lists.values() for path in files))
+            data_truths_paths = _select_key_files(blob_paths, focus_boost=DATA_TRUTHS_FOCUS)
+
+            all_paths: list[str] = list(
+                dict.fromkeys(path for files in [*skill_file_lists.values(), data_truths_paths] for path in files)
+            )
 
             file_contents: dict[str, str] = {}
             total_chars = 0
             for i, path in enumerate(all_paths):
-                if total_chars >= MAX_CHARS_PER_SKILL * len(SKILL_PROMPTS):
+                if total_chars >= MAX_CHARS_PER_SKILL * (len(SKILL_PROMPTS) + 1):
                     break
                 content = await github_service.get_file_content(github_token, owner, repo_name, path, ref=sha)
                 if content:
@@ -335,6 +552,21 @@ async def analyze_repository(
                 if isinstance(result, Exception):
                     skill_type = list(SKILL_PROMPTS.keys())[i]
                     logger.error(f"[ANALYSIS] Skill {skill_type} failed: {result}")
+
+            try:
+                await _run_data_truths_pass(
+                    repo_id=repo_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    llm_connection_id=llm_connection_id,
+                    use_claude_sdk=use_claude_sdk,
+                    repo_full_name=repo_full_name,
+                    data_truths_paths=data_truths_paths,
+                    file_contents=file_contents,
+                    commit_sha=sha,
+                )
+            except Exception as e:
+                logger.error(f"[ANALYSIS] data_truths pass failed for {repo_full_name}: {e}", exc_info=True)
 
             await repo_repo.update_analysis_status(repo_id, "completed", sha=sha, language_breakdown=languages)
             _clear_progress(rid)

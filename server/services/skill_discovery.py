@@ -39,6 +39,10 @@ class SkillCredentialConfig:
     placeholder: str = ""
     help: str = ""
     optional: bool = False
+    type: str = "text"
+    options: list[dict[str, str]] = field(default_factory=list)
+    default: str = ""
+    depends_on: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -122,6 +126,10 @@ def _parse_skill_config(frontmatter: dict[str, Any], docs: str) -> SkillConfig |
             placeholder=cred.get("placeholder", ""),
             help=cred.get("help", ""),
             optional=cred.get("optional", False),
+            type=cred.get("type", "text"),
+            options=cred.get("options", []),
+            default=cred.get("default", ""),
+            depends_on=cred.get("depends_on", {}),
         )
         for cred in frontmatter.get("credentials", [])
     ]

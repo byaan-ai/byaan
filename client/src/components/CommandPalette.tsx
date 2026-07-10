@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Dialog, DialogPortal, DialogOverlay } from './ui/dialog'
 import * as DialogPrimitive from '@radix-ui/react-dialog'
-import { Search, Plus, BookOpen, LayoutDashboard, X } from 'lucide-react'
+import { Search, Plus, BookOpen, LayoutDashboard, X, Sparkles } from 'lucide-react'
 import { useNotebooks } from '../hooks/useNotebooks'
 import { ApiService, type Notebook } from '../services/api'
 import { useQuery } from '@tanstack/react-query'
@@ -72,6 +72,13 @@ export default function CommandPalette({ isOpen, onClose }: CommandPaletteProps)
       type: 'action',
       name: 'New Notebook',
       navigateTo: '/notebook/new',
+    })
+
+    items.push({
+      id: 'skill-review',
+      type: 'action',
+      name: 'Skill Review',
+      navigateTo: '/skill-review',
     })
 
     const sortedNotebooks = [...notebooks].sort(
@@ -227,8 +234,11 @@ export default function CommandPalette({ isOpen, onClose }: CommandPaletteProps)
     }
   }, [navigate, onClose, handleDashboardClick])
 
-  const getIcon = (type: SearchResult['type']) => {
-    switch (type) {
+  const getIcon = (result: SearchResult) => {
+    if (result.id === 'skill-review') {
+      return <Sparkles className="h-4 w-4" />
+    }
+    switch (result.type) {
       case 'action':
         return <Plus className="h-4 w-4" />
       case 'notebook':
@@ -299,7 +309,7 @@ export default function CommandPalette({ isOpen, onClose }: CommandPaletteProps)
                       <span className={`flex-shrink-0 ${
                         result.type === 'action' ? 'text-brand-orange' : 'text-[#888888]'
                       }`}>
-                        {getIcon(result.type)}
+                        {getIcon(result)}
                       </span>
                       <span className="flex-1 truncate">
                         {result.name}

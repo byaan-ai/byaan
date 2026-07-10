@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import TIMESTAMP, Boolean, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import TIMESTAMP, Boolean, ForeignKey, String, Text, UniqueConstraint, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from server.db.base import GUID, Base
@@ -29,6 +29,8 @@ class GitHubRepository(Base):
     source: Mapped[str] = mapped_column(String(20), nullable=False, default="github", server_default="github")
     repo_full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     default_branch: Mapped[str] = mapped_column(String(100), nullable=False, default="main")
+    tracked_branch: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    skill_sync_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=true())
     local_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_analyzed_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
     analysis_status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
@@ -51,3 +53,7 @@ class GitHubRepository(Base):
     )
 
     __table_args__ = (UniqueConstraint("tenant_id", "repo_full_name", name="uq_github_repositories_tenant_repo"),)
+
+    @property
+    def effective_branch(self) -> str:
+        return self.tracked_branch or self.default_branch

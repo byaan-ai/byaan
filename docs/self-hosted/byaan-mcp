@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Launch the Byaan MCP stdio server inside the running self-hosted container.
+#
+# Auth is implicit: anyone who can reach the Docker daemon on this host can
+# already read the container's environment (including DB credentials), so no
+# separate token exists to leak. BYAAN_MCP_USER only selects which existing
+# Byaan user the session acts as, and every session start is audit-logged.
+#
+# Usage: byaan-mcp <user-email> [tenant-slug]
+set -euo pipefail
+
+EMAIL="${1:?Usage: byaan-mcp <user-email> [tenant-slug]}"
+TENANT="${2:-}"
+
+CONTAINER=$(docker ps --format '{{.Names}}' | grep -E '^byaan(-blue|-green)?$' | head -1)
+if [ -z "$CONTAINER" ]; then
+    echo "No running byaan container found" >&2
+    exit 1
+fi
+
+exec docker exec -i \
+    -w /app/server \
+    -e BYAAN_MCP_USER="$EMAIL" \
+    ${TENANT:+-e BYAAN_MCP_TENANT="$TENANT"} \
+    "$CONTAINER" \
+    uv run --frozen --no-sync python -m server.mcp.stdio_server

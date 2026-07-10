@@ -4,6 +4,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import HTMLResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import AuthContext, require_any_scope, require_scope
@@ -59,6 +60,26 @@ def _set_viewer_cookie_if_possible(response: Response, request: Request | None, 
     )
 
 
+async def _slack_notebook_titles(session: AsyncSession, notebook_ids: list) -> dict:
+    """Map notebook_ids that have a Slack conversation to their thread title."""
+    if not notebook_ids:
+        return {}
+    from server.models.slack_conversation import SlackConversation
+
+    result = await session.execute(
+        select(SlackConversation.notebook_id, SlackConversation.thread_title).where(
+            SlackConversation.notebook_id.in_(notebook_ids)
+        )
+    )
+    titles: dict = {}
+    for notebook_id, thread_title in result.all():
+        if notebook_id is None:
+            continue
+        if notebook_id not in titles or (thread_title and not titles[notebook_id]):
+            titles[notebook_id] = thread_title
+    return titles
+
+
 @router.post("/notebooks", status_code=status.HTTP_201_CREATED)
 async def create_notebook_endpoint(
     payload: NotebookCreate,
@@ -97,7 +118,17 @@ async def list_notebooks_endpoint(
         if not auth.has_scope(Scope.NOTEBOOK_READ):
             notebooks = [n for n in notebooks if n.created_by is not None and str(n.created_by) == str(auth.user_id)]
 
-        response = NotebookListResponse(items=[NotebookRead.model_validate(n) for n in notebooks], total=len(notebooks))
+        slack_notebook_titles = await _slack_notebook_titles(session, [n.id for n in notebooks])
+
+        items = []
+        for n in notebooks:
+            item = NotebookRead.model_validate(n)
+            if n.id in slack_notebook_titles:
+                item.source = "slack"
+                item.slack_thread_title = slack_notebook_titles[n.id]
+            items.append(item)
+
+        response = NotebookListResponse(items=items, total=len(notebooks))
         return success_response(data=response.model_dump(), message=f"Retrieved {len(notebooks)} notebook(s)")
     except Exception as e:
         logger.error(
