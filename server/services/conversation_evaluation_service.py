@@ -48,6 +48,7 @@ SYSTEM_NOTEBOOK_NAME = "Byaan System — Skill Loop"
 STARTUP_DELAY_SECONDS = 90
 VALID_VERDICTS = ("confirmed", "mistake", "ambiguous")
 LEASE_ID = 1
+CODE_SYNC_MARKER_ID = 2
 
 
 class ConversationEvaluationService:
@@ -141,12 +142,40 @@ class ConversationEvaluationService:
     async def _code_sync_tick(self) -> None:
         """Run the commit-drift sync loop; never let its failures break conversation evaluation."""
         try:
+            interval = int(get_skill_loop_config()["code_sync_interval_seconds"])
+            async with AsyncSessionFactory() as session:
+                if not await self._claim_interval_marker(session, CODE_SYNC_MARKER_ID, "code_sync", interval):
+                    return
+
             from server.services.repo_sync_service import repo_sync_service
 
             async with AsyncSessionFactory() as session:
                 await repo_sync_service.tick(session)
         except Exception as e:
             logger.error(f"Repo sync tick failed: {e}", exc_info=True)
+
+    async def _claim_interval_marker(self, session, marker_id: int, holder: str, interval_seconds: float) -> bool:
+        """Durable throttle: claims succeed at most once per interval, across processes and restarts."""
+        now = datetime.now(UTC).replace(tzinfo=None)
+        expires = now + timedelta(seconds=interval_seconds)
+        result = await session.execute(
+            update(SkillLoopLease)
+            .where(SkillLoopLease.id == marker_id)
+            .where(or_(SkillLoopLease.expires_at.is_(None), SkillLoopLease.expires_at < now))
+            .values(holder=holder, expires_at=expires)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 1:
+            await session.commit()
+            return True
+        await session.rollback()
+        try:
+            session.add(SkillLoopLease(id=marker_id, holder=holder, expires_at=expires))
+            await session.commit()
+            return True
+        except IntegrityError:
+            await session.rollback()
+            return False
 
     async def _tick(self) -> None:
         async with AsyncSessionFactory() as session:

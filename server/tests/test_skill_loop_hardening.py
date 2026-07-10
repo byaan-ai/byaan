@@ -56,6 +56,20 @@ async def test_lease_single_winner_and_expired_reclaim(test_session):
     assert row.holder == holder_b
 
 
+async def test_interval_marker_claims_once_per_interval(test_session):
+    svc = ConversationEvaluationService()
+
+    assert await svc._claim_interval_marker(test_session, 2, "code_sync", interval_seconds=86400) is True
+    # Within the interval, no further claims succeed — even for the same holder.
+    assert await svc._claim_interval_marker(test_session, 2, "code_sync", interval_seconds=86400) is False
+
+    past = datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)
+    await test_session.execute(update(SkillLoopLease).where(SkillLoopLease.id == 2).values(expires_at=past))
+    await test_session.commit()
+
+    assert await svc._claim_interval_marker(test_session, 2, "code_sync", interval_seconds=86400) is True
+
+
 # --------------------------------------------------------------------------- FIX 3: durable digest dedup
 
 
