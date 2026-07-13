@@ -1,0 +1,106 @@
+{
+  "model": "gpt-5.6-sol",
+  "engine": "codex-agentic",
+  "reasoning_effort": "high",
+  "judge_model": "gpt-5.6-sol",
+  "judge_engine": "codex",
+  "mode": "prompt-only",
+  "concurrency": 4,
+  "case_timeout": 420.0,
+  "started_at": "2026-07-10T12:43:33.794630+00:00",
+  "finished_at": "2026-07-10T12:44:32.774510+00:00",
+  "cases_run": 3,
+  "aggregates": {
+    "overall": {
+      "total": 3,
+      "passed": 2,
+      "pass_rate": 0.667
+    },
+    "by_category": {
+      "base_population_anchoring": {
+        "total": 1,
+        "passed": 1,
+        "pass_rate": 1.0
+      },
+      "no_evidence_denial": {
+        "total": 1,
+        "passed": 0,
+        "pass_rate": 0.0
+      },
+      "schedule_vs_timestamp": {
+        "total": 1,
+        "passed": 1,
+        "pass_rate": 1.0
+      }
+    }
+  },
+  "results": [
+    {
+      "id": "bp-001",
+      "category": "base_population_anchoring",
+      "difficulty": "easy",
+      "expected_type": "numeric",
+      "answer_pass": true,
+      "sql_pass": null,
+      "judge_pass": null,
+      "passed": true,
+      "model_sql": null,
+      "model_answer_excerpt": "3,000 patients",
+      "sql_result": null,
+      "expected_value": 3000,
+      "ground_truth_value": 3000,
+      "latency_seconds": 20.998,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "retries": 0,
+      "error": null,
+      "notes": []
+    },
+    {
+      "id": "sv-001",
+      "category": "schedule_vs_timestamp",
+      "difficulty": "hard",
+      "expected_type": "numeric",
+      "answer_pass": true,
+      "sql_pass": null,
+      "judge_pass": true,
+      "passed": true,
+      "model_sql": null,
+      "model_answer_excerpt": "1,156 after-hours calls",
+      "sql_result": null,
+      "expected_value": 1156,
+      "ground_truth_value": 1156,
+      "latency_seconds": 53.267,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "retries": 0,
+      "error": null,
+      "notes": [
+        "judge: The answer computes after-hours using Cedar Valley General Intake\u2019s stated 08:00\u201318:00 schedule in site-local time, yielding 1,156 calls."
+      ]
+    },
+    {
+      "id": "ne-001",
+      "category": "no_evidence_denial",
+      "difficulty": "medium",
+      "expected_type": "refusal",
+      "answer_pass": false,
+      "sql_pass": null,
+      "judge_pass": true,
+      "passed": false,
+      "model_sql": null,
+      "model_answer_excerpt": "Cannot be determined\u2014the database contains no appointments table.",
+      "sql_result": null,
+      "expected_value": null,
+      "ground_truth_value": null,
+      "latency_seconds": 36.945,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "retries": 0,
+      "error": null,
+      "notes": [
+        "judge: The answer correctly states that no appointments table or booking field exists and does not invent a booking count."
+      ]
+    }
+  ]
+}

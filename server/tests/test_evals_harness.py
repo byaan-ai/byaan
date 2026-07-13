@@ -168,12 +168,16 @@ def test_engine_selection_wiring():
     assert isinstance(get_engine("litellm"), engines.LitellmEngine)
     assert isinstance(get_engine("codex"), CodexEngine)
     assert isinstance(get_engine("claude-cli"), ClaudeCliEngine)
-    assert engines.ENGINE_CHOICES == ["litellm", "codex", "claude-cli"]
+    assert isinstance(get_engine("claude-agentic"), engines.ClaudeAgenticEngine)
+    assert isinstance(get_engine("codex-agentic"), engines.CodexAgenticEngine)
+    assert engines.ENGINE_CHOICES == ["litellm", "codex", "claude-cli", "claude-agentic", "codex-agentic"]
     with pytest.raises(ValueError):
         get_engine("nope")
     # CLI engines cap concurrency; litellm does not
     assert CodexEngine().max_concurrency == 3
     assert ClaudeCliEngine().max_concurrency == 3
+    assert engines.ClaudeAgenticEngine().max_concurrency == 4
+    assert engines.CodexAgenticEngine().max_concurrency == 4
     assert engines.LitellmEngine().max_concurrency is None
 
 

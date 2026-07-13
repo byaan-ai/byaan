@@ -115,6 +115,36 @@ def build_user_message(case: EvalCase) -> str:
     return " ".join(parts)
 
 
+_AGENTIC_PREAMBLE = (
+    "You are answering an analytics question against the SQLite database at ./eval_data.db. "
+    "Explore the schema and data yourself (e.g. with sqlite3) and compute the answer. "
+    "Be careful: column names and schema comments may be misleading — verify semantics from the "
+    "data itself. When done, reply with your reasoning followed by a last line formatted exactly "
+    "as: FINAL ANSWER: <concise answer>."
+)
+
+_FINAL_ANSWER_RE = re.compile(r"^\s*FINAL ANSWER:\s*(.*)$", re.IGNORECASE)
+
+
+def build_agentic_prompt(case: EvalCase) -> str:
+    """Minimal, CLI-agnostic prompt: fixed preamble + the case's user-facing question.
+
+    Deliberately excludes Byaan's system prompt and schema documentation so each CLI
+    harness's native behavior is what gets measured.
+    """
+    return f"{_AGENTIC_PREAMBLE}\n\n{build_user_message(case)}"
+
+
+def extract_final_answer(text: str) -> str:
+    """Return the text after the last ``FINAL ANSWER:`` line, or the full text if absent."""
+    answer: str | None = None
+    for line in text.splitlines():
+        match = _FINAL_ANSWER_RE.match(line)
+        if match:
+            answer = match.group(1).strip()
+    return answer if answer else text.strip()
+
+
 def extract_sql(answer: str) -> str | None:
     matches = _SQL_FENCE_RE.findall(answer)
     for block in matches:
@@ -152,8 +182,15 @@ def _sanitize(name: str) -> str:
 
 
 def grade_case(
-    case: EvalCase, answer: str, sql: str | None, sql_result: float | None, ground_truth: dict
+    case: EvalCase,
+    answer: str,
+    sql: str | None,
+    sql_result: float | None,
+    ground_truth: dict,
+    agentic: bool = False,
 ) -> CaseResult:
+    """Grade one case. For ``agentic`` engines there is no one-shot SQL to grade, so
+    ``sql_pass`` stays ``None`` (n/a) and the sql_property constraints are skipped."""
     result = CaseResult(
         id=case.id,
         category=case.category,
@@ -173,16 +210,14 @@ def grade_case(
         result.expected_value = target if isinstance(target, (int, float)) else None
         if isinstance(target, (int, float)):
             result.answer_pass = graders.grade_numeric(answer, float(target), exp.tolerance)
-            if sql_result is not None:
-                result.sql_pass = abs(sql_result - float(target)) <= exp.tolerance
-            else:
-                result.sql_pass = False
+            if not agentic:
+                result.sql_pass = abs(sql_result - float(target)) <= exp.tolerance if sql_result is not None else False
             checks.append(bool(result.answer_pass))
     else:
         result.answer_pass = graders.grade_text_constraints(answer, exp.must_include_any, exp.must_not_include)
         checks.append(result.answer_pass)
 
-    if exp.sql_must_reference or exp.sql_must_not_reference:
+    if not agentic and (exp.sql_must_reference or exp.sql_must_not_reference):
         sql_prop = graders.grade_sql_property(sql or "", exp.sql_must_reference, exp.sql_must_not_reference)
         result.notes.append(f"sql_property={'pass' if sql_prop else 'fail'}")
         checks.append(sql_prop)
@@ -240,6 +275,67 @@ def run_case_prompt_only(
     if case.grading in ("judge", "both") and case.judge_rubric and judge_model:
         verdict = judge_answer(
             case.judge_rubric, user_message, answer, judge_model, judge_engine, reasoning_effort, timeout
+        )
+        result.judge_pass = verdict["pass"]
+        result.notes.append(f"judge: {verdict['reason']}")
+        if case.grading == "judge":
+            result.passed = verdict["pass"]
+        else:
+            result.passed = result.passed and verdict["pass"]
+
+    return result
+
+
+def run_case_agentic(
+    case: EvalCase,
+    model: str,
+    ground_truth: dict,
+    engine: Engine,
+    judge_engine: Engine,
+    judge_model: str | None,
+    reasoning_effort: str | None = None,
+    timeout: float = 300.0,
+) -> CaseResult:
+    """Agentic path: the CLI agent explores a db workspace and answers itself.
+
+    The graded answer is the text after the last ``FINAL ANSWER:`` line (falling back
+    to the full response). No gradeable one-shot SQL is emitted, so ``sql_pass`` is n/a.
+    """
+    prompt = build_agentic_prompt(case)
+
+    retries = 0
+    response = engine.complete("", prompt, model, reasoning_effort, timeout)
+    if response.raw_error or not response.text.strip():
+        retries = 1
+        response = engine.complete("", prompt, model, reasoning_effort, timeout)
+
+    if response.raw_error or not response.text.strip():
+        return CaseResult(
+            id=case.id,
+            category=case.category,
+            difficulty=case.difficulty,
+            expected_type=case.expected.type,
+            retries=retries,
+            latency_seconds=response.latency_s,
+            error=f"model call failed: {response.raw_error or 'empty output'}",
+        )
+
+    answer = extract_final_answer(response.text)
+    result = grade_case(case, answer, None, None, ground_truth, agentic=True)
+    result.latency_seconds = response.latency_s
+    result.retries = retries
+
+    if case.grading in ("judge", "both") and case.judge_rubric and judge_model:
+        # Deterministic graders see the concise FINAL ANSWER; the judge needs the full
+        # response so it can verify methodology (e.g. that a schedule was actually used).
+        verdict = judge_answer(
+            case.judge_rubric,
+            build_user_message(case),
+            response.text,
+            judge_model,
+            judge_engine,
+            reasoning_effort,
+            timeout,
         )
         result.judge_pass = verdict["pass"]
         result.notes.append(f"judge: {verdict['reason']}")
@@ -370,6 +466,7 @@ def main() -> int:
     parser.add_argument("--judge-engine", choices=ENGINE_CHOICES, default=None)
     parser.add_argument("--reasoning-effort", type=str, default=None)
     parser.add_argument("--case-timeout", type=float, default=300.0)
+    parser.add_argument("--resume", action="store_true", help="Skip cases already present in the target report JSON.")
     args = parser.parse_args()
 
     cases, load_errors = load_cases(args.cases)
@@ -402,58 +499,10 @@ def main() -> int:
         print("--model is required for prompt-only mode", file=sys.stderr)
         return 1
 
-    system_prompt = build_system_prompt(args.db, args.model)
-
-    engine = get_engine(args.engine)
+    engine = get_engine(args.engine, args.db)
     judge_engine_name = args.judge_engine or args.engine
-    judge_engine = get_engine(judge_engine_name)
-
-    concurrency = args.concurrency
-    if engine.max_concurrency is not None:
-        concurrency = min(concurrency, engine.max_concurrency)
-
-    def _run(case: EvalCase) -> CaseResult:
-        return run_case_prompt_only(
-            case,
-            args.model,
-            args.db,
-            system_prompt,
-            ground_truth,
-            engine,
-            judge_engine,
-            args.judge_model,
-            args.reasoning_effort,
-            args.case_timeout,
-        )
-
-    started_at = datetime.now(UTC).isoformat()
-    results: list[CaseResult]
-    if concurrency > 1:
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            results = list(pool.map(_run, cases))
-    else:
-        results = [_run(c) for c in cases]
-    finished_at = datetime.now(UTC).isoformat()
-
-    aggregates = aggregate(results)
-    meta = {
-        "model": args.model,
-        "engine": args.engine,
-        "reasoning_effort": args.reasoning_effort,
-        "judge_model": args.judge_model,
-        "judge_engine": judge_engine_name if args.judge_model else None,
-        "mode": args.mode,
-        "concurrency": concurrency,
-        "case_timeout": args.case_timeout,
-        "started_at": started_at,
-        "finished_at": finished_at,
-    }
-    report = {
-        **meta,
-        "cases_run": len(results),
-        "aggregates": aggregates,
-        "results": [r.model_dump() for r in results],
-    }
+    judge_engine = get_engine(judge_engine_name, args.db)
+    agentic = engine.is_agentic
 
     if args.out_dir:
         out_dir = Path(args.out_dir)
@@ -464,6 +513,77 @@ def main() -> int:
     else:
         out_path = Path(args.out)
         md_path = out_path.with_suffix(".md")
+
+    prior_results: list[CaseResult] = []
+    if args.resume and out_path.exists():
+        prior = json.loads(out_path.read_text())
+        prior_results = [CaseResult.model_validate(r) for r in prior.get("results", [])]
+        done_ids = {r.id for r in prior_results}
+        skipped = [c for c in cases if c.id in done_ids]
+        cases = [c for c in cases if c.id not in done_ids]
+        print(f"Resume: skipping {len(skipped)} already-recorded cases, running {len(cases)}.")
+
+    system_prompt = "" if agentic else build_system_prompt(args.db, args.model)
+    case_timeout = engine.hard_timeout if agentic else args.case_timeout
+
+    concurrency = args.concurrency
+    if engine.max_concurrency is not None:
+        concurrency = min(concurrency, engine.max_concurrency)
+
+    def _run(case: EvalCase) -> CaseResult:
+        if agentic:
+            return run_case_agentic(
+                case,
+                args.model,
+                ground_truth,
+                engine,
+                judge_engine,
+                args.judge_model,
+                args.reasoning_effort,
+                case_timeout,
+            )
+        return run_case_prompt_only(
+            case,
+            args.model,
+            args.db,
+            system_prompt,
+            ground_truth,
+            engine,
+            judge_engine,
+            args.judge_model,
+            args.reasoning_effort,
+            case_timeout,
+        )
+
+    started_at = datetime.now(UTC).isoformat()
+    new_results: list[CaseResult]
+    if concurrency > 1 and cases:
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            new_results = list(pool.map(_run, cases))
+    else:
+        new_results = [_run(c) for c in cases]
+    finished_at = datetime.now(UTC).isoformat()
+
+    results = prior_results + new_results
+    aggregates = aggregate(results)
+    meta = {
+        "model": args.model,
+        "engine": args.engine,
+        "reasoning_effort": args.reasoning_effort,
+        "judge_model": args.judge_model,
+        "judge_engine": judge_engine_name if args.judge_model else None,
+        "mode": args.mode,
+        "concurrency": concurrency,
+        "case_timeout": case_timeout,
+        "started_at": started_at,
+        "finished_at": finished_at,
+    }
+    report = {
+        **meta,
+        "cases_run": len(results),
+        "aggregates": aggregates,
+        "results": [r.model_dump() for r in results],
+    }
 
     out_path.write_text(json.dumps(report, indent=2) + "\n")
     md_path.write_text(render_markdown(meta, aggregates, results))
