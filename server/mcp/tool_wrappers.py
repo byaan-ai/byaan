@@ -185,6 +185,8 @@ async def create_run_context(
         "enabled_skills": enabled_skills,
         "enabled_skill_names": enabled_skill_names,
     }
+    for key, skill_data in enabled_skills.items():
+        context[f"{key}_credentials"] = skill_data.get("credentials", {})
 
     # Create a minimal RunContextWrapper-like object
     class MCPRunContext:

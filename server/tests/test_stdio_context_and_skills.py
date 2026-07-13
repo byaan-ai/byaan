@@ -216,3 +216,29 @@ class TestSkillFieldParsing:
         assert keys == ["api_key", "organization_slug", "project_slugs"]
         assert config.credentials[2].optional is True
         assert "Organization Tokens" in config.docs
+
+
+class TestMCPRunContextCredentials:
+    async def test_create_run_context_exposes_flat_credential_keys(self, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from server.mcp import tool_wrappers
+
+        enabled = {
+            "sentry:user": {"skill_name": "sentry", "scope": "user", "credentials": {"api_key": "sntryu_x"}},
+            "sentry:org": {"skill_name": "sentry", "scope": "org", "credentials": {"api_key": "sntryu_y"}},
+        }
+        monkeypatch.setattr(tool_wrappers, "_load_custom_skills_for_mcp", AsyncMock(return_value={}))
+        monkeypatch.setattr(
+            tool_wrappers, "_load_enabled_skills_for_mcp", AsyncMock(return_value=(enabled, ["sentry"]))
+        )
+
+        ctx = await tool_wrappers.create_run_context(uuid.uuid4(), uuid.uuid4(), None)
+
+        assert ctx.context["sentry:user_credentials"] == {"api_key": "sntryu_x"}
+        assert ctx.context["sentry:org_credentials"] == {"api_key": "sntryu_y"}
+
+        from server.tools.skill_executor import _get_credentials_for_skill
+
+        assert _get_credentials_for_skill(ctx, "sentry", "user") == {"api_key": "sntryu_x"}
+        assert _get_credentials_for_skill(ctx, "sentry", "org") == {"api_key": "sntryu_y"}
