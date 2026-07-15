@@ -217,6 +217,40 @@ async def notify_suggestion_created(session: AsyncSession, suggestion: SkillSugg
         logger.error(f"Failed to notify Slack about suggestion {getattr(suggestion, 'id', None)}: {e}", exc_info=True)
 
 
+def _points_at_review_card(suggestion: SkillSuggestion) -> bool:
+    """True only when slack_channel_id/slack_message_ts were overwritten with a posted card's location.
+
+    When card delivery failed they still hold the originating conversation's coordinates
+    (copied from source at creation) — replying there would leak loop internals to the user.
+    """
+    if not suggestion.slack_channel_id or not suggestion.slack_message_ts:
+        return False
+    source = suggestion.source or {}
+    source_ts = source.get("slack_thread_ts") or source.get("thread_ts")
+    source_channel = source.get("slack_channel_id") or source.get("channel_id") or source.get("channel")
+    return not (suggestion.slack_channel_id == source_channel and suggestion.slack_message_ts == source_ts)
+
+
+async def notify_clarification_resolved(session: AsyncSession, suggestion: SkillSuggestion, note: str) -> None:
+    """Reply under the original review card when a clarification is auto-resolved by re-evaluation."""
+    try:
+        if not _points_at_review_card(suggestion):
+            return
+        workspace = await SlackWorkspaceRepository(session).get_by_tenant(suggestion.tenant_id)
+        if not workspace or not workspace.is_active:
+            return
+
+        bot_token = await _bot_token(workspace, session)
+        slack = SlackService(bot_token)
+        await slack.post_message(
+            channel=suggestion.slack_channel_id,
+            text=f"✅ {note}",
+            thread_ts=suggestion.slack_message_ts,
+        )
+    except Exception as e:
+        logger.error(f"Failed to post resolution note for suggestion {getattr(suggestion, 'id', None)}: {e}")
+
+
 async def _post_ephemeral(response_url: str, text: str) -> None:
     if not response_url:
         return

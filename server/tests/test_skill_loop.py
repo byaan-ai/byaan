@@ -161,6 +161,14 @@ async def test_verdict_json_parsing_variants():
     assert parse_last_json_block("```json\n{not valid}\n```") is None
 
 
+def test_build_slack_thread_url():
+    from server.services.conversation_evaluation_service import build_slack_thread_url
+
+    assert build_slack_thread_url("C0123", "1720900000.123456") == "https://slack.com/archives/C0123/p1720900000123456"
+    assert build_slack_thread_url("C0123", None) == "https://slack.com/archives/C0123"
+    assert build_slack_thread_url(None, "1720900000.123456") is None
+
+
 async def test_malformed_verifier_output_records_ambiguous(test_session):
     tenant = await _seed_tenant(test_session)
     notebook = await _seed_notebook(test_session, tenant, [("user", "revenue?"), ("assistant", "100")])
@@ -222,6 +230,149 @@ async def test_ambiguous_creates_clarification(test_session):
     assert suggestion.suggestion_type == "clarification"
     assert suggestion.title.startswith("Which date range")
     assert suggestion.patch is None
+
+
+async def test_confirmed_reevaluation_resolves_pending_clarification(test_session):
+    tenant = await _seed_tenant(test_session)
+    notebook = await _seed_notebook(test_session, tenant, [("user", "revenue?"), ("assistant", "It depends")])
+    svc = _service()
+    svc._notify_resolved = AsyncMock()
+    svc._run_agent = AsyncMock(return_value=VERIFY_AMBIGUOUS)
+    await svc._evaluate_notebook(test_session, notebook, "scheduled")
+
+    svc._run_agent = AsyncMock(return_value=VERIFY_CONFIRMED_WITH_PROSE)
+    verdict = await svc._evaluate_notebook(test_session, notebook, "scheduled")
+
+    assert verdict == "confirmed"
+    suggestion = (await test_session.execute(select(SkillSuggestion))).scalars().one()
+    assert suggestion.status == "superseded"
+    assert suggestion.reviewed_via == "skill_loop"
+    assert "confirmed the assistant's answer" in suggestion.review_note
+    svc._notify_resolved.assert_awaited_once()
+
+
+async def test_mistake_reevaluation_resolves_clarification_and_links_new_suggestion(test_session):
+    tenant = await _seed_tenant(test_session)
+    notebook = await _seed_notebook(test_session, tenant, [("user", "revenue?"), ("assistant", "It depends")])
+    svc = _service()
+    svc._notify_resolved = AsyncMock()
+    svc._run_agent = AsyncMock(return_value=VERIFY_AMBIGUOUS)
+    await svc._evaluate_notebook(test_session, notebook, "scheduled")
+
+    svc._run_agent = AsyncMock(side_effect=[VERIFY_MISTAKE, PROPOSE_SURVIVES])
+    verdict = await svc._evaluate_notebook(test_session, notebook, "scheduled")
+
+    assert verdict == "mistake"
+    suggestions = (await test_session.execute(select(SkillSuggestion))).scalars().all()
+    by_type = {s.suggestion_type: s for s in suggestions}
+    assert by_type["clarification"].status == "superseded"
+    assert by_type["new_skill"].title in by_type["clarification"].review_note
+    assert by_type["new_skill"].status == "pending"
+
+
+async def test_new_clarification_supersedes_older_question(test_session):
+    tenant = await _seed_tenant(test_session)
+    notebook = await _seed_notebook(test_session, tenant, [("user", "revenue?"), ("assistant", "It depends")])
+    svc = _service()
+    svc._notify_resolved = AsyncMock()
+    svc._run_agent = AsyncMock(return_value=VERIFY_AMBIGUOUS)
+
+    await svc._evaluate_notebook(test_session, notebook, "scheduled")
+    await svc._evaluate_notebook(test_session, notebook, "scheduled")
+
+    suggestions = (await test_session.execute(select(SkillSuggestion))).scalars().all()
+    statuses = sorted(s.status for s in suggestions)
+    assert statuses == ["pending", "superseded"]
+    superseded = next(s for s in suggestions if s.status == "superseded")
+    assert "newer clarification" in superseded.review_note
+
+
+async def test_resolution_scoped_to_notebook(test_session):
+    tenant = await _seed_tenant(test_session)
+    notebook_a = await _seed_notebook(test_session, tenant, [("user", "revenue?"), ("assistant", "It depends")])
+    notebook_b = await _seed_notebook(test_session, tenant, [("user", "users?"), ("assistant", "42")])
+    svc = _service()
+    svc._notify_resolved = AsyncMock()
+    svc._run_agent = AsyncMock(return_value=VERIFY_AMBIGUOUS)
+    await svc._evaluate_notebook(test_session, notebook_a, "scheduled")
+
+    svc._run_agent = AsyncMock(return_value=VERIFY_CONFIRMED_WITH_PROSE)
+    await svc._evaluate_notebook(test_session, notebook_b, "scheduled")
+
+    suggestion = (await test_session.execute(select(SkillSuggestion))).scalars().one()
+    assert suggestion.source["notebook_id"] == str(notebook_a.id)
+    assert suggestion.status == "pending"
+    svc._notify_resolved.assert_not_called()
+
+
+async def test_racing_clarifications_do_not_cancel_each_other(test_session):
+    from server.services.skill_suggestion_service import SkillSuggestionService
+
+    tenant = await _seed_tenant(test_session)
+    notebook = await _seed_notebook(test_session, tenant, [("user", "revenue?"), ("assistant", "It depends")])
+    source = {"origin": "app", "notebook_id": str(notebook.id)}
+    service = SkillSuggestionService(test_session)
+    s1 = await service.create_suggestion(
+        tenant_id=tenant.id, suggestion_type="clarification", title="Q1", rationale="", confidence="low", source=source
+    )
+    s2 = await service.create_suggestion(
+        tenant_id=tenant.id, suggestion_type="clarification", title="Q2", rationale="", confidence="low", source=source
+    )
+
+    svc = _service()
+    svc._notify_resolved = AsyncMock()
+    await svc._resolve_open_clarifications(test_session, tenant.id, notebook.id, "ambiguous", s1)
+    await svc._resolve_open_clarifications(test_session, tenant.id, notebook.id, "ambiguous", s2)
+
+    await test_session.refresh(s1)
+    await test_session.refresh(s2)
+    assert s1.status == "superseded"
+    assert s2.status == "pending"
+
+
+async def test_human_review_claim_beats_auto_resolution(test_session):
+    from server.repositories.skill_suggestion import SkillSuggestionRepository
+    from server.services.skill_suggestion_service import SkillSuggestionService
+
+    tenant = await _seed_tenant(test_session)
+    notebook = await _seed_notebook(test_session, tenant, [("user", "revenue?"), ("assistant", "It depends")])
+    service = SkillSuggestionService(test_session)
+    suggestion = await service.create_suggestion(
+        tenant_id=tenant.id,
+        suggestion_type="clarification",
+        title="Q",
+        rationale="",
+        confidence="low",
+        source={"origin": "app", "notebook_id": str(notebook.id)},
+    )
+    assert await SkillSuggestionRepository(test_session).claim_for_review(suggestion.id, tenant.id)
+
+    svc = _service()
+    svc._notify_resolved = AsyncMock()
+    await svc._resolve_open_clarifications(test_session, tenant.id, notebook.id, "confirmed", None)
+
+    await test_session.refresh(suggestion)
+    assert suggestion.status == "reviewing"
+    svc._notify_resolved.assert_not_called()
+
+
+def test_resolution_reply_only_targets_posted_review_card():
+    from server.services.slack_suggestion_service import _points_at_review_card
+
+    origin_source = {"origin": "slack", "slack_channel_id": "C_SRC", "slack_thread_ts": "999.111"}
+    card_posted = SkillSuggestion(source=origin_source, slack_channel_id="C_REVIEW", slack_message_ts="1700.0001")
+    card_failed = SkillSuggestion(source=origin_source, slack_channel_id="C_SRC", slack_message_ts="999.111")
+    legacy_failed = SkillSuggestion(
+        source={"origin": "slack", "channel": "C_SRC", "thread_ts": "999.111"},
+        slack_channel_id="C_SRC",
+        slack_message_ts="999.111",
+    )
+    never_posted = SkillSuggestion(source=origin_source, slack_channel_id=None, slack_message_ts=None)
+
+    assert _points_at_review_card(card_posted) is True
+    assert _points_at_review_card(card_failed) is False
+    assert _points_at_review_card(legacy_failed) is False
+    assert _points_at_review_card(never_posted) is False
 
 
 async def test_candidate_dedup_skips_evaluated_notebook(test_session):
