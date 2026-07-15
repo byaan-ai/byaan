@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import func, select, update
@@ -63,6 +64,38 @@ class SkillSuggestionRepository:
         query = query.order_by(SkillSuggestion.created_at.desc())
         result = await self._session.execute(query)
         return list(result.scalars().all())
+
+    async def list_pending_clarifications(self, tenant_id: UUID) -> list[SkillSuggestion]:
+        query = (
+            select(SkillSuggestion)
+            .where(SkillSuggestion.tenant_id == tenant_id)
+            .where(SkillSuggestion.suggestion_type == "clarification")
+            .where(SkillSuggestion.status == "pending")
+            .order_by(SkillSuggestion.created_at.asc())
+        )
+        result = await self._session.execute(query)
+        return list(result.scalars().all())
+
+    async def resolve_pending_clarification(self, suggestion_id: UUID, tenant_id: UUID, note: str) -> bool:
+        """Atomically supersede a pending clarification.
+
+        Conditional on status='pending' so it loses cleanly to a concurrent human
+        review claim ('reviewing') or another resolver. Caller commits.
+        """
+        result = await self._session.execute(
+            update(SkillSuggestion)
+            .where(SkillSuggestion.id == suggestion_id)
+            .where(SkillSuggestion.tenant_id == tenant_id)
+            .where(SkillSuggestion.status == "pending")
+            .values(
+                status="superseded",
+                reviewed_via="skill_loop",
+                reviewed_at=datetime.now(),
+                review_note=note,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1
 
     async def count_pending(self, tenant_id: UUID) -> int:
         query = (

@@ -68,7 +68,11 @@ export interface SuggestionPatch {
 export interface SuggestionSource {
   origin: string
   channel?: string
+  channel_id?: string
+  thread_ts?: string
   thread_url?: string
+  slack_channel_id?: string | null
+  slack_thread_ts?: string | null
   notebook_id?: string
   participants?: string[]
   date?: string
@@ -94,6 +98,8 @@ export interface SkillSuggestion {
   confidence: SuggestionConfidence
   status: SuggestionStatus
   source: SuggestionSource | null
+  slack_channel_id: string | null
+  slack_message_ts: string | null
   reviewed_by: string | null
   reviewed_via: string | null
   reviewer_slack_user_id: string | null

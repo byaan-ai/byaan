@@ -131,7 +131,7 @@ function ConversationLink({ suggestion }: { suggestion: SkillSuggestion }) {
       </a>
     )
   }
-  const threadUrl = suggestion.source?.thread_url
+  const threadUrl = suggestion.source?.thread_url || slackThreadUrl(suggestion)
   const notebookId = suggestion.source?.notebook_id
   if (threadUrl) {
     return (
@@ -145,7 +145,7 @@ function ConversationLink({ suggestion }: { suggestion: SkillSuggestion }) {
       </a>
     )
   }
-  if (notebookId) {
+  if (notebookId && suggestion.source?.origin !== 'slack') {
     return (
       <Link
         to={`/notebook/${notebookId}`}
@@ -156,6 +156,16 @@ function ConversationLink({ suggestion }: { suggestion: SkillSuggestion }) {
     )
   }
   return null
+}
+
+function slackThreadUrl(suggestion: SkillSuggestion): string | null {
+  const source = suggestion.source
+  if (source?.origin !== 'slack') return null
+  const channelId = source.slack_channel_id || source.channel_id || source.channel
+  const threadTs = source.slack_thread_ts || source.thread_ts
+  if (!channelId) return null
+  if (!threadTs) return `https://slack.com/archives/${channelId}`
+  return `https://slack.com/archives/${channelId}/p${threadTs.replace('.', '')}`
 }
 
 export default function SkillReviewPage() {
@@ -171,15 +181,16 @@ export default function SkillReviewPage() {
   const { data: pending = [], isLoading: loadingPending } = useSkillSuggestions('pending')
   const { data: rejected = [] } = useSkillSuggestions('rejected')
   const { data: applied = [] } = useSkillSuggestions('applied')
+  const { data: superseded = [] } = useSkillSuggestions('superseded')
 
   const approveMutation = useApproveSuggestion()
   const rejectMutation = useRejectSuggestion()
 
   const resolved = useMemo(() => {
-    return [...applied, ...rejected].sort(
+    return [...applied, ...rejected, ...superseded].sort(
       (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
     )
-  }, [applied, rejected])
+  }, [applied, rejected, superseded])
 
   const visibleList = useMemo(() => {
     return showResolved ? [...pending, ...resolved] : pending

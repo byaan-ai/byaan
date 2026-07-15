@@ -51,6 +51,14 @@ LEASE_ID = 1
 CODE_SYNC_MARKER_ID = 2
 
 
+def build_slack_thread_url(channel_id: str | None, thread_ts: str | None) -> str | None:
+    if not channel_id:
+        return None
+    if not thread_ts:
+        return f"https://slack.com/archives/{channel_id}"
+    return f"https://slack.com/archives/{channel_id}/p{thread_ts.replace('.', '')}"
+
+
 class ConversationEvaluationService:
     """Background loop that verifies finished conversations and proposes skill improvements."""
 
@@ -316,6 +324,7 @@ class ConversationEvaluationService:
             suggestion = await self._create_clarification(session, tenant_id, findings, source)
 
         await self._record_evaluation(session, tenant_id, notebook_id, trigger, verdict, findings)
+        await self._resolve_open_clarifications(session, tenant_id, notebook_id, verdict, suggestion)
 
         if suggestion is not None:
             await self._notify(session, suggestion)
@@ -393,6 +402,63 @@ class ConversationEvaluationService:
             slack_message_ts=source.get("slack_thread_ts"),
         )
 
+    async def _resolve_open_clarifications(
+        self, session, tenant_id: UUID, notebook_id: UUID, verdict: str, new_suggestion: SkillSuggestion | None
+    ) -> None:
+        """Close pending clarification questions for a conversation once a newer evaluation settles it.
+
+        A later message (the human's answer, in app chat or Slack thread) re-triggers evaluation;
+        a definitive verdict resolves the open question, a fresh clarification replaces it.
+        """
+        if verdict == "ambiguous" and new_suggestion is None:
+            return
+
+        repo = SkillSuggestionRepository(session)
+        open_clarifications = [
+            s
+            for s in await repo.list_pending_clarifications(tenant_id)
+            if (s.source or {}).get("notebook_id") == str(notebook_id)
+            and (new_suggestion is None or s.id != new_suggestion.id)
+        ]
+        if verdict == "ambiguous" and new_suggestion is not None:
+            # Supersede only strictly older questions: two racing evaluations that each
+            # created a clarification must not cancel each other out — the newest survives.
+            new_key = (new_suggestion.created_at, str(new_suggestion.id))
+            open_clarifications = [s for s in open_clarifications if (s.created_at, str(s.id)) < new_key]
+        if not open_clarifications:
+            return
+
+        if verdict == "confirmed":
+            note = "Auto-resolved: a follow-up evaluation of this conversation confirmed the assistant's answer."
+        elif verdict == "mistake":
+            if new_suggestion is not None:
+                note = f'Auto-resolved: a follow-up evaluation produced the suggestion "{new_suggestion.title}".'
+            else:
+                note = "Auto-resolved: a follow-up evaluation of this conversation reached a definitive verdict."
+        else:
+            note = "Superseded by a newer clarification question from re-evaluation of this conversation."
+
+        resolved = [s for s in open_clarifications if await repo.resolve_pending_clarification(s.id, tenant_id, note)]
+        if not resolved:
+            await session.rollback()
+            return
+        await session.commit()
+        logger.info(f"Auto-resolved {len(resolved)} clarification(s) for notebook {notebook_id}")
+
+        for stale in resolved:
+            await session.refresh(stale)
+            await self._notify_resolved(session, stale, note)
+
+    async def _notify_resolved(self, session, suggestion: SkillSuggestion, note: str) -> None:
+        try:
+            from server.services.slack_suggestion_service import notify_clarification_resolved
+        except ImportError:
+            return
+        try:
+            await notify_clarification_resolved(session, suggestion, note)
+        except Exception as e:
+            logger.warning(f"Failed to post Slack resolution note for suggestion {suggestion.id}: {e}")
+
     def _match_skill_id(self, data: dict, skills: list[CustomSkill], suggestion_type: str) -> UUID | None:
         if suggestion_type != "edit":
             return None
@@ -417,6 +483,7 @@ class ConversationEvaluationService:
                 "notebook_id": str(notebook_id),
                 "slack_channel_id": conversation.slack_channel_id,
                 "slack_thread_ts": conversation.slack_thread_ts,
+                "thread_url": build_slack_thread_url(conversation.slack_channel_id, conversation.slack_thread_ts),
             }
         return {
             "origin": "app",
