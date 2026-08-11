@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.116.1",
   "httpx>=0.28.1",
-  "mcp[cli]>=1.12.3",
+  "mcp[cli]>=1.28.1",
   "fastmcp>=2.11.0",
   "openai-agents[litellm,sqlalchemy]>=0.7.0",
   "psycopg2-binary>=2.9.10",
@@ -19,13 +19,13 @@ dependencies = [
   "sqlalchemy>=2.0.31",
   "alembic>=1.13.2",
   "aiosqlite>=0.20.0",
-  "cryptography>=46.0.7",
+  "cryptography>=48.0.1",
   "python-dateutil>=2.8.2",
-  "litellm>=1.83.7",
+  "litellm>=1.84.0",
   "Mako>=1.3.12",
   "authlib>=1.6.12",
   "urllib3>=2.7.0",
-  "python-multipart>=0.0.27",
+  "python-multipart>=0.0.31",
   "boto3>=1.35.0",
   "uvicorn>=0.30.0",
   "certifi>=2024.0.0",
@@ -114,7 +114,17 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.uv]
-exclude-newer = "2026-05-11T00:00:00Z"
+exclude-newer = "2026-08-05T00:00:00Z"
+constraint-dependencies = [
+  "aiohttp>=3.14.2",
+  "starlette>=1.3.1",
+  "joserfc>=1.6.8",
+  "pyjwt>=2.13.0",
+  "idna>=3.15",
+  "pyasn1>=0.6.4",
+  "pydantic-settings>=2.14.2",
+  "setuptools>=83.0.0",
+]
 
 [dependency-groups]
 dev = ["pytest-asyncio>=1.1.0", "pyinstaller>=6.0.0", "pytest>=9.0.3"]

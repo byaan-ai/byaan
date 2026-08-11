@@ -52,17 +52,16 @@
     "react-dom": "^19.1.0",
     "react-grab": "^0.1.14",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "^7.12.0",
+    "react-router-dom": "^7.18.0",
     "react-toastify": "^11.0.5",
     "remark-gfm": "^4.0.1",
-    "sharp": "^0.34.4",
+    "sharp": "^0.35.0",
     "tailwind-merge": "^3.3.1",
     "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@eslint/js": "^9.30.1",
     "@tauri-apps/cli": "^2.8.4",
-    "@tauri-apps/tauricon": "^1.0.3",
     "@types/node": "^24.2.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
@@ -77,17 +76,17 @@
     "tailwindcss-animate": "^1.0.7",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.35.1",
-    "vite": "^7.3.2"
+    "vite": "^7.3.5"
   },
   "packageManager": "pnpm@10.18.3",
   "pnpm": {
     "overrides": {
       "rollup": ">=4.59.0",
-      "react-router": ">=7.12.0",
-      "dompurify": ">=3.4.0",
-      "minimatch@<9.0.7": ">=9.0.7",
+      "react-router": ">=7.18.0",
+      "dompurify": ">=3.4.12",
+      "minimatch@<10.2.3": ">=10.2.3",
       "preact": ">=10.27.3",
-      "glob@<10.5.0": ">=10.5.0",
+      "glob@<11.1.0": ">=11.1.0",
       "flatted": ">=3.4.2",
       "picomatch": ">=4.0.4",
       "mdast-util-to-hast": ">=13.2.1",
@@ -95,12 +94,18 @@
       "phin": ">=3.7.1",
       "smol-toml": ">=1.6.1",
       "min-document": ">=2.19.1",
-      "tmp": ">=0.2.4",
+      "tmp": ">=0.2.6",
       "follow-redirects": ">=1.16.0",
-      "js-yaml": ">=4.1.1",
+      "js-yaml": ">=4.3.0",
       "lodash": ">=4.18.0",
-      "vite": "^7.3.2",
-      "sharp": ">=0.32.6"
+      "vite": "^7.3.5",
+      "sharp": ">=0.35.0",
+      "brace-expansion@<2.0.3": ">=2.0.3",
+      "brace-expansion@<3.0.2": ">=3.0.2",
+      "brace-expansion@>=4.0.0 <5.0.7": ">=5.0.7",
+      "postcss": ">=8.5.18",
+      "@babel/core": ">=7.29.6",
+      "seroval": ">=1.5.3"
     }
   }
 }
