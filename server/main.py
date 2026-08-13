@@ -443,16 +443,21 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     is_auth_error = "ErrorCode." in detail_str or detail_str in AUTH_ERROR_MESSAGES
     readable_message = get_auth_error_message(detail_str) if is_auth_error else detail_str
 
-    logger.error(
-        f"HTTP {exc.status_code}: {request.method} {request.url.path} - {exc.detail}",
-        posthog_context={
-            "path": request.url.path,
-            "method": request.method,
-            "status_code": exc.status_code,
-            "user_agent": request.headers.get("user-agent"),
-            "detail": detail_str,
-        },
-    )
+    log_message = f"HTTP {exc.status_code}: {request.method} {request.url.path} - {exc.detail}"
+    if exc.status_code >= 500:
+        logger.error(
+            log_message,
+            posthog_context={
+                "path": request.url.path,
+                "method": request.method,
+                "status_code": exc.status_code,
+                "user_agent": request.headers.get("user-agent"),
+                "detail": detail_str,
+            },
+        )
+    else:
+        # 4xx are expected client errors (stale notebooks, missing datasources, auth) — don't report to PostHog
+        logger.warning(log_message)
 
     # Check if this is an HTML endpoint - these should return HTML errors, not JSON
     if request.url.path.endswith("/html"):
@@ -496,16 +501,8 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    logger.error(
-        f"Validation error: {request.method} {request.url.path}",
-        posthog_context={
-            "path": request.url.path,
-            "method": request.method,
-            "status_code": 422,
-            "user_agent": request.headers.get("user-agent"),
-            "errors": exc.errors(),
-        },
-    )
+    # 422 is an expected client error (malformed request) — log as warning, don't report to PostHog
+    logger.warning(f"Validation error: {request.method} {request.url.path} - {exc.errors()}")
 
     if request.url.path.startswith("/api/"):
         return JSONResponse(
