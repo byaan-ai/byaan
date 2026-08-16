@@ -4,12 +4,14 @@ OPENAI_MODELS = [
 ]
 
 ANTHROPIC_MODELS = [
+    "anthropic/claude-opus-5",
     "anthropic/claude-opus-4-8",
     "anthropic/claude-opus-4-7",
     "anthropic/claude-sonnet-4-6",
 ]
 
 CLAUDE_CODE_MODELS = [
+    "claude_code/claude-opus-5",
     "claude_code/claude-opus-4-8",
     "claude_code/claude-opus-4-7",
     "claude_code/claude-sonnet-4-6",

@@ -8,8 +8,8 @@ services:
       dockerfile: ./server/Dockerfile
       target: runtime
     ports:
-      - "${BACKEND_PORT:-17433}:8000"
-      - "8020:8020"
+      - "${BACKEND_BIND:-127.0.0.1}:${BACKEND_PORT:-17433}:8000"
+      - "127.0.0.1:8020:8020"
     volumes:
       - .:/app
       - /app/.venv
@@ -20,6 +20,9 @@ services:
       - APP_MODE=community
       - VITE_DEV_MODE=true
       - BYAAN_HOST_PROJECT_DIR=${PWD}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "pl-0-us-east-1.enw6a.mongodb.net:host-gateway"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -34,7 +37,7 @@ services:
       dockerfile: ./client/Dockerfile
       target: dev
     ports:
-      - "${FRONTEND_PORT:-17434}:5173"
+      - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_PORT:-17434}:5173"
     volumes:
       - ./client:/app
       - /app/node_modules

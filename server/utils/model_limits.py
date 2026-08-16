@@ -8,6 +8,7 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "gpt-5": 128_000,
     "gpt-4o": 128_000,
     # Anthropic
+    "claude-opus-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4.8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
