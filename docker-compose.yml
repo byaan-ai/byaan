@@ -20,9 +20,11 @@ services:
       - APP_MODE=community
       - VITE_DEV_MODE=true
       - BYAAN_HOST_PROJECT_DIR=${PWD}
+    # Machine-specific host mappings (e.g. a DB reachable only through a local
+    # tunnel) belong in docker-compose.override.yml, which Compose merges
+    # automatically and git ignores.
     extra_hosts:
       - "host.docker.internal:host-gateway"
-      - "pl-0-us-east-1.enw6a.mongodb.net:host-gateway"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
