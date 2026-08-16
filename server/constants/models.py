@@ -1,4 +1,5 @@
 OPENAI_MODELS = [
+    "openai/gpt-5.6",
     "openai/gpt-5.5",
     "openai/gpt-5.4",
 ]
@@ -37,7 +38,9 @@ XAI_MODELS = [
     "xai/grok-4.20",
 ]
 
+# The Codex backend serves no bare "gpt-5.6" - only the named 5.6 variants.
 CODEX_MODELS = [
+    "codex/gpt-5.6-sol",
     "codex/gpt-5.5",
     "codex/gpt-5.4",
 ]
