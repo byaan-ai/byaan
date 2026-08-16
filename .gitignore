@@ -15,6 +15,9 @@ go-live/
 # Cursor skill symlinks (if dev creates one locally)
 .cursor/skills
 
+# Per-machine Compose overrides (local tunnels, host mappings, port binds)
+docker-compose.override.yml
+
 # Virtual environments
 .venv/
 venv/

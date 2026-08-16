@@ -1,15 +1,18 @@
 OPENAI_MODELS = [
+    "openai/gpt-5.6",
     "openai/gpt-5.5",
     "openai/gpt-5.4",
 ]
 
 ANTHROPIC_MODELS = [
+    "anthropic/claude-opus-5",
     "anthropic/claude-opus-4-8",
     "anthropic/claude-opus-4-7",
     "anthropic/claude-sonnet-4-6",
 ]
 
 CLAUDE_CODE_MODELS = [
+    "claude_code/claude-opus-5",
     "claude_code/claude-opus-4-8",
     "claude_code/claude-opus-4-7",
     "claude_code/claude-sonnet-4-6",
@@ -35,7 +38,9 @@ XAI_MODELS = [
     "xai/grok-4.20",
 ]
 
+# The Codex backend serves no bare "gpt-5.6" - only the named 5.6 variants.
 CODEX_MODELS = [
+    "codex/gpt-5.6-sol",
     "codex/gpt-5.5",
     "codex/gpt-5.4",
 ]

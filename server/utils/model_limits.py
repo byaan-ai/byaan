@@ -4,10 +4,17 @@
 # Source: Official provider documentation (as of 2024-11)
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # OpenAI
+    # Keep the variant keys above bare "gpt-5.6": lookup falls back to substring
+    # matching, and bare "gpt-5" would otherwise claim them at 128k.
+    "gpt-5.6-sol": 1_000_000,
+    "gpt-5.6-terra": 1_000_000,
+    "gpt-5.6-luna": 1_000_000,
+    "gpt-5.6": 1_000_000,
     "gpt-5.5": 1_000_000,
     "gpt-5": 128_000,
     "gpt-4o": 128_000,
     # Anthropic
+    "claude-opus-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4.8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
