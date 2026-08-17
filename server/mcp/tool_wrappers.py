@@ -1241,3 +1241,52 @@ async def create_custom_skill_wrapper(
     except Exception as e:
         logger.error(f"Error in create_custom_skill_wrapper: {e}", exc_info=True)
         return json.dumps({"success": False, "error": str(e)})
+
+
+async def list_sharing_grants_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    object_type: str | None = None,
+    object_id: str | None = None,
+    legacy_surface: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> str:
+    try:
+        from server.serializers.sharing import sharing_grant_payload
+        from server.services.sharing import SharingService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            grants = await SharingService(session).list_grants(
+                tenant_id=tenant_id,
+                object_type=object_type,
+                object_id=object_id,
+                legacy_surface=legacy_surface,
+                status=status,
+                limit=limit,
+            )
+        return json.dumps(
+            {
+                "success": True,
+                "items": [sharing_grant_payload(grant) for grant in grants],
+                "total": len(grants),
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in list_sharing_grants_wrapper: {e}", exc_info=True)
+        return json.dumps({"success": False, "error": str(e)})
+
+
+async def describe_sharing_grant_wrapper(grant_id: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.serializers.sharing import sharing_grant_evidence_payload
+        from server.services.sharing import SharingService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            evidence = await SharingService(session).grant_evidence(tenant_id=tenant_id, grant_id=grant_id)
+        return json.dumps({"success": True, **sharing_grant_evidence_payload(evidence)})
+    except Exception as e:
+        logger.error(f"Error in describe_sharing_grant_wrapper: {e}", exc_info=True)
+        return json.dumps({"success": False, "error": str(e)})

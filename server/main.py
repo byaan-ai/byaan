@@ -74,6 +74,7 @@ from server.routers import raw_query as raw_query_router
 from server.routers import schedules as schedules_router
 from server.routers import scopes as scopes_router
 from server.routers import settings as settings_router
+from server.routers import sharing as sharing_router
 from server.routers import skill_loop as skill_loop_router
 from server.routers import skill_suggestions as skill_suggestions_router
 from server.routers import skills as skills_router
@@ -615,6 +616,7 @@ app.include_router(settings_router.router, prefix="/api", tags=["settings"])
 app.include_router(tenant_router.router, prefix="/api", tags=["tenants"])
 
 app.include_router(folders_router.router, prefix="/api", tags=["folders"])
+app.include_router(sharing_router.router, prefix="/api", tags=["sharing"])
 
 app.include_router(github_router.router, prefix="/api", tags=["github"])
 app.include_router(databricks_oauth_router.router, prefix="/api", tags=["databricks-oauth"])

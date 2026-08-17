@@ -14,6 +14,7 @@ from server.mcp.tool_wrappers import (
     create_custom_skill_wrapper,
     dashboard_search_replace_wrapper,
     define_dashboard_filters_wrapper,
+    describe_sharing_grant_wrapper,
     emit_plan_status_wrapper,
     ensure_notebook_exists,
     execute_duckdb_query_wrapper,
@@ -30,6 +31,7 @@ from server.mcp.tool_wrappers import (
     get_skill_definition_wrapper,
     get_user_instructions_wrapper,
     get_user_style_guidelines_wrapper,
+    list_sharing_grants_wrapper,
     remove_dashboard_filter_wrapper,
     remove_learning_wrapper,
     save_query_wrapper,
@@ -478,6 +480,43 @@ def register_all_tools(mcp: FastMCP, get_or_create_session_func):
         return await remove_learning_wrapper(
             learning_id, session["tenant_id"], session["user_id"], session["notebook_id"]
         )
+
+    # Sharing Read Tools
+    @mcp.tool()
+    async def list_sharing_grants(
+        object_type: str | None = None,
+        object_id: str | None = None,
+        legacy_surface: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """
+        List canonical sharing grants visible in the current workspace.
+
+        Values are redacted before they are returned. Use legacy_surface to inspect
+        compatibility-backed shares such as folder_notebook, folder_dashboard,
+        html_notebook_share, or json_notebook_share.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_sharing_grants_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            object_type=object_type,
+            object_id=object_id,
+            legacy_surface=legacy_surface,
+            status=status,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    async def describe_sharing_grant(grant_id: str, context: Context = None) -> str:
+        """
+        Describe one canonical sharing grant, including redacted compatibility,
+        secret-count, viewer-session, and audit evidence.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_sharing_grant_wrapper(grant_id, session["tenant_id"], session["user_id"])
 
     # Plan Tools
     @mcp.tool()
