@@ -139,12 +139,16 @@ def test_legacy_dashboard_backfill_links_existing_rows_without_html_parsing() ->
             assert asset["lifecycle"] == "legacy_unstructured"
             assert asset["published_version_id"] == "dash-2"
 
-            dashboards = connection.execute(
-                text(
-                    "SELECT id, asset_id, html_content, status, migration_state, manifest_json "
-                    "FROM dashboards ORDER BY version_num"
+            dashboards = (
+                connection.execute(
+                    text(
+                        "SELECT id, asset_id, html_content, status, migration_state, manifest_json "
+                        "FROM dashboards ORDER BY version_num"
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             assert {dashboard["asset_id"] for dashboard in dashboards} == {asset["id"]}
             assert [dashboard["html_content"] for dashboard in dashboards] == [
                 "<html>query-a</html>",
@@ -160,7 +164,9 @@ def test_legacy_dashboard_backfill_links_existing_rows_without_html_parsing() ->
             backfill_legacy_dashboard_assets.downgrade()
             assert connection.execute(text("SELECT COUNT(*) FROM dashboard_assets")).scalar_one() == 0
             assert (
-                connection.execute(text("SELECT COUNT(*) FROM dashboards WHERE html_content LIKE '<html>query-%'")).scalar_one()
+                connection.execute(
+                    text("SELECT COUNT(*) FROM dashboards WHERE html_content LIKE '<html>query-%'")
+                ).scalar_one()
                 == 2
             )
         finally:

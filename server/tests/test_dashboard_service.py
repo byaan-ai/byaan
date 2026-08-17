@@ -198,12 +198,16 @@ async def test_create_patch_publish_and_export_dashboard(test_session: AsyncSess
     assert "dashboard.manifest.v1" in html
 
     audit_events = (
-        await test_session.execute(
-            select(DashboardAuditEvent.action)
-            .where(DashboardAuditEvent.asset_id == asset.id)
-            .order_by(DashboardAuditEvent.created_at)
+        (
+            await test_session.execute(
+                select(DashboardAuditEvent.action)
+                .where(DashboardAuditEvent.asset_id == asset.id)
+                .order_by(DashboardAuditEvent.created_at)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     assert audit_events == [
         "dashboard.draft.create",
         "dashboard.draft.patch",

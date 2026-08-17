@@ -158,7 +158,9 @@ async def test_evaluation_preflight_blocks_missing_required_target_pins(test_ses
     assert "semantic_model.version_hash" in run.preflight_blockers_json
     audit_actions = (
         await test_session.execute(
-            select(EvaluationAuditEvent.action, EvaluationAuditEvent.outcome).where(EvaluationAuditEvent.run_id == run.id)
+            select(EvaluationAuditEvent.action, EvaluationAuditEvent.outcome).where(
+                EvaluationAuditEvent.run_id == run.id
+            )
         )
     ).all()
     assert audit_actions == [("evaluation.run.preflight", "blocked")]
@@ -208,16 +210,24 @@ async def test_runner_claims_run_persists_results_and_hard_fail_gate(test_sessio
     assert completed.summary_json["hard_failures"] == 1
     assert completed.summary_json["gate_decision"] == "failed"
     case_runs = (
-        await test_session.execute(select(EvaluationCaseRun).where(EvaluationCaseRun.run_id == run.id))
-    ).scalars().all()
+        (await test_session.execute(select(EvaluationCaseRun).where(EvaluationCaseRun.run_id == run.id)))
+        .scalars()
+        .all()
+    )
     assert {case_run.status for case_run in case_runs} == {"passed", "failed"}
     assert all(case_run.immutable for case_run in case_runs)
     serialized = str([case_run.result_json | case_run.error_json for case_run in case_runs])
     assert "raw-token" not in serialized
     assert "private_table" not in serialized
     assessments = (
-        await test_session.execute(select(EvaluationAssessment).join(EvaluationCaseRun).where(EvaluationCaseRun.run_id == run.id))
-    ).scalars().all()
+        (
+            await test_session.execute(
+                select(EvaluationAssessment).join(EvaluationCaseRun).where(EvaluationCaseRun.run_id == run.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
     assert any(assessment.category == "security" and assessment.hard_fail for assessment in assessments)
 
 
@@ -246,7 +256,9 @@ async def test_preflight_idempotency_reclaim_stop_artifact_and_promotion(test_se
     reclaimed = await service.claim_next_run(tenant_id=tenant_id, worker_id="worker-b", lease_seconds=60)
     assert reclaimed is not None and reclaimed.attempt == 2
     await service.request_run_stop(tenant_id=tenant_id, run_id=str(first.id), actor_id="owner")
-    stopped = await service.heartbeat_run(tenant_id=tenant_id, run_id=str(first.id), worker_id="worker-b", lease_seconds=60)
+    stopped = await service.heartbeat_run(
+        tenant_id=tenant_id, run_id=str(first.id), worker_id="worker-b", lease_seconds=60
+    )
     assert stopped.status == "canceled"
 
     artifact = await service.record_run_artifact(
@@ -301,6 +313,8 @@ async def test_preflight_idempotency_reclaim_stop_artifact_and_promotion(test_se
     accepted = await service.decide_promotion(tenant_id=tenant_id, change_set_id=str(change_set.id), actor_id="owner")
     assert accepted.decision == "accepted"
     decisions = (
-        await test_session.execute(select(PromotionDecision).where(PromotionDecision.change_set_id == change_set.id))
-    ).scalars().all()
+        (await test_session.execute(select(PromotionDecision).where(PromotionDecision.change_set_id == change_set.id)))
+        .scalars()
+        .all()
+    )
     assert {decision.decision for decision in decisions} == {"rejected", "accepted"}

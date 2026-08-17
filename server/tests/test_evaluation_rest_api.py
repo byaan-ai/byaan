@@ -202,12 +202,16 @@ async def test_evaluation_rest_read_surfaces_and_compare(test_client, test_sessi
     suite = await test_session.get(EvaluationSuite, suite_version.suite_id)
     assert suite is not None
     cases = (
-        await test_session.execute(
-            select(EvaluationCase)
-            .where(EvaluationCase.suite_version_id == suite_version.id)
-            .order_by(EvaluationCase.case_key)
+        (
+            await test_session.execute(
+                select(EvaluationCase)
+                .where(EvaluationCase.suite_version_id == suite_version.id)
+                .order_by(EvaluationCase.case_key)
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     baseline_run = await _seed_completed_run(
         test_session,
         tenant_id=tenant.id,
@@ -220,7 +224,9 @@ async def test_evaluation_rest_read_surfaces_and_compare(test_client, test_sessi
         suite_version_id=suite_version.id,
         gate_decision="failed",
     )
-    await _seed_case_result(test_session, tenant_id=tenant.id, run_id=baseline_run.id, case_id=cases[0].id, status="passed")
+    await _seed_case_result(
+        test_session, tenant_id=tenant.id, run_id=baseline_run.id, case_id=cases[0].id, status="passed"
+    )
     await _seed_case_result(
         test_session,
         tenant_id=tenant.id,
@@ -262,7 +268,9 @@ async def test_evaluation_rest_read_surfaces_and_compare(test_client, test_sessi
     assert comparison["regressions"][0]["case_id"] == str(cases[0].id)
 
 
-async def test_evaluation_rest_create_import_publish_and_run_closed_loop(test_client, test_session: AsyncSession) -> None:
+async def test_evaluation_rest_create_import_publish_and_run_closed_loop(
+    test_client, test_session: AsyncSession
+) -> None:
     tenant = (await test_session.execute(select(Tenant))).scalars().first()
     assert tenant is not None
 
@@ -351,8 +359,10 @@ async def test_evaluation_rest_create_import_publish_and_run_closed_loop(test_cl
     assert completed["summary"]["gate_decision"] == "failed"
 
     saved_artifacts = (
-        await test_session.execute(select(EvaluationArtifact).where(EvaluationArtifact.run_id == run_id))
-    ).scalars().all()
+        (await test_session.execute(select(EvaluationArtifact).where(EvaluationArtifact.run_id == run_id)))
+        .scalars()
+        .all()
+    )
     assert len(saved_artifacts) == 1
     assert "private_table" not in json.dumps((await test_client.get(f"/api/evaluation/runs/{run_id}/failures")).json())
 
