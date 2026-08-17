@@ -4,6 +4,7 @@ MCP tool registrations for FastMCP.
 This file registers all Byaan tools as MCP tools with proper authentication and session handling.
 """
 
+import json
 from uuid import UUID
 
 from fastmcp import Context, FastMCP
@@ -14,9 +15,11 @@ from server.mcp.tool_wrappers import (
     compare_evaluation_runs_wrapper,
     create_advisor_change_set_wrapper,
     create_custom_skill_wrapper,
+    create_dashboard_draft_wrapper,
     create_evaluation_case_draft_wrapper,
     dashboard_search_replace_wrapper,
     define_dashboard_filters_wrapper,
+    describe_dashboard_wrapper,
     describe_evaluation_failure_wrapper,
     describe_evaluation_suite_wrapper,
     describe_sharing_grant_wrapper,
@@ -28,6 +31,8 @@ from server.mcp.tool_wrappers import (
     execute_sql_query_wrapper,
     get_chart_styling_wrapper,
     get_dashboard_filter_config_wrapper,
+    get_dashboard_lineage_wrapper,
+    get_dashboard_state_wrapper,
     get_database_schema_wrapper,
     get_dataset_schema_by_id_wrapper,
     get_evaluation_run_wrapper,
@@ -39,7 +44,11 @@ from server.mcp.tool_wrappers import (
     get_user_style_guidelines_wrapper,
     list_evaluation_cases_wrapper,
     list_sharing_grants_wrapper,
+    patch_dashboard_draft_wrapper,
+    preview_dashboard_wrapper,
     preview_evaluation_ground_truth_wrapper,
+    publish_dashboard_wrapper,
+    query_dashboard_wrapper,
     remove_dashboard_filter_wrapper,
     remove_learning_wrapper,
     run_advisor_gate_wrapper,
@@ -47,6 +56,7 @@ from server.mcp.tool_wrappers import (
     save_query_wrapper,
     save_skill_query_wrapper,
     saved_query_schema_wrapper,
+    search_dashboards_wrapper,
     search_datasets_wrapper,
     search_enabled_skills_wrapper,
     search_evaluation_suites_wrapper,
@@ -57,6 +67,7 @@ from server.mcp.tool_wrappers import (
     update_custom_skill_wrapper,
     update_dashboard_filter_wrapper,
     update_learning_wrapper,
+    validate_dashboard_wrapper,
 )
 from server.utils.custom_logger import get_logger
 
@@ -284,6 +295,175 @@ def register_all_tools(mcp: FastMCP, get_or_create_session_func):
             return '{"success": false, "error": "No notebook context available"}'
         return await dashboard_search_replace_wrapper(
             diff_content, session["tenant_id"], session["user_id"], session["notebook_id"]
+        )
+
+    # Governed Dashboard Tools
+    @mcp.tool()
+    async def search_dashboards(
+        query: str = "",
+        tags: list[str] | None = None,
+        status: str = "",
+        freshness: str = "",
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Search governed Dashboard assets by text, tags, lifecycle status, or freshness."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await search_dashboards_wrapper(
+            query,
+            tags,
+            status,
+            freshness,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def describe_dashboard(
+        dashboard_id: str,
+        version: str = "published",
+        detail: str = "compact",
+        context: Context = None,
+    ) -> str:
+        """Describe a governed Dashboard asset and selected manifest version."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_dashboard_wrapper(
+            dashboard_id,
+            version,
+            detail,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def query_dashboard(
+        dashboard_id: str,
+        data_view_ids: list[str] | None = None,
+        filters_json: str = "{}",
+        cursor: str = "",
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Query governed Dashboard data views. Accepts data_view_ids, not raw saved query IDs."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        filters = json.loads(filters_json or "{}")
+        return await query_dashboard_wrapper(
+            dashboard_id,
+            data_view_ids,
+            filters,
+            cursor,
+            limit,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def get_dashboard_state(
+        dashboard_id: str,
+        filters_json: str = "{}",
+        data_view_ids: list[str] | None = None,
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Return compact governed Dashboard state for selected data views."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await get_dashboard_state_wrapper(
+            dashboard_id,
+            filters_json,
+            data_view_ids,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def get_dashboard_lineage(dashboard_id: str, tile_id: str = "", context: Context = None) -> str:
+        """Return Dashboard lineage for the published version, optionally scoped to a tile."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await get_dashboard_lineage_wrapper(dashboard_id, tile_id, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def create_dashboard_draft(
+        slug: str,
+        notebook_id: str,
+        manifest_json: str,
+        description: str = "",
+        tags: list[str] | None = None,
+        context: Context = None,
+    ) -> str:
+        """Create a governed Dashboard draft from a dashboard.manifest.v1 JSON payload."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_dashboard_draft_wrapper(
+            slug,
+            notebook_id,
+            manifest_json,
+            session["tenant_id"],
+            session["user_id"],
+            description,
+            tags,
+        )
+
+    @mcp.tool()
+    async def patch_dashboard_draft(
+        dashboard_id: str,
+        base_etag: str,
+        json_patch: str,
+        change_summary: str = "Patch dashboard draft from MCP",
+        context: Context = None,
+    ) -> str:
+        """Patch a governed Dashboard draft with allowlisted JSON Patch and optimistic ETag."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await patch_dashboard_draft_wrapper(
+            dashboard_id,
+            base_etag,
+            json_patch,
+            change_summary,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def validate_dashboard(dashboard_id: str, context: Context = None) -> str:
+        """Validate the current Dashboard draft and return blockers/warnings."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await validate_dashboard_wrapper(dashboard_id, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def preview_dashboard(
+        dashboard_id: str,
+        filters_json: str = "{}",
+        data_view_ids: list[str] | None = None,
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Preview the current governed Dashboard draft."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        filters = json.loads(filters_json or "{}")
+        return await preview_dashboard_wrapper(
+            dashboard_id,
+            filters,
+            data_view_ids,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def publish_dashboard(
+        dashboard_id: str,
+        base_etag: str,
+        change_summary: str = "Publish dashboard from MCP",
+        context: Context = None,
+    ) -> str:
+        """Publish a validated governed Dashboard draft."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await publish_dashboard_wrapper(
+            dashboard_id,
+            base_etag,
+            change_summary,
+            session["tenant_id"],
+            session["user_id"],
         )
 
     # Configuration Tools
