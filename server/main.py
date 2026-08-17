@@ -81,6 +81,8 @@ from server.routers import skill_loop as skill_loop_router
 from server.routers import skill_suggestions as skill_suggestions_router
 from server.routers import skills as skills_router
 from server.routers import slack as slack_router
+from server.routers import source_connections as source_connections_router
+from server.routers import source_resources as source_resources_router
 from server.routers import tenant as tenant_router
 from server.routers import user_preferences as user_preferences_router
 from server.routers import users as users_router
@@ -587,6 +589,8 @@ app.include_router(exports_router.router, prefix="/api", tags=["exports"])
 app.include_router(imports_router.router, prefix="/api", tags=["imports"])
 app.include_router(dashboard_router.router, prefix="/api", tags=["dashboard"])
 app.include_router(evaluation_router.router, prefix="/api", tags=["evaluation"])
+app.include_router(source_connections_router.router, prefix="/api", tags=["source-connections"])
+app.include_router(source_resources_router.router, prefix="/api", tags=["source-resources"])
 
 app.include_router(user_preferences_router.router, prefix="/api", tags=["user-preferences"])
 app.include_router(learnings_router.router, prefix="/api", tags=["learnings"])

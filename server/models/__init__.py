@@ -54,6 +54,9 @@ from server.models.skill_version import SkillVersion
 from server.models.slack_conversation import SlackConversation
 from server.models.slack_event_log import SlackEventLog
 from server.models.slack_workspace import SlackWorkspace
+from server.models.source_connections import SourceConnection
+from server.models.source_resources import SourceResource
+from server.models.source_snapshots import SourceSnapshot
 from server.models.tenant import Tenant
 from server.models.tenant_invitation import InvitationRole, InvitationStatus, TenantInvitation
 from server.models.tenant_member import TenantMember, TenantRole
@@ -113,6 +116,9 @@ __all__ = [
     "SharingGrant",
     "SharingSecret",
     "SharingViewerSession",
+    "SourceConnection",
+    "SourceResource",
+    "SourceSnapshot",
     "SkillCitation",
     "SkillCredential",
     "SkillLoopLease",
