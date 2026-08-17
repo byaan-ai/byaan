@@ -90,9 +90,7 @@ class EvaluationSuiteVersion(Base):
     published_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=False), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=False), server_default=func.current_timestamp())
 
-    suite: Mapped[EvaluationSuite] = relationship(
-        "EvaluationSuite", back_populates="versions", foreign_keys=[suite_id]
-    )
+    suite: Mapped[EvaluationSuite] = relationship("EvaluationSuite", back_populates="versions", foreign_keys=[suite_id])
     creator: Mapped[User | None] = relationship("User", foreign_keys=[created_by])
     cases: Mapped[list[EvaluationCase]] = relationship(back_populates="suite_version", cascade="all, delete-orphan")
 
@@ -172,19 +170,31 @@ class EvaluationRun(Base):
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=False), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=False), server_default=func.current_timestamp())
 
-    suite_version: Mapped[EvaluationSuiteVersion] = relationship("EvaluationSuiteVersion", foreign_keys=[suite_version_id])
-    target_snapshot: Mapped[EvaluationTargetSnapshot] = relationship("EvaluationTargetSnapshot", foreign_keys=[target_snapshot_id])
+    suite_version: Mapped[EvaluationSuiteVersion] = relationship(
+        "EvaluationSuiteVersion", foreign_keys=[suite_version_id]
+    )
+    target_snapshot: Mapped[EvaluationTargetSnapshot] = relationship(
+        "EvaluationTargetSnapshot", foreign_keys=[target_snapshot_id]
+    )
 
-    __table_args__ = (UniqueConstraint("suite_version_id", "idempotency_key", name="uq_evaluation_runs_suite_idempotency"),)
+    __table_args__ = (
+        UniqueConstraint("suite_version_id", "idempotency_key", name="uq_evaluation_runs_suite_idempotency"),
+    )
 
 
 class EvaluationCaseRun(Base):
     __tablename__ = "evaluation_case_runs"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    run_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("evaluation_runs.id", ondelete="CASCADE"), nullable=False, index=True)
-    case_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("evaluation_cases.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("evaluation_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("evaluation_cases.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     status: Mapped[str] = mapped_column(String(40), nullable=False, default="queued", index=True)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     input_digest: Mapped[str] = mapped_column(String(128), nullable=False, default="")
@@ -201,8 +211,12 @@ class EvaluationAssessment(Base):
     __tablename__ = "evaluation_assessments"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    case_run_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("evaluation_case_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    case_run_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("evaluation_case_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     category: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(40), nullable=False)
     score: Mapped[str | None] = mapped_column(String(80), nullable=True)
@@ -216,8 +230,12 @@ class EvaluationOverride(Base):
     __tablename__ = "evaluation_overrides"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    assessment_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("evaluation_assessments.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    assessment_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("evaluation_assessments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     override_type: Mapped[str] = mapped_column(String(40), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
@@ -228,9 +246,15 @@ class EvaluationArtifact(Base):
     __tablename__ = "evaluation_artifacts"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    run_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_runs.id", ondelete="CASCADE"), nullable=True, index=True)
-    case_run_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_case_runs.id", ondelete="CASCADE"), nullable=True, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("evaluation_runs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    case_run_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("evaluation_case_runs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
     artifact_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     uri: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
@@ -243,8 +267,12 @@ class AdvisorChangeSet(Base):
     __tablename__ = "advisor_change_sets"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    suite_version_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_suite_versions.id", ondelete="SET NULL"), nullable=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    suite_version_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("evaluation_suite_versions.id", ondelete="SET NULL"), nullable=True
+    )
     target_ref: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     base_version_ref: Mapped[str] = mapped_column(String(255), nullable=False)
     base_etag: Mapped[str] = mapped_column(String(128), nullable=False)
@@ -260,8 +288,12 @@ class AdvisorSuggestion(Base):
     __tablename__ = "advisor_suggestions"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    change_set_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("advisor_change_sets.id", ondelete="CASCADE"), nullable=False, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_set_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("advisor_change_sets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     suggestion_type: Mapped[str] = mapped_column(String(80), nullable=False)
     patch_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     affected_case_ids_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
@@ -273,8 +305,12 @@ class PromotionDecision(Base):
     __tablename__ = "promotion_decisions"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    change_set_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("advisor_change_sets.id", ondelete="SET NULL"), nullable=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    change_set_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("advisor_change_sets.id", ondelete="SET NULL"), nullable=True
+    )
     verification_run_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_runs.id"), nullable=True)
     regression_run_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_runs.id"), nullable=True)
     decision: Mapped[str] = mapped_column(String(40), nullable=False)
@@ -288,10 +324,18 @@ class EvaluationAuditEvent(Base):
     __tablename__ = "evaluation_audit_events"
 
     id: Mapped[UUID] = mapped_column(GUID(), primary_key=True, default=uuid4)
-    tenant_id: Mapped[UUID] = mapped_column(GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True)
-    suite_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_suites.id", ondelete="SET NULL"), nullable=True, index=True)
-    suite_version_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_suite_versions.id", ondelete="SET NULL"), nullable=True, index=True)
-    run_id: Mapped[UUID | None] = mapped_column(GUID(), ForeignKey("evaluation_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    tenant_id: Mapped[UUID] = mapped_column(
+        GUID(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    suite_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("evaluation_suites.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    suite_version_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("evaluation_suite_versions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    run_id: Mapped[UUID | None] = mapped_column(
+        GUID(), ForeignKey("evaluation_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     actor_type: Mapped[str] = mapped_column(String(40), nullable=False)
     actor_id: Mapped[str] = mapped_column(String(160), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(120), nullable=False, index=True)

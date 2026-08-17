@@ -76,7 +76,9 @@ def _require_non_viewer(auth: AuthContext) -> None:
 
 
 async def _assert_notebook_access(session: AsyncSession, notebook_id: UUID, auth: AuthContext) -> None:
-    notebook = await session.scalar(select(Notebook).where(Notebook.id == notebook_id, Notebook.tenant_id == auth.tenant_id))
+    notebook = await session.scalar(
+        select(Notebook).where(Notebook.id == notebook_id, Notebook.tenant_id == auth.tenant_id)
+    )
     if not notebook:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
     if not auth.has_scope(Scope.NOTEBOOK_READ) and str(notebook.created_by) != str(auth.user_id):
@@ -328,7 +330,9 @@ async def validate_dashboard_asset(
         manifest = draft.manifest_json or {}
     validated_manifest = DashboardService.validate_manifest_payload(manifest)
     validation = DashboardService.validation_summary(validated_manifest)
-    return success_response(data={"validation": validation, "manifest": validated_manifest}, message="Dashboard validated")
+    return success_response(
+        data={"validation": validation, "manifest": validated_manifest}, message="Dashboard validated"
+    )
 
 
 @router.post("/dashboard-assets/{asset_id}/preview")

@@ -4,7 +4,7 @@ import { BrowserRouter } from "react-router-dom";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { PostHogProvider, usePostHog } from "posthog-js/react";
-import posthog from "posthog-js";
+import posthog, { type PostHogConfig } from "posthog-js";
 import { queryClient } from "./lib/queryClient";
 import { getPostHogConfig } from "./lib/config";
 import { isAnalyticsOptedOut } from "./lib/analyticsPreference";
@@ -90,8 +90,7 @@ function PostHogFlushHandler({ children }: { children: React.ReactNode }) {
       if (posthog) {
         console.log("Flushing PostHog events before window close");
         posthog.capture("app_close");
-        // PostHog's shutdown method flushes pending events
-        posthog.shutdown();
+        posthog.capture("$pageleave");
       }
     };
 
@@ -136,7 +135,7 @@ function AppWithConfig() {
     );
   }
 
-  const options = {
+  const options: Partial<PostHogConfig> = {
     api_host: config?.host || "https://us.i.posthog.com",
     autocapture: true, // Explicitly enable autocapture for Tauri
     persistence: "localStorage", // Use localStorage for persistence in desktop app

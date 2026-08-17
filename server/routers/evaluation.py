@@ -117,14 +117,10 @@ def _advisor_review_payload(review: dict[str, Any]) -> dict[str, Any]:
     regression_run = review.get("regression_run")
     return {
         "change_set": advisor_change_set_payload(review["change_set"]),
-        "advisor_suggestions": [
-            advisor_suggestion_payload(suggestion) for suggestion in review["advisor_suggestions"]
-        ],
+        "advisor_suggestions": [advisor_suggestion_payload(suggestion) for suggestion in review["advisor_suggestions"]],
         "verification_run": evaluation_run_payload(verification_run) if verification_run else None,
         "regression_run": evaluation_run_payload(regression_run) if regression_run else None,
-        "promotion_decisions": [
-            promotion_payload(promotion) for promotion in review["promotion_decisions"]
-        ],
+        "promotion_decisions": [promotion_payload(promotion) for promotion in review["promotion_decisions"]],
         "gate_summary": review["gate_summary"],
     }
 
@@ -169,7 +165,9 @@ def _parse_import_cases(payload: EvaluationCaseImportRequest) -> list[dict[str, 
             expected_contract = json.loads(expected_text)
             provenance = json.loads(provenance_text)
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid CSV JSON field: {exc.msg}") from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid CSV JSON field: {exc.msg}"
+            ) from exc
         cases.append(
             {
                 "case_key": row.get("case_key") or "",
@@ -436,7 +434,10 @@ async def list_evaluation_advisor_change_sets(
     except ValueError as exc:
         raise _service_error(exc) from exc
     return success_response(
-        data={"items": [advisor_change_set_payload(change_set) for change_set in change_sets], "total": len(change_sets)},
+        data={
+            "items": [advisor_change_set_payload(change_set) for change_set in change_sets],
+            "total": len(change_sets),
+        },
         message="Advisor change sets listed",
     )
 
@@ -503,9 +504,7 @@ async def describe_evaluation_failures(
     failures = []
     for case_run, assessments in case_runs:
         failed_assessments = [
-            assessment
-            for assessment in assessments
-            if assessment.status != "passed" or assessment.hard_fail
+            assessment for assessment in assessments if assessment.status != "passed" or assessment.hard_fail
         ]
         if case_run.status != "passed" or failed_assessments:
             failures.append(evaluation_case_run_payload(case_run, assessments=failed_assessments))
@@ -770,7 +769,9 @@ async def create_advisor_change_set_from_skill_suggestion(
     session: AsyncSession = Depends(get_async_session),
 ):
     try:
-        change_set, suggestions, created = await EvaluationService(session).create_advisor_change_set_from_skill_suggestion(
+        change_set, suggestions, created = await EvaluationService(
+            session
+        ).create_advisor_change_set_from_skill_suggestion(
             tenant_id=auth.tenant_id,
             suggestion_id=suggestion_id,
             suite_version_id=payload.suite_version_id,

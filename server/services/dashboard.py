@@ -52,13 +52,17 @@ class DashboardService:
         return manifest.model_dump(mode="json", by_alias=True)
 
     @staticmethod
-    def apply_manifest_patch(manifest_payload: dict[str, Any], patch_operations: list[dict[str, Any]]) -> dict[str, Any]:
+    def apply_manifest_patch(
+        manifest_payload: dict[str, Any], patch_operations: list[dict[str, Any]]
+    ) -> dict[str, Any]:
         manifest = json.loads(DashboardService.canonical_json(manifest_payload))
         for operation in patch_operations:
             op = operation.get("op")
             path = operation.get("path")
             if op not in {"add", "replace", "remove"} or not isinstance(path, str):
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported dashboard patch operation")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported dashboard patch operation"
+                )
             target = DashboardService._manifest_patch_target(path)
             if target not in DashboardService.PATCHABLE_MANIFEST_PATHS:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dashboard patch path is not allowed")
@@ -88,7 +92,9 @@ class DashboardService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path must be absolute")
         parts = [part for part in path.split("/") if part]
         if not parts:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Dashboard manifest root patch is not allowed")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, detail="Dashboard manifest root patch is not allowed"
+            )
         return parts[0].replace("~1", "/").replace("~0", "~")
 
     @staticmethod
@@ -101,7 +107,9 @@ class DashboardService:
             elif isinstance(parent, dict) and part in parent:
                 parent = parent[part]
             else:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path does not exist")
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path does not exist"
+                )
 
         leaf = parts[-1]
         if isinstance(parent, list):
@@ -115,11 +123,15 @@ class DashboardService:
         elif isinstance(parent, dict):
             if op == "remove":
                 if leaf not in parent:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path does not exist")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path does not exist"
+                    )
                 parent.pop(leaf)
             elif op in {"add", "replace"}:
                 if op == "replace" and leaf not in parent:
-                    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path does not exist")
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path does not exist"
+                    )
                 parent[leaf] = value
         else:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Dashboard patch path does not exist")
@@ -357,7 +369,9 @@ class DashboardService:
         manifest = self.validate_manifest_payload(draft.manifest_json)
         validation = self.validation_summary(manifest)
         if validation["blockers"]:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail={"code": "validation_blocked", **validation})
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail={"code": "validation_blocked", **validation}
+            )
 
         draft.status = "published"
         draft.change_summary = change_summary
@@ -404,7 +418,9 @@ class DashboardService:
                 detail={"code": "etag_conflict", "current_etag": asset.etag},
             )
         if not asset.published_version_id:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dashboard has no published version to reload")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Dashboard has no published version to reload"
+            )
 
         published = await repo.get_asset_version(
             tenant_id=tenant_id,
@@ -457,7 +473,9 @@ class DashboardService:
         version.validation_result_json = {**validation, "semantic_diff": semantic_diff}
         asset.current_draft_version_id = version.id
         asset.lifecycle = "in_review"
-        asset.etag = self.digest_payload({"reload": str(version.id), "base_etag": base_etag, "content_hash": content_hash})
+        asset.etag = self.digest_payload(
+            {"reload": str(version.id), "base_etag": base_etag, "content_hash": content_hash}
+        )
         asset.health_summary_json = {
             **(asset.health_summary_json or {}),
             "freshness": "unknown",
@@ -515,11 +533,15 @@ class DashboardService:
         if not version:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dashboard version not found")
         if version.status == "draft":
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Draft dashboards must be published before export")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Draft dashboards must be published before export"
+            )
 
         if not version.manifest_json:
             if not version.html_content:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Dashboard version has no exportable content")
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT, detail="Dashboard version has no exportable content"
+                )
             html_content = version.html_content
             artifact_kind = "legacy_html"
         else:
@@ -559,7 +581,9 @@ class DashboardService:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         if mode != "live":
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="pinned_snapshot artifacts are not available")
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="pinned_snapshot artifacts are not available"
+            )
 
         repo = DashboardRepository(session)
         asset = await repo.get_asset(asset_id, tenant_id)
@@ -788,7 +812,12 @@ class DashboardService:
         ]
         if saved_query_views:
             warnings.append(f"saved_query compatibility views require lineage review: {', '.join(saved_query_views)}")
-        return {"valid": not blockers, "blockers": blockers, "warnings": warnings, "validated_at": datetime.utcnow().isoformat()}
+        return {
+            "valid": not blockers,
+            "blockers": blockers,
+            "warnings": warnings,
+            "validated_at": datetime.utcnow().isoformat(),
+        }
 
     def _select_data_views(self, manifest: dict[str, Any], data_view_ids: list[str] | None) -> list[dict[str, Any]]:
         views_by_id = {data_view["id"]: data_view for data_view in manifest.get("data_views", [])}
@@ -840,7 +869,9 @@ class DashboardService:
             if not value_present:
                 default_value = dashboard_filter.get("default_value")
                 if default_value is not None:
-                    normalized[str(dashboard_filter["field"])] = self._validate_filter_value(dashboard_filter, default_value)
+                    normalized[str(dashboard_filter["field"])] = self._validate_filter_value(
+                        dashboard_filter, default_value
+                    )
                     continue
                 if dashboard_filter.get("required"):
                     raise HTTPException(
@@ -1097,7 +1128,9 @@ class DashboardService:
         )
 
     @staticmethod
-    def _filters_for_data_view(data_view: dict[str, Any], normalized_filters: dict[str, Any]) -> list[SavedQueryFilter] | None:
+    def _filters_for_data_view(
+        data_view: dict[str, Any], normalized_filters: dict[str, Any]
+    ) -> list[SavedQueryFilter] | None:
         filter_fields = set(data_view.get("filter_fields") or [])
         if not filter_fields:
             return None
@@ -1127,7 +1160,9 @@ class DashboardService:
             denied.append("metric_not_allowlisted")
         allowed_dimensions = set(binding.get("allowed_dimensions") or [])
         denied_dimensions = [
-            dimension for dimension in semantic_metric.get("dimensions", []) if allowed_dimensions and dimension not in allowed_dimensions
+            dimension
+            for dimension in semantic_metric.get("dimensions", [])
+            if allowed_dimensions and dimension not in allowed_dimensions
         ]
         if denied_dimensions:
             denied.append(f"dimensions_not_allowlisted={','.join(sorted(denied_dimensions))}")
@@ -1327,7 +1362,11 @@ class DashboardService:
     @staticmethod
     def _overall_freshness(view_results: list[dict[str, Any]]) -> str:
         if any(view.get("status") in {"error", "blocked", "permission_denied"} for view in view_results):
-            return "partial" if any(view.get("status") in {"success", "empty", "stale"} for view in view_results) else "blocked"
+            return (
+                "partial"
+                if any(view.get("status") in {"success", "empty", "stale"} for view in view_results)
+                else "blocked"
+            )
         if any(view.get("stale") for view in view_results):
             return "stale"
         return "fresh"

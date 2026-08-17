@@ -118,9 +118,7 @@ class EvaluationExpectedContract(EvaluationStrictModel):
     evidence: EvaluationEvidenceExpectation = Field(default_factory=EvaluationEvidenceExpectation)
     policy: EvaluationPolicyExpectation = Field(default_factory=EvaluationPolicyExpectation)
     dashboard: EvaluationDashboardExpectation = Field(default_factory=EvaluationDashboardExpectation)
-    human_mcp_parity: EvaluationHumanMCPParityExpectation = Field(
-        default_factory=EvaluationHumanMCPParityExpectation
-    )
+    human_mcp_parity: EvaluationHumanMCPParityExpectation = Field(default_factory=EvaluationHumanMCPParityExpectation)
 
 
 class EvaluationCaseProvenance(EvaluationStrictModel):

@@ -77,18 +77,11 @@ export const useDeleteNotebook = () => {
 }
 
 export const useNotebookThreads = (notebookId: string | null) => {
-  const setThreads = useStore(state => state.setThreads)
-  
   return useQuery({
     queryKey: ['threads', notebookId],
     queryFn: async () => {
       if (!notebookId) return []
       const threads = await ApiService.getNotebookThreads(notebookId)
-      setThreads(threads.map(thread => ({
-        ...thread,
-        messages: [],
-        title: thread.thread_title || 'Untitled Thread'
-      })))
       return threads
     },
     enabled: !!notebookId,

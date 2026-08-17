@@ -45,8 +45,7 @@ def evaluation_suite_payload(
     }
     if include_versions:
         payload["versions"] = [
-            evaluation_suite_version_payload(version, include_manifest=include_manifests)
-            for version in versions or []
+            evaluation_suite_version_payload(version, include_manifest=include_manifests) for version in versions or []
         ]
     return payload
 

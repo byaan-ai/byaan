@@ -584,7 +584,7 @@ export const TableMentionInput = forwardRef<HTMLTextAreaElement, TableMentionInp
                               onClick={(e) => {
                                 e.preventDefault()
                                 e.stopPropagation()
-                                handleColumnSelect(column.name, hoveredTable)
+                                handleColumnSelect(column.name, hoveredTable || undefined)
                               }}
                               onMouseEnter={() => isColumnMode && setSelectedColumnIndex(index)}
                             >

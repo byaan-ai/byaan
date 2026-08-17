@@ -1,5 +1,9 @@
 import type { StateCreator } from 'zustand'
 import { ApiService } from '@/services/api'
+import type { StoreState } from '../useStore'
+
+const defaultInstructions = ''
+const defaultStyleGuidelines = ''
 
 export type SkillScope = 'user' | 'org'
 
@@ -75,6 +79,30 @@ export interface CreateCustomSkillData {
   api_config?: ApiConfig
   remove_api_config?: boolean
 }
+
+const normalizeSkillStatus = (skill: SkillStatus | Omit<SkillStatus, 'credential_fields' | 'emoji' | 'homepage' | 'domain' | 'org_scope_created_by_name' | 'domain_active'> & Partial<SkillStatus>): SkillStatus => ({
+  ...skill,
+  credential_fields: skill.credential_fields || [],
+  emoji: skill.emoji || '',
+  homepage: skill.homepage || '',
+  domain: skill.domain || '',
+  org_scope_created_by_name: skill.org_scope_created_by_name || null,
+  domain_active: skill.domain_active ?? true,
+})
+
+const normalizeCustomSkill = (skill: CustomSkill | Omit<CustomSkill, 'instructions' | 'api_base_url' | 'api_type' | 'api_auth_type' | 'api_domain' | 'domain_active' | 'has_credentials' | 'github_repo_id' | 'github_analysis_type' | 'github_repo_name'> & Partial<CustomSkill>): CustomSkill => ({
+  ...skill,
+  instructions: skill.instructions || '',
+  api_base_url: skill.api_base_url ?? null,
+  api_type: skill.api_type ?? null,
+  api_auth_type: skill.api_auth_type ?? null,
+  api_domain: skill.api_domain ?? null,
+  domain_active: skill.domain_active ?? true,
+  has_credentials: skill.has_credentials ?? false,
+  github_repo_id: skill.github_repo_id ?? null,
+  github_analysis_type: skill.github_analysis_type ?? null,
+  github_repo_name: skill.github_repo_name ?? null,
+})
 
 export interface LearningRecord {
   id: string
@@ -256,7 +284,7 @@ const dummyDatabaseContext: DatabaseContext[] = [
   },
 ];
 
-export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
+export const createContextSlice: StateCreator<StoreState, [], [], ContextSlice> = (set, get) => ({
   isSidebarOpen: false,
   activeSection: 'instructions',
   selectedDatasourceId: null,
@@ -613,10 +641,10 @@ export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
 
   // Load default preferences from backend on app startup
   loadPreferencesFromBackend: async () => {
-    const { isAuthenticated } = get()
+    const { user } = get()
 
     // Only load preferences if authenticated
-    if (!isAuthenticated) {
+    if (!user) {
       return
     }
 
@@ -666,7 +694,7 @@ export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
   resetInstructionsToDefault: async () => {
     try {
       const response = await ApiService.resetPreferenceToDefault('instructions')
-      set({ globalInstructions: response.data?.content || dummyInstructions })
+      set({ globalInstructions: response.data?.content || defaultInstructions })
     } catch (error) {
       console.error('Failed to reset instructions to default:', error)
       throw error
@@ -676,7 +704,7 @@ export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
   resetStyleGuidelinesToDefault: async () => {
     try {
       const response = await ApiService.resetPreferenceToDefault('style_guidelines')
-      set({ styleGuidelines: response.data?.content || dummyStyleGuidelines })
+      set({ styleGuidelines: response.data?.content || defaultStyleGuidelines })
     } catch (error) {
       console.error('Failed to reset style guidelines to default:', error)
       throw error
@@ -723,7 +751,7 @@ export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
     set({ isLoadingSkills: true })
     try {
       const response = await ApiService.getSkills()
-      set({ skills: response.data || [], isLoadingSkills: false })
+      set({ skills: (response.data || []).map(normalizeSkillStatus), isLoadingSkills: false })
     } catch (error) {
       console.error('Failed to load skills:', error)
       set({ isLoadingSkills: false })
@@ -781,7 +809,7 @@ export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
     set({ isLoadingCustomSkills: true })
     try {
       const response = await ApiService.getCustomSkills()
-      set({ customSkills: response.data || [], isLoadingCustomSkills: false })
+      set({ customSkills: (response.data || []).map(normalizeCustomSkill), isLoadingCustomSkills: false })
     } catch (error) {
       console.error('Failed to load custom skills:', error)
       set({ isLoadingCustomSkills: false })
@@ -792,7 +820,10 @@ export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
     try {
       const response = await ApiService.createCustomSkill(data)
       await get().loadCustomSkills()
-      return response.data
+      if (!response.data) {
+        throw new Error('Custom skill creation returned no data')
+      }
+      return normalizeCustomSkill(response.data)
     } catch (error) {
       console.error('Failed to create custom skill:', error)
       throw error
@@ -803,7 +834,10 @@ export const createContextSlice: StateCreator<ContextSlice> = (set, get) => ({
     try {
       const response = await ApiService.updateCustomSkill(id, data)
       await get().loadCustomSkills()
-      return response.data
+      if (!response.data) {
+        throw new Error('Custom skill update returned no data')
+      }
+      return normalizeCustomSkill(response.data)
     } catch (error) {
       console.error('Failed to update custom skill:', error)
       throw error

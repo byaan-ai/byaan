@@ -184,7 +184,10 @@ class EvaluationService:
             actor_id=str(actor_id),
             action="evaluation.suite_version.create_draft",
             outcome="draft_created",
-            details_json={"version_num": next_version_num, "copied_from_version_id": manifest["copied_from_version_id"]},
+            details_json={
+                "version_num": next_version_num,
+                "copied_from_version_id": manifest["copied_from_version_id"],
+            },
         )
         await self._session.commit()
         await self._session.refresh(version)
@@ -233,10 +236,7 @@ class EvaluationService:
         assessments_by_case_run: dict[str, list[EvaluationAssessment]] = {}
         for assessment in assessments:
             assessments_by_case_run.setdefault(str(assessment.case_run_id), []).append(assessment)
-        return run, [
-            (case_run, assessments_by_case_run.get(str(case_run.id), []))
-            for case_run in case_runs
-        ]
+        return run, [(case_run, assessments_by_case_run.get(str(case_run.id), [])) for case_run in case_runs]
 
     async def compare_runs(
         self,

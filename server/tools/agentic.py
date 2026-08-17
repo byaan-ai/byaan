@@ -85,14 +85,11 @@ async def _load_dashboard_body(
 
 
 def _ensure_legacy_html_dashboard(dashboard: Any) -> None:
-    if (
-        dashboard.asset_id
-        and (
-            dashboard.manifest_json
-            or dashboard.manifest_schema_version
-            or dashboard.status != "legacy_unstructured"
-            or dashboard.migration_state != "legacy_unstructured"
-        )
+    if dashboard.asset_id and (
+        dashboard.manifest_json
+        or dashboard.manifest_schema_version
+        or dashboard.status != "legacy_unstructured"
+        or dashboard.migration_state != "legacy_unstructured"
     ):
         raise DashboardEditError(
             "Legacy HTML tools are deprecated for structured dashboards. "

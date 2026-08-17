@@ -138,7 +138,9 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("id", name=op.f("pk_evaluation_target_snapshots")),
         )
         for column_name in ("tenant_id", "target_kind", "target_ref", "pin_digest"):
-            op.create_index(f"ix_evaluation_target_snapshots_{column_name}", "evaluation_target_snapshots", [column_name])
+            op.create_index(
+                f"ix_evaluation_target_snapshots_{column_name}", "evaluation_target_snapshots", [column_name]
+            )
 
     if "evaluation_runs" not in existing:
         op.create_table(
