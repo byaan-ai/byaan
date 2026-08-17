@@ -12,6 +12,7 @@ from uuid import UUID
 
 from agents.run_context import RunContextWrapper
 from fastapi import HTTPException
+from pydantic import ValidationError
 from sqlalchemy import select
 
 from server.auth.scopes import Scope, get_scopes_for_role, has_scope
@@ -43,6 +44,10 @@ MCP_EVALUATION_DEFAULT_LIMIT = 20
 MCP_EVALUATION_MAX_LIMIT = 50
 MCP_DASHBOARD_DEFAULT_LIMIT = 20
 MCP_DASHBOARD_MAX_LIMIT = 50
+MCP_SOURCE_DEFAULT_LIMIT = 50
+MCP_SOURCE_MAX_LIMIT = 100
+MCP_SEMANTIC_DEFAULT_LIMIT = 50
+MCP_SEMANTIC_MAX_LIMIT = 100
 
 
 def _json_error(error: Exception | str, *, operation: str | None = None) -> str:
@@ -70,6 +75,26 @@ def _json_success(**payload: Any) -> str:
     return json.dumps({"success": True, **payload}, ensure_ascii=False, default=str)
 
 
+def _parse_json_object(payload_json: str, *, operation: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail=f"{operation} payload must be valid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=f"{operation} payload must be a JSON object")
+    return payload
+
+
+def _value_error_to_http(error: ValueError) -> HTTPException:
+    message = str(error)
+    code = 404 if "not found" in message.lower() else 400
+    return HTTPException(status_code=code, detail=message)
+
+
+def _validation_error_to_http(operation: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=f"Invalid {operation} payload")
+
+
 def _stable_feedback_case_key(feedback: dict[str, Any]) -> str:
     if feedback.get("case_key"):
         return str(feedback["case_key"])
@@ -80,7 +105,7 @@ def _stable_feedback_case_key(feedback: dict[str, Any]) -> str:
     return f"mcp-feedback-{digest}"
 
 
-async def _require_mcp_dashboard_scope(db_session, tenant_id: UUID, user_id: UUID, scope: Scope) -> TenantRole:
+async def _mcp_role_and_scopes(db_session, tenant_id: UUID, user_id: UUID) -> tuple[TenantRole, list[str]]:
     tenant = await db_session.get(Tenant, tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
@@ -92,13 +117,32 @@ async def _require_mcp_dashboard_scope(db_session, tenant_id: UUID, user_id: UUI
         if not membership:
             raise HTTPException(status_code=403, detail="MCP principal is not a tenant member")
         role = TenantRole(membership.role)
-    if not has_scope(get_scopes_for_role(role), scope):
+    return role, get_scopes_for_role(role)
+
+
+async def _require_mcp_scope(db_session, tenant_id: UUID, user_id: UUID, scope: Scope) -> TenantRole:
+    role, scopes = await _mcp_role_and_scopes(db_session, tenant_id, user_id)
+    if not has_scope(scopes, scope):
         raise HTTPException(status_code=403, detail=f"Permission denied. Required scope: {scope.value}")
     return role
 
 
+async def _require_mcp_any_scope(db_session, tenant_id: UUID, user_id: UUID, *required_scopes: Scope) -> TenantRole:
+    role, scopes = await _mcp_role_and_scopes(db_session, tenant_id, user_id)
+    if not any(has_scope(scopes, scope) for scope in required_scopes):
+        required = ", ".join(scope.value for scope in required_scopes)
+        raise HTTPException(status_code=403, detail=f"Permission denied. Required one of: {required}")
+    return role
+
+
+async def _require_mcp_dashboard_scope(db_session, tenant_id: UUID, user_id: UUID, scope: Scope) -> TenantRole:
+    return await _require_mcp_scope(db_session, tenant_id, user_id, scope)
+
+
 async def _assert_mcp_notebook_access(db_session, tenant_id: UUID, user_id: UUID, notebook_id: UUID) -> None:
-    notebook = await db_session.scalar(select(Notebook).where(Notebook.id == notebook_id, Notebook.tenant_id == tenant_id))
+    notebook = await db_session.scalar(
+        select(Notebook).where(Notebook.id == notebook_id, Notebook.tenant_id == tenant_id)
+    )
     if not notebook:
         raise HTTPException(status_code=404, detail="Notebook not found")
     role = await _require_mcp_dashboard_scope(db_session, tenant_id, user_id, Scope.DASHBOARD_SHARE)
@@ -1431,6 +1475,508 @@ async def create_custom_skill_wrapper(
         return json.dumps({"success": False, "error": str(e)})
 
 
+async def list_connector_definitions_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    provider: str = "",
+    category: str = "",
+    include_planned: bool = True,
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_connections import SourceConnectionService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+        catalog = SourceConnectionService().list_connector_definitions()
+        items = list(catalog["items"])
+        if provider:
+            items = [item for item in items if item.get("provider") == provider or item.get("id") == provider]
+        if category:
+            items = [item for item in items if item.get("category") == category]
+        if not include_planned:
+            items = [item for item in items if item.get("availability") != "planned"]
+        limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+        return _json_success(
+            items=sanitize_error_payload(items[:limit]),
+            total=len(items),
+            has_more=len(items) > limit,
+            summary=catalog["summary"],
+            commercial_status="PARTIAL",
+            runtime_status="not_certified",
+        )
+    except Exception as e:
+        logger.error(f"Error in list_connector_definitions_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_connector_definitions")
+
+
+async def create_source_connection_wrapper(
+    connection_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.source_connections import SourceConnectionCreate
+        from server.services.source_connections import SourceConnectionService
+
+        try:
+            payload = SourceConnectionCreate.model_validate(
+                _parse_json_object(connection_json, operation="create_source_connection")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("source connection")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.CONNECTION_CREATE)
+            service = SourceConnectionService()
+            connection = await service.create_connection(
+                session=session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                payload=payload,
+            )
+            return _json_success(
+                connection=sanitize_error_payload(service.connection_payload(connection)),
+                commercial_status="PARTIAL",
+                runtime_status="not_certified",
+            )
+    except ValueError as e:
+        logger.error(f"Error in create_source_connection_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="create_source_connection")
+    except Exception as e:
+        logger.error(f"Error in create_source_connection_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_source_connection")
+
+
+async def list_source_connections_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    provider: str = "",
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_connections import SourceConnectionService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_scope(session, tenant_id, user_id, Scope.CONNECTION_READ)
+            service = SourceConnectionService()
+            connections = await service.list_connections(
+                session=session,
+                tenant_id=tenant_id,
+                provider=provider or None,
+                user_id=user_id,
+                include_all=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+            items = [service.connection_payload(connection) for connection in connections]
+            return _json_success(
+                items=sanitize_error_payload(items[:limit]),
+                total=len(items),
+                has_more=len(items) > limit,
+            )
+    except Exception as e:
+        logger.error(f"Error in list_source_connections_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_source_connections")
+
+
+async def disconnect_source_connection_wrapper(
+    connection_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.services.source_connections import SourceConnectionService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_any_scope(
+                session,
+                tenant_id,
+                user_id,
+                Scope.CONNECTION_DELETE,
+                Scope.CONNECTION_DELETE_OWN,
+            )
+            ok, resource_count = await SourceConnectionService().delete_connection(
+                session=session,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                user_id=user_id,
+                include_all=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            if not ok:
+                raise HTTPException(status_code=404, detail="Source connection not found")
+            return _json_success(disconnected=True, affected_resource_count=resource_count)
+    except Exception as e:
+        logger.error(f"Error in disconnect_source_connection_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="disconnect_source_connection")
+
+
+async def create_source_resource_wrapper(
+    resource_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.source_resources import SourceResourceCreate
+        from server.services.source_resources import SourceResourceService
+
+        try:
+            payload = SourceResourceCreate.model_validate(
+                _parse_json_object(resource_json, operation="create_source_resource")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("source resource")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_CREATE)
+            resource = await SourceResourceService().create_resource(
+                session=session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                payload=payload,
+                include_all_connections=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            return _json_success(resource=sanitize_error_payload(resource), commercial_status="PARTIAL")
+    except ValueError as e:
+        logger.error(f"Error in create_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="create_source_resource")
+    except Exception as e:
+        logger.error(f"Error in create_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_source_resource")
+
+
+async def list_source_resources_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    query: str = "",
+    resource_type: str = "",
+    status: str = "",
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_resources import SourceResourceService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            items = await SourceResourceService().list_resources(session=session, tenant_id=tenant_id)
+            query_lower = query.lower().strip()
+            if query_lower:
+                items = [
+                    item
+                    for item in items
+                    if query_lower in str(item.get("name") or "").lower()
+                    or query_lower in str(item.get("external_id") or "").lower()
+                    or query_lower in str(item.get("source_url") or "").lower()
+                ]
+            if resource_type:
+                items = [item for item in items if item.get("resource_type") == resource_type]
+            if status:
+                items = [item for item in items if item.get("status") == status]
+            limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+            return _json_success(
+                items=sanitize_error_payload(items[:limit]),
+                total=len(items),
+                has_more=len(items) > limit,
+            )
+    except Exception as e:
+        logger.error(f"Error in list_source_resources_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_source_resources")
+
+
+async def describe_source_resource_wrapper(
+    resource_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_snapshots: bool = True,
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_resources import SourceResourceService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            service = SourceResourceService()
+            resource = await service.get_resource(session=session, tenant_id=tenant_id, resource_id=resource_id)
+            if resource is None:
+                raise HTTPException(status_code=404, detail="Source resource not found")
+            payload = await service.resource_payload(session=session, resource=resource)
+            response: dict[str, Any] = {"resource": sanitize_error_payload(payload)}
+            if include_snapshots:
+                snapshots = await service.list_snapshots(session=session, tenant_id=tenant_id, resource_id=resource_id)
+                limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+                items = list(snapshots["items"])
+                response["snapshots"] = {
+                    "items": sanitize_error_payload(items[:limit]),
+                    "total": len(items),
+                    "has_more": len(items) > limit,
+                }
+            return _json_success(**response)
+    except ValueError as e:
+        logger.error(f"Error in describe_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="describe_source_resource")
+    except Exception as e:
+        logger.error(f"Error in describe_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_source_resource")
+
+
+async def sync_source_resource_wrapper(
+    resource_id: str,
+    sync_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.source_resources import SourceResourceSyncRequest
+        from server.services.source_resources import SourceResourceService
+
+        try:
+            payload = SourceResourceSyncRequest.model_validate(
+                _parse_json_object(sync_json, operation="sync_source_resource")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("source resource sync")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_any_scope(
+                session,
+                tenant_id,
+                user_id,
+                Scope.DATASET_UPDATE,
+                Scope.DATASET_UPDATE_OWN,
+            )
+            resource = await SourceResourceService().sync_resource(
+                session=session,
+                tenant_id=tenant_id,
+                resource_id=resource_id,
+                payload=payload,
+                user_id=user_id,
+                include_all=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            return _json_success(resource=sanitize_error_payload(resource), commercial_status="PARTIAL")
+    except PermissionError as e:
+        logger.error(f"Error in sync_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=403, detail=str(e)), operation="sync_source_resource")
+    except ValueError as e:
+        logger.error(f"Error in sync_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="sync_source_resource")
+    except Exception as e:
+        logger.error(f"Error in sync_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="sync_source_resource")
+
+
+async def list_semantic_models_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    query: str = "",
+    status: str = "",
+    limit: int = MCP_SEMANTIC_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            items = await SemanticModelService.list_models(session=session, tenant_id=tenant_id)
+            query_lower = query.lower().strip()
+            if query_lower:
+                items = [
+                    item
+                    for item in items
+                    if query_lower in str(item.get("slug") or "").lower()
+                    or query_lower in str(item.get("name") or "").lower()
+                    or query_lower in str(item.get("domain") or "").lower()
+                ]
+            if status:
+                items = [item for item in items if item.get("status") == status]
+            limit = max(1, min(limit, MCP_SEMANTIC_MAX_LIMIT))
+            return _json_success(
+                items=sanitize_error_payload(items[:limit]),
+                total=len(items),
+                has_more=len(items) > limit,
+                commercial_status="PARTIAL",
+                runtime_status="not_certified",
+            )
+    except Exception as e:
+        logger.error(f"Error in list_semantic_models_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_semantic_models")
+
+
+async def describe_semantic_model_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            model = await SemanticModelService.get_model(session=session, tenant_id=tenant_id, slug=model_slug)
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except Exception as e:
+        logger.error(f"Error in describe_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_semantic_model")
+
+
+async def create_semantic_model_wrapper(model_json: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.schemas.semantic_models import SemanticModelCreate
+        from server.services.semantic_model_service import SemanticModelService
+
+        try:
+            payload = SemanticModelCreate.model_validate(
+                _parse_json_object(model_json, operation="create_semantic_model")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("semantic model")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_CREATE)
+            model = await SemanticModelService.create_model(
+                session=session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                payload=payload,
+            )
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except ValueError as e:
+        logger.error(f"Error in create_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="create_semantic_model")
+    except Exception as e:
+        logger.error(f"Error in create_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_semantic_model")
+
+
+async def _assert_mcp_semantic_model_mutation_allowed(
+    session,
+    tenant_id: UUID,
+    user_id: UUID,
+    model_slug: str,
+) -> None:
+    from server.services.semantic_model_service import SemanticModelService
+
+    role = await _require_mcp_any_scope(session, tenant_id, user_id, Scope.DATASET_UPDATE, Scope.DATASET_UPDATE_OWN)
+    if role in {TenantRole.OWNER, TenantRole.ADMIN}:
+        return
+    model = await SemanticModelService.get_model(session=session, tenant_id=tenant_id, slug=model_slug)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Semantic model not found")
+    if str(model.created_by) != str(user_id):
+        raise HTTPException(status_code=403, detail="MCP principal can only update semantic models they created")
+
+
+async def update_semantic_model_wrapper(
+    model_slug: str,
+    patch_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.semantic_models import SemanticModelPatch
+        from server.services.semantic_model_service import SemanticModelService
+
+        try:
+            payload = SemanticModelPatch.model_validate(
+                _parse_json_object(patch_json, operation="update_semantic_model")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("semantic model patch")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _assert_mcp_semantic_model_mutation_allowed(session, tenant_id, user_id, model_slug)
+            model = await SemanticModelService.update_model(
+                session=session,
+                tenant_id=tenant_id,
+                slug=model_slug,
+                user_id=user_id,
+                payload=payload,
+            )
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except RuntimeError as e:
+        logger.error(f"Error in update_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=409, detail=str(e)), operation="update_semantic_model")
+    except ValueError as e:
+        logger.error(f"Error in update_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="update_semantic_model")
+    except Exception as e:
+        logger.error(f"Error in update_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="update_semantic_model")
+
+
+async def validate_semantic_model_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _assert_mcp_semantic_model_mutation_allowed(session, tenant_id, user_id, model_slug)
+            model = await SemanticModelService.validate_model(
+                session=session,
+                tenant_id=tenant_id,
+                slug=model_slug,
+                user_id=user_id,
+            )
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(
+                model=sanitize_error_payload(SemanticModelService.model_to_payload(model)),
+                commercial_status="PARTIAL",
+                runtime_status="not_certified",
+            )
+    except Exception as e:
+        logger.error(f"Error in validate_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="validate_semantic_model")
+
+
+async def publish_semantic_model_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_UPDATE)
+            model = await SemanticModelService.publish_model(session=session, tenant_id=tenant_id, slug=model_slug)
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except RuntimeError as e:
+        logger.error(f"Error in publish_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=409, detail=str(e)), operation="publish_semantic_model")
+    except Exception as e:
+        logger.error(f"Error in publish_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="publish_semantic_model")
+
+
+async def query_semantic_metric_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.QUERY_EXECUTE)
+            model = await SemanticModelService.query_metric(session=session, tenant_id=tenant_id, slug=model_slug)
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except RuntimeError as e:
+        logger.error(f"Error in query_semantic_metric_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=409, detail=str(e)), operation="query_semantic_metric")
+    except Exception as e:
+        logger.error(f"Error in query_semantic_metric_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="query_semantic_metric")
+
+
 async def list_sharing_grants_wrapper(
     tenant_id: UUID,
     user_id: UUID,
@@ -1762,7 +2308,9 @@ async def create_advisor_change_set_wrapper(
 
         set_tenant_id(tenant_id)
         async with AsyncSessionFactory() as session:
-            change_set, suggestions, created = await EvaluationService(session).create_advisor_change_set_from_skill_suggestion(
+            change_set, suggestions, created = await EvaluationService(
+                session
+            ).create_advisor_change_set_from_skill_suggestion(
                 tenant_id=tenant_id,
                 suggestion_id=UUID(skill_suggestion_id),
                 suite_version_id=UUID(suite_version_id) if suite_version_id else None,
@@ -1885,7 +2433,9 @@ async def _select_dashboard_version(
     if version == "draft":
         if not asset.current_draft_version_id:
             return None
-        return await repo.get_asset_version(tenant_id=tenant_id, asset_id=asset.id, version_id=asset.current_draft_version_id)
+        return await repo.get_asset_version(
+            tenant_id=tenant_id, asset_id=asset.id, version_id=asset.current_draft_version_id
+        )
     return await repo.get_asset_version_by_num(tenant_id=tenant_id, asset_id=asset.id, version_num=int(version))
 
 
@@ -1945,7 +2495,9 @@ async def describe_dashboard_wrapper(
             selected_version = await _select_dashboard_version(repo, tenant_id, asset, version)
             return _json_success(
                 dashboard=_asset_compact(asset),
-                version=_version_compact(selected_version, include_manifest=detail != "compact") if selected_version else None,
+                version=_version_compact(selected_version, include_manifest=detail != "compact")
+                if selected_version
+                else None,
             )
     except Exception as e:
         logger.error(f"Error in describe_dashboard_wrapper: {e}", exc_info=True)

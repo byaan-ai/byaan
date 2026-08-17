@@ -17,12 +17,18 @@ from server.mcp.tool_wrappers import (
     create_custom_skill_wrapper,
     create_dashboard_draft_wrapper,
     create_evaluation_case_draft_wrapper,
+    create_semantic_model_wrapper,
+    create_source_connection_wrapper,
+    create_source_resource_wrapper,
     dashboard_search_replace_wrapper,
     define_dashboard_filters_wrapper,
     describe_dashboard_wrapper,
     describe_evaluation_failure_wrapper,
     describe_evaluation_suite_wrapper,
+    describe_semantic_model_wrapper,
     describe_sharing_grant_wrapper,
+    describe_source_resource_wrapper,
+    disconnect_source_connection_wrapper,
     emit_plan_status_wrapper,
     ensure_notebook_exists,
     execute_duckdb_query_wrapper,
@@ -42,13 +48,19 @@ from server.mcp.tool_wrappers import (
     get_skill_definition_wrapper,
     get_user_instructions_wrapper,
     get_user_style_guidelines_wrapper,
+    list_connector_definitions_wrapper,
     list_evaluation_cases_wrapper,
+    list_semantic_models_wrapper,
     list_sharing_grants_wrapper,
+    list_source_connections_wrapper,
+    list_source_resources_wrapper,
     patch_dashboard_draft_wrapper,
     preview_dashboard_wrapper,
     preview_evaluation_ground_truth_wrapper,
     publish_dashboard_wrapper,
+    publish_semantic_model_wrapper,
     query_dashboard_wrapper,
+    query_semantic_metric_wrapper,
     remove_dashboard_filter_wrapper,
     remove_learning_wrapper,
     run_advisor_gate_wrapper,
@@ -64,10 +76,13 @@ from server.mcp.tool_wrappers import (
     search_learnings_wrapper,
     start_html_generation_wrapper,
     submit_evaluation_feedback_wrapper,
+    sync_source_resource_wrapper,
     update_custom_skill_wrapper,
     update_dashboard_filter_wrapper,
     update_learning_wrapper,
+    update_semantic_model_wrapper,
     validate_dashboard_wrapper,
+    validate_semantic_model_wrapper,
 )
 from server.utils.custom_logger import get_logger
 
@@ -171,6 +186,176 @@ def register_all_tools(mcp: FastMCP, get_or_create_session_func):
         return await get_dataset_schema_by_id_wrapper(
             dataset_id, session["tenant_id"], session["user_id"], session["notebook_id"], session["session_id"]
         )
+
+    # Source Connector Control-Plane Tools
+    @mcp.tool()
+    async def list_connector_definitions(
+        provider: str = "",
+        category: str = "",
+        include_planned: bool = True,
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """
+        List official Source connector definitions and readiness gates.
+
+        All official connector definitions are beta or planned in this landing;
+        runtime execution and production credentials are not certified.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_connector_definitions_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            provider,
+            category,
+            include_planned,
+            limit,
+        )
+
+    @mcp.tool()
+    async def create_source_connection(connection_json: str, context: Context = None) -> str:
+        """
+        Create a beta Source connection from a JSON payload.
+
+        Credentials are encrypted server-side and never returned. This registers
+        control-plane metadata only; no live connector runtime is invoked.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_source_connection_wrapper(connection_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def list_source_connections(provider: str = "", limit: int = 50, context: Context = None) -> str:
+        """List beta Source connections visible to the MCP principal, with credentials redacted."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_source_connections_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            provider,
+            limit,
+        )
+
+    @mcp.tool()
+    async def disconnect_source_connection(connection_id: str, context: Context = None) -> str:
+        """Disconnect a Source connection without exposing or deleting stored credentials in the response."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await disconnect_source_connection_wrapper(connection_id, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def create_source_resource(resource_json: str, context: Context = None) -> str:
+        """
+        Register a governed Source resource from a JSON payload.
+
+        Optional caller-supplied content creates immutable snapshot metadata; no
+        external connector runtime, crawler, parser worker, or object storage sync is invoked.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_source_resource_wrapper(resource_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def list_source_resources(
+        query: str = "",
+        resource_type: str = "",
+        status: str = "",
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """List governed Source resources and latest snapshot metadata for the current tenant."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_source_resources_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            query,
+            resource_type,
+            status,
+            limit,
+        )
+
+    @mcp.tool()
+    async def describe_source_resource(
+        resource_id: str,
+        include_snapshots: bool = True,
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """Describe a Source resource, its connection metadata, and immutable snapshot evidence."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_source_resource_wrapper(
+            resource_id,
+            session["tenant_id"],
+            session["user_id"],
+            include_snapshots,
+            limit,
+        )
+
+    @mcp.tool()
+    async def sync_source_resource(resource_id: str, sync_json: str, context: Context = None) -> str:
+        """
+        Record caller-supplied content as a new Source snapshot.
+
+        This is a beta control-plane sync surface. It does not run external connector
+        runtime code or fetch remote data.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await sync_source_resource_wrapper(resource_id, sync_json, session["tenant_id"], session["user_id"])
+
+    # Semantic Modeling Beta Tools
+    @mcp.tool()
+    async def list_semantic_models(
+        query: str = "",
+        status: str = "",
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """List beta semantic models and readiness summaries for the current tenant."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_semantic_models_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            query,
+            status,
+            limit,
+        )
+
+    @mcp.tool()
+    async def describe_semantic_model(model_slug: str, context: Context = None) -> str:
+        """Describe a beta semantic model, manifest, Source provenance, and readiness blockers."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_semantic_model_wrapper(model_slug, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def create_semantic_model(model_json: str, context: Context = None) -> str:
+        """Create a beta semantic model from a semantic.model.v1beta JSON payload."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_semantic_model_wrapper(model_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def update_semantic_model(model_slug: str, patch_json: str, context: Context = None) -> str:
+        """Patch a beta semantic model using an expected_revision guard."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await update_semantic_model_wrapper(model_slug, patch_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def validate_semantic_model(model_slug: str, context: Context = None) -> str:
+        """Validate beta semantic model readiness. Result remains PARTIAL until runtime certification."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await validate_semantic_model_wrapper(model_slug, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def publish_semantic_model(model_slug: str, context: Context = None) -> str:
+        """Attempt semantic model publish. Official beta blocks publish with a 409-style error."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await publish_semantic_model_wrapper(model_slug, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def query_semantic_metric(
+        model_slug: str,
+        metric_name: str = "",
+        filters_json: str = "{}",
+        context: Context = None,
+    ) -> str:
+        """Attempt semantic metric execution. Official beta blocks query execution."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await query_semantic_metric_wrapper(model_slug, session["tenant_id"], session["user_id"])
 
     # Query Execution Tools
     @mcp.tool()
