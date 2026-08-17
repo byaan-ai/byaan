@@ -5,6 +5,7 @@ These wrappers adapt Byaan's internal tools (which use RunContextWrapper)
 to work with FastMCP's tool protocol.
 """
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -14,6 +15,7 @@ from agents.run_context import RunContextWrapper
 from server.auth.tenant_context import set_tenant_id
 from server.db.session import AsyncSessionFactory
 from server.utils.custom_logger import get_logger
+from server.utils.error_sanitizer import sanitize_error_message, sanitize_error_payload
 
 if TYPE_CHECKING:
     from server.mcp.session_manager import MCPSessionManager
@@ -27,6 +29,30 @@ LEARNING_HINT = (
 )
 
 _session_manager: "MCPSessionManager | None" = None
+
+MCP_EVALUATION_DEFAULT_LIMIT = 20
+MCP_EVALUATION_MAX_LIMIT = 50
+
+
+def _json_error(error: Exception | str, *, operation: str | None = None) -> str:
+    payload = {"success": False, "error": sanitize_error_message(error)}
+    if operation:
+        payload["operation"] = operation
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _json_success(**payload: Any) -> str:
+    return json.dumps({"success": True, **payload}, ensure_ascii=False, default=str)
+
+
+def _stable_feedback_case_key(feedback: dict[str, Any]) -> str:
+    if feedback.get("case_key"):
+        return str(feedback["case_key"])
+    feedback_id = feedback.get("feedback_id") or feedback.get("trace_id")
+    if feedback_id:
+        return f"mcp-feedback-{feedback_id}"
+    digest = hashlib.sha256(json.dumps(feedback, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    return f"mcp-feedback-{digest}"
 
 
 def set_session_manager(manager: "MCPSessionManager") -> None:
@@ -1290,3 +1316,394 @@ async def describe_sharing_grant_wrapper(grant_id: str, tenant_id: UUID, user_id
     except Exception as e:
         logger.error(f"Error in describe_sharing_grant_wrapper: {e}", exc_info=True)
         return json.dumps({"success": False, "error": str(e)})
+
+
+async def search_evaluation_suites_wrapper(
+    query: str,
+    target_kind: str,
+    status: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_suite_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            suites = await EvaluationService(session).list_suites(
+                tenant_id=tenant_id,
+                query=query,
+                target_kind=target_kind,
+                status=status,
+                limit=max(1, min(limit, MCP_EVALUATION_MAX_LIMIT)),
+            )
+        return _json_success(items=[evaluation_suite_payload(suite) for suite in suites], total=len(suites))
+    except Exception as e:
+        logger.error(f"Error in search_evaluation_suites_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="search_evaluation_suites")
+
+
+async def describe_evaluation_suite_wrapper(
+    suite_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_manifests: bool = False,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_suite_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            suite, versions = await EvaluationService(session).describe_suite(
+                tenant_id=tenant_id,
+                suite_id=UUID(suite_id),
+            )
+        return _json_success(
+            suite=evaluation_suite_payload(
+                suite,
+                versions=versions,
+                include_versions=True,
+                include_manifests=include_manifests,
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error in describe_evaluation_suite_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_evaluation_suite")
+
+
+async def list_evaluation_cases_wrapper(
+    suite_version_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_expected_contract: bool = False,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            cases = await EvaluationService(session).list_cases(
+                tenant_id=tenant_id,
+                suite_version_id=UUID(suite_version_id),
+            )
+        limit = max(1, min(limit, MCP_EVALUATION_MAX_LIMIT))
+        return _json_success(
+            items=[
+                evaluation_case_payload(case, include_expected_contract=include_expected_contract)
+                for case in cases[:limit]
+            ],
+            total=len(cases),
+            has_more=len(cases) > limit,
+        )
+    except Exception as e:
+        logger.error(f"Error in list_evaluation_cases_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_evaluation_cases")
+
+
+async def create_evaluation_case_draft_wrapper(
+    suite_version_id: str,
+    case_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_payload
+        from server.services.evaluation import EvaluationService
+
+        payload = json.loads(case_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("case_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            case, created = await EvaluationService(session).create_case_draft(
+                tenant_id=tenant_id,
+                suite_version_id=UUID(suite_version_id),
+                case_key=str(payload["case_key"]),
+                title=str(payload.get("title") or payload["case_key"]),
+                target_kinds=list(payload.get("target_kinds") or []),
+                operation=str(payload.get("operation") or "answer_question"),
+                question=str(payload["question"]),
+                expected_contract=dict(payload.get("expected_contract") or {}),
+                provenance=dict(payload.get("provenance") or {"source": "manual"}),
+                tags=[str(tag) for tag in payload.get("tags") or []],
+                actor_id=str(user_id),
+                actor_type="agent",
+            )
+        return _json_success(case=evaluation_case_payload(case), created=created)
+    except Exception as e:
+        logger.error(f"Error in create_evaluation_case_draft_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_evaluation_case_draft")
+
+
+async def preview_evaluation_ground_truth_wrapper(
+    expected_contract_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.evaluation import EvaluationExpectedContract
+
+        payload = json.loads(expected_contract_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("expected_contract_json must be a JSON object")
+        expected = EvaluationExpectedContract.model_validate(payload)
+        ground_truth = expected.ground_truth_sql
+        if ground_truth is None:
+            return _json_success(ground_truth={"present": False, "readonly": None})
+        return _json_success(
+            ground_truth={
+                "present": True,
+                "readonly": True,
+                "dialect": ground_truth.dialect,
+                "must_reference": ground_truth.must_reference,
+                "must_not_reference": ground_truth.must_not_reference,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in preview_evaluation_ground_truth_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="preview_evaluation_ground_truth")
+
+
+async def run_evaluation_wrapper(
+    suite_version_id: str,
+    target_snapshot_json: str,
+    idempotency_key: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        payload = json.loads(target_snapshot_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("target_snapshot_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            run = await EvaluationService(session).create_preflight_run(
+                tenant_id=tenant_id,
+                suite_version_id=UUID(suite_version_id),
+                target_snapshot_payload=payload,
+                actor_id=str(user_id),
+                idempotency_key=idempotency_key or None,
+                actor_type="agent",
+            )
+        return _json_success(run=evaluation_run_payload(run))
+    except Exception as e:
+        logger.error(f"Error in run_evaluation_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="run_evaluation")
+
+
+async def get_evaluation_run_wrapper(
+    run_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_case_results: bool = True,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_run_payload, evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            run, case_runs = await EvaluationService(session).get_run_report(
+                tenant_id=tenant_id,
+                run_id=UUID(run_id),
+            )
+        limit = max(1, min(limit, MCP_EVALUATION_MAX_LIMIT))
+        payload: dict[str, Any] = {"run": evaluation_run_payload(run)}
+        if include_case_results:
+            payload["case_runs"] = [
+                evaluation_case_run_payload(case_run, assessments=assessments)
+                for case_run, assessments in case_runs[:limit]
+            ]
+            payload["has_more_case_runs"] = len(case_runs) > limit
+        return _json_success(**payload)
+    except Exception as e:
+        logger.error(f"Error in get_evaluation_run_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="get_evaluation_run")
+
+
+async def compare_evaluation_runs_wrapper(
+    baseline_run_id: str,
+    candidate_run_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            comparison = await EvaluationService(session).compare_runs(
+                tenant_id=tenant_id,
+                baseline_run_id=UUID(baseline_run_id),
+                candidate_run_id=UUID(candidate_run_id),
+            )
+        return _json_success(comparison=sanitize_error_payload(comparison))
+    except Exception as e:
+        logger.error(f"Error in compare_evaluation_runs_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="compare_evaluation_runs")
+
+
+async def describe_evaluation_failure_wrapper(
+    run_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_run_payload, evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            run, case_runs = await EvaluationService(session).get_run_report(
+                tenant_id=tenant_id,
+                run_id=UUID(run_id),
+            )
+        failures = []
+        for case_run, assessments in case_runs:
+            failed_assessments = [
+                assessment for assessment in assessments if assessment.status != "passed" or assessment.hard_fail
+            ]
+            if case_run.status != "passed" or failed_assessments:
+                failures.append(evaluation_case_run_payload(case_run, assessments=failed_assessments))
+        limit = max(1, min(limit, MCP_EVALUATION_MAX_LIMIT))
+        return _json_success(
+            run=evaluation_run_payload(run),
+            failures=failures[:limit],
+            total=len(failures),
+            has_more=len(failures) > limit,
+        )
+    except Exception as e:
+        logger.error(f"Error in describe_evaluation_failure_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_evaluation_failure")
+
+
+async def create_advisor_change_set_wrapper(
+    skill_suggestion_id: str,
+    suite_version_id: str,
+    affected_case_ids: list[str] | None,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import advisor_change_set_payload, advisor_suggestion_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            change_set, suggestions, created = await EvaluationService(session).create_advisor_change_set_from_skill_suggestion(
+                tenant_id=tenant_id,
+                suggestion_id=UUID(skill_suggestion_id),
+                suite_version_id=UUID(suite_version_id) if suite_version_id else None,
+                affected_case_ids=[UUID(case_id) for case_id in affected_case_ids or []],
+                actor_id=str(user_id),
+            )
+        return _json_success(
+            change_set=advisor_change_set_payload(change_set),
+            advisor_suggestions=[advisor_suggestion_payload(suggestion) for suggestion in suggestions],
+            created=created,
+        )
+    except Exception as e:
+        logger.error(f"Error in create_advisor_change_set_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_advisor_change_set")
+
+
+async def run_advisor_gate_wrapper(
+    change_set_id: str,
+    target_snapshot_json: str,
+    gate_kind: str,
+    idempotency_key: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import advisor_change_set_payload, evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        payload = json.loads(target_snapshot_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("target_snapshot_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            change_set, run = await EvaluationService(session).create_advisor_gate_run(
+                tenant_id=tenant_id,
+                change_set_id=UUID(change_set_id),
+                gate_kind=gate_kind,
+                target_snapshot_payload=payload,
+                actor_id=str(user_id),
+                idempotency_key=idempotency_key or None,
+            )
+        return _json_success(change_set=advisor_change_set_payload(change_set), run=evaluation_run_payload(run))
+    except Exception as e:
+        logger.error(f"Error in run_advisor_gate_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation=f"run_advisor_{gate_kind}")
+
+
+async def submit_evaluation_feedback_wrapper(
+    suite_version_id: str,
+    feedback_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_payload
+        from server.services.evaluation import EvaluationService
+
+        feedback = json.loads(feedback_json or "{}")
+        if not isinstance(feedback, dict):
+            raise ValueError("feedback_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            service = EvaluationService(session)
+            legacy_id = feedback.get("legacy_conversation_evaluation_id") or feedback.get("conversation_evaluation_id")
+            if legacy_id:
+                case, created = await service.promote_conversation_evaluation_to_case_draft(
+                    tenant_id=tenant_id,
+                    evaluation_id=UUID(str(legacy_id)),
+                    suite_version_id=UUID(suite_version_id),
+                    question=feedback.get("question"),
+                    tags=list(feedback.get("tags") or []),
+                    actor_id=str(user_id),
+                )
+            else:
+                description = str(feedback.get("description") or "")
+                expected_contract = dict(feedback.get("expected_contract") or {})
+                if not expected_contract:
+                    expected_contract = {
+                        "semantic_intent": {"description": description},
+                        "answer": {"must_include_any": list(feedback.get("must_include_any") or [])},
+                    }
+                case, created = await service.create_case_draft(
+                    tenant_id=tenant_id,
+                    suite_version_id=UUID(suite_version_id),
+                    case_key=_stable_feedback_case_key(feedback),
+                    title=str(feedback.get("title") or description or "MCP evaluation feedback")[:255],
+                    target_kinds=list(feedback.get("target_kinds") or ["agent_answer"]),
+                    operation=str(feedback.get("operation") or "answer_question"),
+                    question=str(feedback.get("question") or description or "Review feedback regression"),
+                    expected_contract=expected_contract,
+                    provenance=sanitize_error_payload(
+                        {
+                            "source": feedback.get("source") or "human_feedback",
+                            "feedback_id": feedback.get("feedback_id"),
+                            "trace_id": feedback.get("trace_id"),
+                            "principal": feedback.get("principal") or {},
+                        }
+                    ),
+                    tags=[str(tag) for tag in feedback.get("tags") or []],
+                    actor_id=str(user_id),
+                    actor_type="agent",
+                )
+        return _json_success(case=evaluation_case_payload(case), created=created)
+    except Exception as e:
+        logger.error(f"Error in submit_evaluation_feedback_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="submit_evaluation_feedback")

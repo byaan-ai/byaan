@@ -57,6 +57,7 @@ from server.routers import datasets as datasets_router  # Dataset management
 from server.routers import (
     datasources as datasources_router,
 )  # Unified datasources (connections + datasets)
+from server.routers import evaluation as evaluation_router
 from server.routers import exports as exports_router
 from server.routers import (
     file_upload as file_upload_router,
@@ -583,6 +584,7 @@ app.include_router(codex_oauth_router.router, tags=["codex-oauth"])
 app.include_router(exports_router.router, prefix="/api", tags=["exports"])
 
 app.include_router(imports_router.router, prefix="/api", tags=["imports"])
+app.include_router(evaluation_router.router, prefix="/api", tags=["evaluation"])
 
 app.include_router(user_preferences_router.router, prefix="/api", tags=["user-preferences"])
 app.include_router(learnings_router.router, prefix="/api", tags=["learnings"])
