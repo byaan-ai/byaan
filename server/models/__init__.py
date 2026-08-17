@@ -37,6 +37,7 @@ from server.models.queries import Query
 from server.models.query_cache import QueryCache
 from server.models.refresh_token import RefreshToken
 from server.models.schedules import Schedule, ScheduleRun
+from server.models.semantic_models import SemanticModel, SemanticModelAuditEvent, SemanticModelVersion
 from server.models.settings import Setting
 from server.models.sharing import (
     SharingAuditEvent,
@@ -110,6 +111,9 @@ __all__ = [
     "PromotionDecision",
     "Schedule",
     "ScheduleRun",
+    "SemanticModel",
+    "SemanticModelAuditEvent",
+    "SemanticModelVersion",
     "Setting",
     "SharingAuditEvent",
     "SharingCompatibilityLink",

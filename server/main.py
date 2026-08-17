@@ -75,6 +75,7 @@ from server.routers import queries as queries_router
 from server.routers import raw_query as raw_query_router
 from server.routers import schedules as schedules_router
 from server.routers import scopes as scopes_router
+from server.routers import semantic_models as semantic_models_router
 from server.routers import settings as settings_router
 from server.routers import sharing as sharing_router
 from server.routers import skill_loop as skill_loop_router
@@ -591,6 +592,7 @@ app.include_router(dashboard_router.router, prefix="/api", tags=["dashboard"])
 app.include_router(evaluation_router.router, prefix="/api", tags=["evaluation"])
 app.include_router(source_connections_router.router, prefix="/api", tags=["source-connections"])
 app.include_router(source_resources_router.router, prefix="/api", tags=["source-resources"])
+app.include_router(semantic_models_router.router, prefix="/api", tags=["semantic-models"])
 
 app.include_router(user_preferences_router.router, prefix="/api", tags=["user-preferences"])
 app.include_router(learnings_router.router, prefix="/api", tags=["learnings"])
