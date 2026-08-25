@@ -44,6 +44,7 @@ class SlackWorkspaceRepository:
         bot_user_id: str | None,
         signing_secret_encrypted: str,
         default_llm_connection_id: UUID | None = None,
+        default_model: str | None = None,
         installed_by: UUID | None = None,
     ) -> SlackWorkspace:
         """Create a new Slack workspace."""
@@ -55,6 +56,7 @@ class SlackWorkspaceRepository:
             bot_user_id=bot_user_id,
             signing_secret_encrypted=signing_secret_encrypted,
             default_llm_connection_id=default_llm_connection_id,
+            default_model=default_model,
             installed_by=installed_by,
         )
         self._session.add(workspace)
