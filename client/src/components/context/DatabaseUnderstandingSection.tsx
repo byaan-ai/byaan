@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/select';
 import { useDatasources } from '@/hooks/useDBConnections';
 import { useScopes } from '@/hooks/useScopes';
-import { ApiService, type DatabaseSchemaResponse, type DatabaseTable, type DatabaseColumn, type MongoCollection } from '@/services/api';
+import { ApiService, type DatabaseSchemaResponse, type DatabaseTable, type DatabaseColumn, type MongoCollection, isMultiDatabaseSchema } from '@/services/api';
 import { showToast } from '@/utils/toast';
 import { useAppConfig } from '@/hooks/useAppConfig';
 import { isTauriApp } from '@/lib/tauri-api';
@@ -102,19 +102,20 @@ export const DatabaseUnderstandingSection: React.FC<DatabaseUnderstandingSection
   const schema = selectedDatasourceId ? datasourceSchemas[selectedDatasourceId] : null;
 
   const effectiveSchema = propsSchema || schema;
-  const effectiveType = propsType || selectedDatasource?.database_type;
+  const singleEffectiveSchema = effectiveSchema && !isMultiDatabaseSchema(effectiveSchema) ? effectiveSchema : null;
+  const effectiveType = propsType || selectedDatasource?.database_type || selectedDatasource?.db_type || selectedDatasource?.type;
 
   const filteredTables = useMemo(() => {
-    if (!effectiveSchema?.schema) return [];
+    if (!singleEffectiveSchema?.schema) return [];
 
-    const entries = Object.entries(effectiveSchema.schema);
+    const entries = Object.entries(singleEffectiveSchema.schema);
     if (!searchQuery.trim()) return entries;
 
     const query = searchQuery.toLowerCase();
     return entries.filter(([tableName]) =>
       tableName.toLowerCase().includes(query)
     );
-  }, [effectiveSchema, searchQuery]);
+  }, [singleEffectiveSchema, searchQuery]);
 
   useEffect(() => {
     if (enableSelector && datasources.length > 0 && !selectedDatasourceId && !propsSchema) {
@@ -640,11 +641,12 @@ export const DatabaseUnderstandingSection: React.FC<DatabaseUnderstandingSection
       )}
 
       {/* Tables */}
-      {effectiveSchema && !loadingSchema && (
+      {singleEffectiveSchema && !loadingSchema && (
         <div className={compact ? "max-h-96 overflow-y-auto space-y-3" : "space-y-3"}>
           {filteredTables.length > 0 ? (
             filteredTables.map(([tableName, tableData]) => {
-              const table = tableData as DatabaseTable;
+              const typedTableData = tableData as DatabaseTable | MongoCollection;
+              const table = typedTableData as DatabaseTable;
               const userAnnotation = getUserAnnotations(tableName);
               const tableDescription = userAnnotation?.semanticDescription || '';
               const isExpanded = expandedTables.has(tableName);
@@ -664,8 +666,8 @@ export const DatabaseUnderstandingSection: React.FC<DatabaseUnderstandingSection
                   )}
                   <h4 className="text-sm font-mono font-semibold text-white">{tableName}</h4>
                   <span className="text-xs text-gray-500">
-                    {isMongoCollection(tableData)
-                      ? `${tableData.sample_fields?.length || 0} fields`
+                    {isMongoCollection(typedTableData)
+                      ? `${typedTableData.sample_fields?.length || 0} fields`
                       : `${table.columns?.length || 0} columns`}
                   </span>
                 </button>
@@ -737,17 +739,17 @@ export const DatabaseUnderstandingSection: React.FC<DatabaseUnderstandingSection
             {/* Columns / Fields */}
             {isExpanded && (
             <div className={`space-y-1.5 ${userAnnotation?.redacted ? 'opacity-40' : ''}`}>
-              {isMongoCollection(tableData) ? (
+              {isMongoCollection(typedTableData) ? (
                 <>
                   <div className="flex items-center gap-2 mb-2">
                     <div className="h-px flex-1 bg-gray-800" />
                     <span className="text-[10px] text-gray-500 uppercase tracking-wider">
-                      {tableData.sample_fields.length} fields
+                      {typedTableData.sample_fields.length} fields
                     </span>
                     <div className="h-px flex-1 bg-gray-800" />
                   </div>
 
-                  {tableData.sample_fields.map((fieldName: string) => {
+                  {typedTableData.sample_fields.map((fieldName: string) => {
                     const userColumnAnnotation = userAnnotation?.columns.find(c => c.name === fieldName);
                     const annotation = userColumnAnnotation?.annotation || '';
                     const isRedacted = userColumnAnnotation?.redacted || false;

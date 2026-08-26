@@ -3,6 +3,7 @@
 declare global {
   interface Window {
     __TAURI__?: any;
+    __TAURI_INTERNALS__?: unknown;
   }
 }
 
@@ -18,7 +19,7 @@ export const getBackendPort = async (): Promise<number> => {
   }
 
   try {
-    const invokeFn = window.__TAURI__?.core?.invoke
+    const invokeFn: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> = window.__TAURI__?.core?.invoke
       ? window.__TAURI__.core.invoke
       : (await import("@tauri-apps/api/core")).invoke;
 

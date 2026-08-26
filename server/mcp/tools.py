@@ -4,6 +4,7 @@ MCP tool registrations for FastMCP.
 This file registers all Byaan tools as MCP tools with proper authentication and session handling.
 """
 
+import json
 from uuid import UUID
 
 from fastmcp import Context, FastMCP
@@ -11,9 +12,23 @@ from fastmcp import Context, FastMCP
 from server.mcp.tool_wrappers import (
     add_learning_wrapper,
     apply_html_patch_wrapper,
+    compare_evaluation_runs_wrapper,
+    create_advisor_change_set_wrapper,
     create_custom_skill_wrapper,
+    create_dashboard_draft_wrapper,
+    create_evaluation_case_draft_wrapper,
+    create_semantic_model_wrapper,
+    create_source_connection_wrapper,
+    create_source_resource_wrapper,
     dashboard_search_replace_wrapper,
     define_dashboard_filters_wrapper,
+    describe_dashboard_wrapper,
+    describe_evaluation_failure_wrapper,
+    describe_evaluation_suite_wrapper,
+    describe_semantic_model_wrapper,
+    describe_sharing_grant_wrapper,
+    describe_source_resource_wrapper,
+    disconnect_source_connection_wrapper,
     emit_plan_status_wrapper,
     ensure_notebook_exists,
     execute_duckdb_query_wrapper,
@@ -22,27 +37,52 @@ from server.mcp.tool_wrappers import (
     execute_sql_query_wrapper,
     get_chart_styling_wrapper,
     get_dashboard_filter_config_wrapper,
+    get_dashboard_lineage_wrapper,
+    get_dashboard_state_wrapper,
     get_database_schema_wrapper,
     get_dataset_schema_by_id_wrapper,
+    get_evaluation_run_wrapper,
     get_existing_html_wrapper,
     get_filter_options_wrapper,
     get_learning_wrapper,
     get_skill_definition_wrapper,
     get_user_instructions_wrapper,
     get_user_style_guidelines_wrapper,
+    list_connector_definitions_wrapper,
+    list_evaluation_cases_wrapper,
+    list_semantic_models_wrapper,
+    list_sharing_grants_wrapper,
+    list_source_connections_wrapper,
+    list_source_resources_wrapper,
+    patch_dashboard_draft_wrapper,
+    preview_dashboard_wrapper,
+    preview_evaluation_ground_truth_wrapper,
+    publish_dashboard_wrapper,
+    publish_semantic_model_wrapper,
+    query_dashboard_wrapper,
+    query_semantic_metric_wrapper,
     remove_dashboard_filter_wrapper,
     remove_learning_wrapper,
+    run_advisor_gate_wrapper,
+    run_evaluation_wrapper,
     save_query_wrapper,
     save_skill_query_wrapper,
     saved_query_schema_wrapper,
+    search_dashboards_wrapper,
     search_datasets_wrapper,
     search_enabled_skills_wrapper,
+    search_evaluation_suites_wrapper,
     search_instructions_wrapper,
     search_learnings_wrapper,
     start_html_generation_wrapper,
+    submit_evaluation_feedback_wrapper,
+    sync_source_resource_wrapper,
     update_custom_skill_wrapper,
     update_dashboard_filter_wrapper,
     update_learning_wrapper,
+    update_semantic_model_wrapper,
+    validate_dashboard_wrapper,
+    validate_semantic_model_wrapper,
 )
 from server.utils.custom_logger import get_logger
 
@@ -146,6 +186,176 @@ def register_all_tools(mcp: FastMCP, get_or_create_session_func):
         return await get_dataset_schema_by_id_wrapper(
             dataset_id, session["tenant_id"], session["user_id"], session["notebook_id"], session["session_id"]
         )
+
+    # Source Connector Control-Plane Tools
+    @mcp.tool()
+    async def list_connector_definitions(
+        provider: str = "",
+        category: str = "",
+        include_planned: bool = True,
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """
+        List official Source connector definitions and readiness gates.
+
+        All official connector definitions are beta or planned in this landing;
+        runtime execution and production credentials are not certified.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_connector_definitions_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            provider,
+            category,
+            include_planned,
+            limit,
+        )
+
+    @mcp.tool()
+    async def create_source_connection(connection_json: str, context: Context = None) -> str:
+        """
+        Create a beta Source connection from a JSON payload.
+
+        Credentials are encrypted server-side and never returned. This registers
+        control-plane metadata only; no live connector runtime is invoked.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_source_connection_wrapper(connection_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def list_source_connections(provider: str = "", limit: int = 50, context: Context = None) -> str:
+        """List beta Source connections visible to the MCP principal, with credentials redacted."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_source_connections_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            provider,
+            limit,
+        )
+
+    @mcp.tool()
+    async def disconnect_source_connection(connection_id: str, context: Context = None) -> str:
+        """Disconnect a Source connection without exposing or deleting stored credentials in the response."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await disconnect_source_connection_wrapper(connection_id, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def create_source_resource(resource_json: str, context: Context = None) -> str:
+        """
+        Register a governed Source resource from a JSON payload.
+
+        Optional caller-supplied content creates immutable snapshot metadata; no
+        external connector runtime, crawler, parser worker, or object storage sync is invoked.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_source_resource_wrapper(resource_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def list_source_resources(
+        query: str = "",
+        resource_type: str = "",
+        status: str = "",
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """List governed Source resources and latest snapshot metadata for the current tenant."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_source_resources_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            query,
+            resource_type,
+            status,
+            limit,
+        )
+
+    @mcp.tool()
+    async def describe_source_resource(
+        resource_id: str,
+        include_snapshots: bool = True,
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """Describe a Source resource, its connection metadata, and immutable snapshot evidence."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_source_resource_wrapper(
+            resource_id,
+            session["tenant_id"],
+            session["user_id"],
+            include_snapshots,
+            limit,
+        )
+
+    @mcp.tool()
+    async def sync_source_resource(resource_id: str, sync_json: str, context: Context = None) -> str:
+        """
+        Record caller-supplied content as a new Source snapshot.
+
+        This is a beta control-plane sync surface. It does not run external connector
+        runtime code or fetch remote data.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await sync_source_resource_wrapper(resource_id, sync_json, session["tenant_id"], session["user_id"])
+
+    # Semantic Modeling Beta Tools
+    @mcp.tool()
+    async def list_semantic_models(
+        query: str = "",
+        status: str = "",
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """List beta semantic models and readiness summaries for the current tenant."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_semantic_models_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            query,
+            status,
+            limit,
+        )
+
+    @mcp.tool()
+    async def describe_semantic_model(model_slug: str, context: Context = None) -> str:
+        """Describe a beta semantic model, manifest, Source provenance, and readiness blockers."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_semantic_model_wrapper(model_slug, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def create_semantic_model(model_json: str, context: Context = None) -> str:
+        """Create a beta semantic model from a semantic.model.v1beta JSON payload."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_semantic_model_wrapper(model_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def update_semantic_model(model_slug: str, patch_json: str, context: Context = None) -> str:
+        """Patch a beta semantic model using an expected_revision guard."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await update_semantic_model_wrapper(model_slug, patch_json, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def validate_semantic_model(model_slug: str, context: Context = None) -> str:
+        """Validate beta semantic model readiness. Result remains PARTIAL until runtime certification."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await validate_semantic_model_wrapper(model_slug, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def publish_semantic_model(model_slug: str, context: Context = None) -> str:
+        """Attempt semantic model publish. Official beta blocks publish with a 409-style error."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await publish_semantic_model_wrapper(model_slug, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def query_semantic_metric(
+        model_slug: str,
+        metric_name: str = "",
+        filters_json: str = "{}",
+        context: Context = None,
+    ) -> str:
+        """Attempt semantic metric execution. Official beta blocks query execution."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await query_semantic_metric_wrapper(model_slug, session["tenant_id"], session["user_id"])
 
     # Query Execution Tools
     @mcp.tool()
@@ -270,6 +480,175 @@ def register_all_tools(mcp: FastMCP, get_or_create_session_func):
             return '{"success": false, "error": "No notebook context available"}'
         return await dashboard_search_replace_wrapper(
             diff_content, session["tenant_id"], session["user_id"], session["notebook_id"]
+        )
+
+    # Governed Dashboard Tools
+    @mcp.tool()
+    async def search_dashboards(
+        query: str = "",
+        tags: list[str] | None = None,
+        status: str = "",
+        freshness: str = "",
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Search governed Dashboard assets by text, tags, lifecycle status, or freshness."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await search_dashboards_wrapper(
+            query,
+            tags,
+            status,
+            freshness,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def describe_dashboard(
+        dashboard_id: str,
+        version: str = "published",
+        detail: str = "compact",
+        context: Context = None,
+    ) -> str:
+        """Describe a governed Dashboard asset and selected manifest version."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_dashboard_wrapper(
+            dashboard_id,
+            version,
+            detail,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def query_dashboard(
+        dashboard_id: str,
+        data_view_ids: list[str] | None = None,
+        filters_json: str = "{}",
+        cursor: str = "",
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Query governed Dashboard data views. Accepts data_view_ids, not raw saved query IDs."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        filters = json.loads(filters_json or "{}")
+        return await query_dashboard_wrapper(
+            dashboard_id,
+            data_view_ids,
+            filters,
+            cursor,
+            limit,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def get_dashboard_state(
+        dashboard_id: str,
+        filters_json: str = "{}",
+        data_view_ids: list[str] | None = None,
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Return compact governed Dashboard state for selected data views."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await get_dashboard_state_wrapper(
+            dashboard_id,
+            filters_json,
+            data_view_ids,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def get_dashboard_lineage(dashboard_id: str, tile_id: str = "", context: Context = None) -> str:
+        """Return Dashboard lineage for the published version, optionally scoped to a tile."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await get_dashboard_lineage_wrapper(dashboard_id, tile_id, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def create_dashboard_draft(
+        slug: str,
+        notebook_id: str,
+        manifest_json: str,
+        description: str = "",
+        tags: list[str] | None = None,
+        context: Context = None,
+    ) -> str:
+        """Create a governed Dashboard draft from a dashboard.manifest.v1 JSON payload."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_dashboard_draft_wrapper(
+            slug,
+            notebook_id,
+            manifest_json,
+            session["tenant_id"],
+            session["user_id"],
+            description,
+            tags,
+        )
+
+    @mcp.tool()
+    async def patch_dashboard_draft(
+        dashboard_id: str,
+        base_etag: str,
+        json_patch: str,
+        change_summary: str = "Patch dashboard draft from MCP",
+        context: Context = None,
+    ) -> str:
+        """Patch a governed Dashboard draft with allowlisted JSON Patch and optimistic ETag."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await patch_dashboard_draft_wrapper(
+            dashboard_id,
+            base_etag,
+            json_patch,
+            change_summary,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def validate_dashboard(dashboard_id: str, context: Context = None) -> str:
+        """Validate the current Dashboard draft and return blockers/warnings."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await validate_dashboard_wrapper(dashboard_id, session["tenant_id"], session["user_id"])
+
+    @mcp.tool()
+    async def preview_dashboard(
+        dashboard_id: str,
+        filters_json: str = "{}",
+        data_view_ids: list[str] | None = None,
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """Preview the current governed Dashboard draft."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        filters = json.loads(filters_json or "{}")
+        return await preview_dashboard_wrapper(
+            dashboard_id,
+            filters,
+            data_view_ids,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def publish_dashboard(
+        dashboard_id: str,
+        base_etag: str,
+        change_summary: str = "Publish dashboard from MCP",
+        context: Context = None,
+    ) -> str:
+        """Publish a validated governed Dashboard draft."""
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await publish_dashboard_wrapper(
+            dashboard_id,
+            base_etag,
+            change_summary,
+            session["tenant_id"],
+            session["user_id"],
         )
 
     # Configuration Tools
@@ -477,6 +856,255 @@ def register_all_tools(mcp: FastMCP, get_or_create_session_func):
         session = await extract_session_from_context(get_or_create_session_func, context)
         return await remove_learning_wrapper(
             learning_id, session["tenant_id"], session["user_id"], session["notebook_id"]
+        )
+
+    # Sharing Read Tools
+    @mcp.tool()
+    async def list_sharing_grants(
+        object_type: str | None = None,
+        object_id: str | None = None,
+        legacy_surface: str | None = None,
+        status: str | None = None,
+        limit: int = 50,
+        context: Context = None,
+    ) -> str:
+        """
+        List canonical sharing grants visible in the current workspace.
+
+        Values are redacted before they are returned. Use legacy_surface to inspect
+        compatibility-backed shares such as folder_notebook, folder_dashboard,
+        html_notebook_share, or json_notebook_share.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_sharing_grants_wrapper(
+            session["tenant_id"],
+            session["user_id"],
+            object_type=object_type,
+            object_id=object_id,
+            legacy_surface=legacy_surface,
+            status=status,
+            limit=limit,
+        )
+
+    @mcp.tool()
+    async def describe_sharing_grant(grant_id: str, context: Context = None) -> str:
+        """
+        Describe one canonical sharing grant, including redacted compatibility,
+        secret-count, viewer-session, and audit evidence.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_sharing_grant_wrapper(grant_id, session["tenant_id"], session["user_id"])
+
+    # Evaluation Governance Tools
+    @mcp.tool()
+    async def search_evaluation_suites(
+        query: str = "",
+        target_kind: str = "",
+        status: str = "",
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """
+        Search Evaluation suites by text, target kind, or lifecycle status.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await search_evaluation_suites_wrapper(
+            query,
+            target_kind,
+            status,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def describe_evaluation_suite(
+        suite_id: str,
+        include_manifests: bool = False,
+        context: Context = None,
+    ) -> str:
+        """
+        Describe an Evaluation suite, versions, gate policy, and optional manifests.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_evaluation_suite_wrapper(
+            suite_id,
+            session["tenant_id"],
+            session["user_id"],
+            include_manifests,
+        )
+
+    @mcp.tool()
+    async def list_evaluation_cases(
+        suite_version_id: str,
+        include_expected_contract: bool = False,
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """
+        List Evaluation cases for a suite version. Expected contracts are omitted unless requested.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await list_evaluation_cases_wrapper(
+            suite_version_id,
+            session["tenant_id"],
+            session["user_id"],
+            include_expected_contract,
+            limit,
+        )
+
+    @mcp.tool()
+    async def create_evaluation_case_draft(
+        suite_version_id: str,
+        case_json: str,
+        context: Context = None,
+    ) -> str:
+        """
+        Create an Evaluation case draft from a JSON case payload. Published suite versions remain immutable.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_evaluation_case_draft_wrapper(
+            suite_version_id,
+            case_json,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def preview_evaluation_ground_truth(expected_contract_json: str, context: Context = None) -> str:
+        """
+        Validate ground-truth SQL as read-only and return redacted preview metadata.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await preview_evaluation_ground_truth_wrapper(
+            expected_contract_json,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def run_evaluation(
+        suite_version_id: str,
+        target_snapshot_json: str,
+        idempotency_key: str = "",
+        context: Context = None,
+    ) -> str:
+        """
+        Create a DB-backed Evaluation run preflight for a pinned target snapshot.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await run_evaluation_wrapper(
+            suite_version_id,
+            target_snapshot_json,
+            idempotency_key,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def get_evaluation_run(
+        run_id: str,
+        include_case_results: bool = True,
+        limit: int = 20,
+        context: Context = None,
+    ) -> str:
+        """
+        Get an Evaluation run report, including redacted case results and assessments.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await get_evaluation_run_wrapper(
+            run_id,
+            session["tenant_id"],
+            session["user_id"],
+            include_case_results,
+            limit,
+        )
+
+    @mcp.tool()
+    async def compare_evaluation_runs(
+        baseline_run_id: str,
+        candidate_run_id: str,
+        context: Context = None,
+    ) -> str:
+        """
+        Compare baseline and candidate Evaluation runs and surface regressions first.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await compare_evaluation_runs_wrapper(
+            baseline_run_id,
+            candidate_run_id,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def describe_evaluation_failure(run_id: str, limit: int = 20, context: Context = None) -> str:
+        """
+        Return failed case runs and hard-fail assessments for an Evaluation run.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await describe_evaluation_failure_wrapper(
+            run_id,
+            session["tenant_id"],
+            session["user_id"],
+            limit,
+        )
+
+    @mcp.tool()
+    async def create_advisor_change_set(
+        skill_suggestion_id: str,
+        suite_version_id: str = "",
+        affected_case_ids: list[str] | None = None,
+        context: Context = None,
+    ) -> str:
+        """
+        Convert a skill suggestion into a draft Evaluation advisor change set.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await create_advisor_change_set_wrapper(
+            skill_suggestion_id,
+            suite_version_id,
+            affected_case_ids,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def run_advisor_gate(
+        change_set_id: str,
+        target_snapshot_json: str,
+        gate_kind: str,
+        idempotency_key: str = "",
+        context: Context = None,
+    ) -> str:
+        """
+        Queue an advisor verification or regression Evaluation run.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await run_advisor_gate_wrapper(
+            change_set_id,
+            target_snapshot_json,
+            gate_kind,
+            idempotency_key,
+            session["tenant_id"],
+            session["user_id"],
+        )
+
+    @mcp.tool()
+    async def submit_evaluation_feedback(
+        suite_version_id: str,
+        feedback_json: str,
+        context: Context = None,
+    ) -> str:
+        """
+        Submit redacted feedback into Evaluation as a reviewed draft case.
+        """
+        session = await extract_session_from_context(get_or_create_session_func, context)
+        return await submit_evaluation_feedback_wrapper(
+            suite_version_id,
+            feedback_json,
+            session["tenant_id"],
+            session["user_id"],
         )
 
     # Plan Tools

@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { ChevronDown, Copy, Play, Database, Leaf, Save, Search, Sparkles } from "lucide-react"
+import type { LucideIcon } from "lucide-react"
 import { Button } from "./ui/button"
 import { CodeHighlight } from "./CodeHighlight"
 import { Tooltip } from "./ui/tooltip"
@@ -128,7 +129,16 @@ interface SkillMetadata {
   is_graphql?: boolean
 }
 
-const getToolConfig = (toolName: string, skillMetadata?: SkillMetadata) => {
+interface ToolConfig {
+  icon: LucideIcon
+  label: string
+  color: string
+  borderColor: string
+  bgColor: string
+  emoji?: string
+}
+
+const getToolConfig = (toolName: string, skillMetadata?: SkillMetadata): ToolConfig => {
   if (toolName === 'execute_skill_api' && skillMetadata?.skill_name) {
     const apiType = skillMetadata.is_graphql ? 'GraphQL' : 'REST'
     return {
@@ -151,10 +161,10 @@ const getToolConfig = (toolName: string, skillMetadata?: SkillMetadata) => {
 
 export function ToolCallCard({ tool_name, description, arguments: args, onCodeInject }: ToolCallCardProps) {
   const hasDescription = description && description.trim().length > 0
-  const hasArguments = args && (
+  const hasArguments = Boolean(args && (
     typeof args === 'string' ? args.trim().length > 0 :
     typeof args === 'object' ? Object.keys(args).length > 0 : false
-  )
+  ))
 
   const isSkillApi = tool_name === 'execute_skill_api'
   const isQueryTool = ['execute_sql_query', 'execute_mongo_query', 'execute_duckdb_query', 'save_query'].includes(tool_name)
@@ -209,7 +219,7 @@ export function ToolCallCard({ tool_name, description, arguments: args, onCodeIn
     ? String(parsedArgs.connection_id || parsedArgs.dataset_id)
     : undefined
 
-  let queryLanguage = 'sql'
+  let queryLanguage: 'sql' | 'javascript' = 'sql'
   if (tool_name === 'execute_sql_query' || tool_name === 'execute_duckdb_query') {
     queryLanguage = 'sql'
   } else if (tool_name === 'execute_mongo_query') {
@@ -254,9 +264,9 @@ export function ToolCallCard({ tool_name, description, arguments: args, onCodeIn
       >
         <div className="flex items-center gap-2 min-w-0 flex-1">
           {'emoji' in toolConfig && toolConfig.emoji ? (
-            <span className="w-3 h-3 flex-shrink-0 text-xs leading-none">{toolConfig.emoji}</span>
+            <span className="w-3 h-3 flex-shrink-0 text-xs leading-none">{String(toolConfig.emoji)}</span>
           ) : (
-            <IconComponent className={`w-3 h-3 flex-shrink-0 ${toolConfig.color}`} />
+            <IconComponent className={`w-3 h-3 flex-shrink-0 ${String(toolConfig.color)}`} />
           )}
 
           <span className={`

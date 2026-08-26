@@ -63,8 +63,6 @@ export const ErrorLogModal: React.FC<ErrorLogModalProps> = ({ errors, onClearErr
         return 'JS Error'
       case 'unhandledRejection':
         return 'Promise'
-      case 'console':
-        return 'Console'
       default:
         return 'Unknown'
     }

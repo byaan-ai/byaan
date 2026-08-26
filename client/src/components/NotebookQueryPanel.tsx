@@ -46,6 +46,7 @@ interface ConnectionConfig {
   password: string
   connectionString: string
   file_path?: string
+  dataset_type?: string
 }
 
 interface QueryResult {
@@ -80,7 +81,7 @@ export function NotebookQueryPanel({ notebookId, initialQuery, initialQueryVersi
   const querySavedTrigger = useStore(state => state.querySavedTrigger)
   const notebookDatasourcesChangedTrigger = useStore(state => state.notebookDatasourcesChangedTrigger)
   const selectedConnectionIdRef = useRef<string | null>(null)
-  const previousNotebookIdRef = useRef<string | undefined>()
+  const previousNotebookIdRef = useRef<string | undefined>(undefined)
   const injectedRetryKeyRef = useRef<string | null>(null)
 
   const [allNotebookConnections, setAllNotebookConnections] = useState<any[]>([])
@@ -403,7 +404,7 @@ export function NotebookQueryPanel({ notebookId, initialQuery, initialQueryVersi
         )
       )
 
-      setNotebookConnection(prev => {
+      setNotebookConnection((prev: any) => {
         if (prev?.id === selectedConnectionId) {
           return {
             ...prev,

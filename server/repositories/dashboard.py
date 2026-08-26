@@ -4,7 +4,7 @@ from uuid import UUID
 
 from sqlalchemy import desc, func, select, update
 
-from server.models.dashboard import Dashboard
+from server.models.dashboard import Dashboard, DashboardAsset, DashboardAuditEvent
 from server.repositories.base import AsyncCRUDRepository
 
 
@@ -68,3 +68,92 @@ class DashboardRepository(AsyncCRUDRepository[Dashboard]):
         result = await self._session.execute(query)
         await self._session.commit()
         return result.scalar_one()
+
+    async def get_asset(self, asset_id: str | UUID, tenant_id: str | UUID) -> DashboardAsset | None:
+        result = await self._session.execute(
+            select(DashboardAsset).where(DashboardAsset.id == asset_id, DashboardAsset.tenant_id == tenant_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_asset_by_slug(self, tenant_id: str | UUID, slug: str) -> DashboardAsset | None:
+        result = await self._session.execute(
+            select(DashboardAsset).where(DashboardAsset.tenant_id == tenant_id, DashboardAsset.slug == slug)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_assets(self, tenant_id: str | UUID, limit: int = 100) -> list[DashboardAsset]:
+        result = await self._session.execute(
+            select(DashboardAsset)
+            .where(DashboardAsset.tenant_id == tenant_id)
+            .order_by(desc(DashboardAsset.updated_at))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_asset_version(
+        self,
+        *,
+        tenant_id: str | UUID,
+        asset_id: str | UUID,
+        version_id: str | UUID,
+    ) -> Dashboard | None:
+        result = await self._session.execute(
+            select(Dashboard).where(
+                Dashboard.tenant_id == tenant_id,
+                Dashboard.asset_id == asset_id,
+                Dashboard.id == version_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_asset_version_by_num(
+        self,
+        *,
+        tenant_id: str | UUID,
+        asset_id: str | UUID,
+        version_num: int,
+    ) -> Dashboard | None:
+        result = await self._session.execute(
+            select(Dashboard).where(
+                Dashboard.tenant_id == tenant_id,
+                Dashboard.asset_id == asset_id,
+                Dashboard.version_num == version_num,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_asset_versions(
+        self,
+        *,
+        tenant_id: str | UUID,
+        asset_id: str | UUID,
+        limit: int = 100,
+    ) -> list[Dashboard]:
+        result = await self._session.execute(
+            select(Dashboard)
+            .where(Dashboard.tenant_id == tenant_id, Dashboard.asset_id == asset_id)
+            .order_by(desc(Dashboard.version_num))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def list_asset_audit_events(
+        self,
+        *,
+        tenant_id: str | UUID,
+        asset_id: str | UUID,
+        limit: int = 100,
+    ) -> list[DashboardAuditEvent]:
+        result = await self._session.execute(
+            select(DashboardAuditEvent)
+            .where(DashboardAuditEvent.tenant_id == tenant_id, DashboardAuditEvent.asset_id == asset_id)
+            .order_by(desc(DashboardAuditEvent.created_at))
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def get_asset_next_version_num(self, asset_id: str | UUID) -> int:
+        query = select(func.max(Dashboard.version_num)).where(Dashboard.asset_id == asset_id)
+        result = await self._session.execute(query)
+        max_version = result.scalar_one_or_none()
+        return (max_version or 0) + 1
