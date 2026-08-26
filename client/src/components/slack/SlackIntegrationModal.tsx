@@ -8,6 +8,7 @@ import { Loader2, Eye, EyeOff, Slack, Trash2, Settings, CheckCircle2, ChevronDow
 import { useLLMConnections } from '@/hooks/useLLMConnections'
 import { useSlackConfig } from '@/hooks/useSlackConfig'
 import { SlackSkillsSection } from './SlackSkillsSection'
+import { ApiService } from '../../services/api'
 
 interface SetupStep {
   id: number
@@ -285,12 +286,17 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
   const [botToken, setBotToken] = useState('')
   const [signingSecret, setSigningSecret] = useState('')
   const [selectedLLMConnection, setSelectedLLMConnection] = useState<string>('')
+  const [selectedModel, setSelectedModel] = useState<string>('')
+  const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string }>>([])
+  const [modelsLoading, setModelsLoading] = useState(false)
+  const [modelsError, setModelsError] = useState<string | null>(null)
   const [showBotToken, setShowBotToken] = useState(false)
   const [showSigningSecret, setShowSigningSecret] = useState(false)
 
   useEffect(() => {
     if (open && slackConfig) {
       setSelectedLLMConnection(slackConfig.default_llm_connection_id || '')
+      setSelectedModel(slackConfig.default_model || '')
     }
   }, [open, slackConfig])
 
@@ -302,33 +308,73 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
     }
   }, [open])
 
-  const isDirty = 
-  (botToken !== MASKED_CREDENTIAL && botToken.trim() !== '') || 
-  (signingSecret !== MASKED_CREDENTIAL && signingSecret.trim() !== '') || 
-  (selectedLLMConnection !== (slackConfig?.default_llm_connection_id || ''));
+  useEffect(() => {
+    let cancelled = false
+    if (!open) return
+    const formVisible = !isConnected || showSettingsForm
+    if (!formVisible) return
+    if (!selectedLLMConnection) {
+      setAvailableModels([])
+      setModelsError(null)
+      return
+    }
+    setModelsLoading(true)
+    setModelsError(null)
+    ApiService.getConnectionModels(selectedLLMConnection)
+      .then((result) => {
+        if (cancelled) return
+        const models = (result.models || []).map((m) => ({ id: m.id, name: m.name }))
+        setAvailableModels(models)
+        if (selectedModel && !models.some((m) => m.id === selectedModel)) {
+          setSelectedModel('')
+        }
+      })
+      .catch((err) => {
+        if (cancelled) return
+        console.error('Failed to load models for connection:', err)
+        setAvailableModels([])
+        setModelsError('Failed to load models for this provider')
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false)
+      })
+    return () => { cancelled = true }
+    // selectedModel intentionally excluded — only refetch when connection or form-visibility changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLLMConnection, open, showSettingsForm, isConnected])
+
+  const isDirty =
+    (botToken !== MASKED_CREDENTIAL && botToken.trim() !== '') ||
+    (signingSecret !== MASKED_CREDENTIAL && signingSecret.trim() !== '') ||
+    (selectedLLMConnection !== (slackConfig?.default_llm_connection_id || '')) ||
+    (selectedModel !== (slackConfig?.default_model || ''))
 
   function resetForm() {
     setBotToken('')
     setSigningSecret('')
     setShowBotToken(false)
     setShowSigningSecret(false)
+    setModelsError(null)
   }
 
   function openEditMode() {
     setBotToken(MASKED_CREDENTIAL)
     setSigningSecret(MASKED_CREDENTIAL)
     setSelectedLLMConnection(slackConfig?.default_llm_connection_id || '')
+    setSelectedModel(slackConfig?.default_model || '')
     setShowSettingsForm(true)
   }
 
   async function handleConnect() {
     if (!botToken.trim() || !signingSecret.trim()) return
+    if (!selectedLLMConnection || !selectedModel) return
 
     try {
       await connect({
         bot_token: botToken.trim(),
         signing_secret: signingSecret.trim(),
-        default_llm_connection_id: selectedLLMConnection || null,
+        default_llm_connection_id: selectedLLMConnection,
+        default_model: selectedModel,
       })
       resetForm()
     } catch (error) {
@@ -337,13 +383,17 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
   }
 
   async function handleUpdateSettings() {
+    if (selectedLLMConnection && !selectedModel) return
+
     try {
       const updates: {
         bot_token?: string
         signing_secret?: string
         default_llm_connection_id?: string | null
+        default_model?: string | null
       } = {
         default_llm_connection_id: selectedLLMConnection || null,
+        default_model: selectedLLMConnection ? selectedModel : null,
       }
 
       if (botToken !== MASKED_CREDENTIAL && botToken.trim()) {
@@ -477,28 +527,70 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
 
               <div className="space-y-2">
                 <Label htmlFor="llmConnection" className="text-gray-300">
-                  Default AI Model
+                  AI Provider (LLM Connection)
                 </Label>
                 <Select
                   value={selectedLLMConnection}
-                  onValueChange={setSelectedLLMConnection}
+                  onValueChange={(val) => {
+                    setSelectedLLMConnection(val)
+                    setSelectedModel('')
+                  }}
                 >
                   <SelectTrigger className="bg-[#2a2a2a] border-gray-700 text-white">
-                    <SelectValue placeholder="Select a model" />
+                    <SelectValue placeholder="Select a provider" />
                   </SelectTrigger>
                   <SelectContent className="bg-[#2a2a2a] border-gray-700">
                     {llmConnections
                       .filter((conn) => conn.id && conn.id.trim() !== '')
                       .map((conn) => (
                       <SelectItem key={conn.id} value={conn.id}>
-                        {conn.name}
+                        {conn.name ? `${conn.name} (${conn.type})` : conn.type}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-gray-500">
-                  Model used for answering Slack questions
+                  Provider used for Slack responses
                 </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="llmModel" className="text-gray-300">
+                  Model
+                </Label>
+                <Select
+                  value={selectedModel}
+                  onValueChange={setSelectedModel}
+                  disabled={!selectedLLMConnection || modelsLoading || availableModels.length === 0}
+                >
+                  <SelectTrigger className="bg-[#2a2a2a] border-gray-700 text-white">
+                    <SelectValue
+                      placeholder={
+                        !selectedLLMConnection
+                          ? 'Select a provider first'
+                          : modelsLoading
+                            ? 'Loading models...'
+                            : availableModels.length === 0
+                              ? 'No models available for this provider'
+                              : 'Select a model'
+                      }
+                    />
+                  </SelectTrigger>
+                  <SelectContent className="bg-[#2a2a2a] border-gray-700">
+                    {availableModels.map((m) => (
+                      <SelectItem key={m.id} value={m.id}>
+                        {m.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {modelsError ? (
+                  <p className="text-xs text-red-400">{modelsError}</p>
+                ) : (
+                  <p className="text-xs text-gray-500">
+                    Exact model used for answering Slack questions
+                  </p>
+                )}
               </div>
             </div>
           </div>
@@ -516,7 +608,7 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
             </Button>
             <Button
               onClick={handleUpdateSettings}
-              disabled={saving || !isDirty}
+              disabled={saving || !isDirty || (!!selectedLLMConnection && !selectedModel)}
               className="bg-brand-orange hover:bg-brand-orange/90 disabled:opacity-50"
             >
               {saving ? (
@@ -558,7 +650,8 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
                     </p>
                     {slackConfig?.default_llm_connection_id && (
                       <p className="text-xs text-gray-400 mt-0.5">
-                        Default Model: {llmConnections.find(c => c.id === slackConfig.default_llm_connection_id)?.name || 'Unknown'}
+                        Provider: {llmConnections.find(c => c.id === slackConfig.default_llm_connection_id)?.name || 'Unknown'}
+                        {slackConfig?.default_model ? ` • Model: ${slackConfig.default_model}` : ' • Model: not set'}
                       </p>
                     )}
                   </div>
@@ -665,28 +758,70 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
 
             <div className="space-y-2">
               <Label htmlFor="llmConnection" className="text-gray-300">
-                Default AI Model
+                AI Provider (LLM Connection)
               </Label>
               <Select
                 value={selectedLLMConnection}
-                onValueChange={setSelectedLLMConnection}
+                onValueChange={(val) => {
+                  setSelectedLLMConnection(val)
+                  setSelectedModel('')
+                }}
               >
                 <SelectTrigger className="bg-[#2a2a2a] border-gray-700 text-white">
-                  <SelectValue placeholder="Select a model" />
+                  <SelectValue placeholder="Select a provider" />
                 </SelectTrigger>
                 <SelectContent className="bg-[#2a2a2a] border-gray-700">
                   {llmConnections
                     .filter((conn) => conn.id && conn.id.trim() !== '')
                     .map((conn) => (
                     <SelectItem key={conn.id} value={conn.id}>
-                      {conn.name}
+                      {conn.name} ({conn.type})
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
               <p className="text-xs text-gray-500">
-                Model used for answering Slack questions
+                Provider used for Slack responses
               </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="llmModel" className="text-gray-300">
+                Model
+              </Label>
+              <Select
+                value={selectedModel}
+                onValueChange={setSelectedModel}
+                disabled={!selectedLLMConnection || modelsLoading || availableModels.length === 0}
+              >
+                <SelectTrigger className="bg-[#2a2a2a] border-gray-700 text-white">
+                  <SelectValue
+                    placeholder={
+                      !selectedLLMConnection
+                        ? 'Select a provider first'
+                        : modelsLoading
+                          ? 'Loading models...'
+                          : availableModels.length === 0
+                            ? 'No models available for this provider'
+                            : 'Select a model'
+                    }
+                  />
+                </SelectTrigger>
+                <SelectContent className="bg-[#2a2a2a] border-gray-700">
+                  {availableModels.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {modelsError ? (
+                <p className="text-xs text-red-400">{modelsError}</p>
+              ) : (
+                <p className="text-xs text-gray-500">
+                  Exact model used for answering Slack questions
+                </p>
+              )}
             </div>
 
           </div>
@@ -702,7 +837,7 @@ export function SlackIntegrationModal({ open, onClose }: SlackIntegrationModalPr
           </Button>
           <Button
             onClick={handleConnect}
-            disabled={saving || !botToken.trim() || !signingSecret.trim()}
+            disabled={saving || !botToken.trim() || !signingSecret.trim() || !selectedLLMConnection || !selectedModel}
             className="bg-brand-orange hover:bg-brand-orange/90"
           >
             {saving ? (

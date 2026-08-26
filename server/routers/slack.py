@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -11,7 +12,9 @@ from starlette.requests import ClientDisconnect
 
 from server.auth.dependencies import AuthContext, require_scope
 from server.auth.scopes import Scope
+from server.constants.models import MODELS_BY_PROVIDER
 from server.db.session import AsyncSessionFactory, get_async_session
+from server.repositories.llm_connections import LLMConnectionRepository
 from server.repositories.slack_workspace import SlackWorkspaceRepository
 from server.schemas.slack import SlackConfigCreate, SlackConfigResponse, SlackConfigUpdate
 from server.schemas.standard_response import success_response
@@ -35,6 +38,79 @@ def _require_slack_enabled():
 
 
 router = APIRouter(prefix="/slack", tags=["slack"], dependencies=[Depends(_require_slack_enabled)])
+
+
+async def _resolve_allowed_models(
+    connection,
+    session: AsyncSession,
+) -> list[str]:
+    """Return the accepted model identifiers for a connection.
+
+    Matches the shape returned by `/llm-connections/{id}/models`:
+    catalog entries are stripped of any `provider/` prefix; Azure and
+    Bedrock use the user-supplied deployment list from the encrypted config.
+    """
+    if connection.type in {"azure", "bedrock"}:
+        if not connection.config:
+            return []
+        try:
+            decrypted = await CryptoService.decrypt_config(connection.config, session)
+        except Exception as exc:
+            logger.warning(f"Failed to decrypt config for connection {connection.id}: {exc}")
+            return []
+        raw = decrypted.get("models", []) if isinstance(decrypted, dict) else []
+        if isinstance(raw, str):
+            return [m.strip() for m in raw.split(",") if m.strip()]
+        if isinstance(raw, list):
+            return [str(m).strip() for m in raw if str(m).strip()]
+        return []
+
+    catalog = MODELS_BY_PROVIDER.get(connection.type, [])
+    return [m.split("/", 1)[1] if "/" in m else m for m in catalog]
+
+
+async def _validate_slack_model_selection(
+    llm_connection_id: UUID | None,
+    default_model: str | None,
+    session: AsyncSession,
+    tenant_id: UUID,
+) -> None:
+    """Enforce that default_model belongs to the chosen connection's provider.
+
+    A connection must be selected before a model can be picked, and the
+    model string must appear in the provider's available list.
+    """
+    if default_model is None:
+        return
+
+    if llm_connection_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot set default_model without a default_llm_connection_id",
+        )
+
+    connection = await LLMConnectionRepository(session).get(llm_connection_id)
+    if not connection or connection.tenant_id != tenant_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="LLM connection not found for this tenant",
+        )
+
+    allowed = await _resolve_allowed_models(connection, session)
+    if not allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No models available for provider '{connection.type}'. Configure models on the connection first.",
+        )
+
+    if default_model not in allowed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Model '{default_model}' is not available for provider '{connection.type}'. "
+                f"Available: {', '.join(allowed)}"
+            ),
+        )
 
 
 @router.post("/events")
@@ -930,6 +1006,13 @@ async def create_slack_config(
             detail="Slack already configured. Use PUT to update or DELETE to remove.",
         )
 
+    await _validate_slack_model_selection(
+        llm_connection_id=payload.default_llm_connection_id,
+        default_model=payload.default_model,
+        session=session,
+        tenant_id=auth.tenant_id,
+    )
+
     slack_client = SlackService(payload.bot_token)
     try:
         bot_info = await slack_client.get_bot_info()
@@ -954,6 +1037,7 @@ async def create_slack_config(
         bot_user_id=bot_user_id,
         signing_secret_encrypted=signing_secret_encrypted,
         default_llm_connection_id=payload.default_llm_connection_id,
+        default_model=payload.default_model,
         installed_by=auth.user_id,
     )
 
@@ -979,16 +1063,26 @@ async def update_slack_config(
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
         return success_response(
-            data=SlackConfigResponse(
-                id=workspace.id,
-                slack_team_id=workspace.slack_team_id,
-                slack_team_name=workspace.slack_team_name,
-                is_active=workspace.is_active,
-                default_llm_connection_id=workspace.default_llm_connection_id,
-                created_at=workspace.created_at,
-            ).model_dump(),
+            data=SlackConfigResponse.model_validate(workspace).model_dump(),
             message="No changes made",
         )
+
+    effective_connection_id = (
+        payload.default_llm_connection_id
+        if "default_llm_connection_id" in updates
+        else workspace.default_llm_connection_id
+    )
+    effective_model = payload.default_model if "default_model" in updates else workspace.default_model
+    if "default_llm_connection_id" in updates and effective_connection_id != workspace.default_llm_connection_id:
+        if "default_model" not in updates:
+            effective_model = None
+            updates["default_model"] = None
+    await _validate_slack_model_selection(
+        llm_connection_id=effective_connection_id,
+        default_model=effective_model,
+        session=session,
+        tenant_id=auth.tenant_id,
+    )
 
     if payload.bot_token:
         slack_client = SlackService(payload.bot_token)

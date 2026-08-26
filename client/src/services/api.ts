@@ -4970,6 +4970,7 @@ export class ApiService {
     slack_team_name: string | null
     is_active: boolean
     default_llm_connection_id: string | null
+    default_model: string | null
     created_at: string
   } | null> {
     try {
@@ -4993,12 +4994,14 @@ export class ApiService {
     bot_token: string
     signing_secret: string
     default_llm_connection_id?: string | null
+    default_model?: string | null
   }): Promise<{
     id: string
     slack_team_id: string
     slack_team_name: string | null
     is_active: boolean
     default_llm_connection_id: string | null
+    default_model: string | null
     created_at: string
   }> {
     const response = await apiFetch(`${API_BASE_URL}/slack/config`, {
@@ -5028,12 +5031,14 @@ export class ApiService {
     bot_token?: string
     signing_secret?: string
     default_llm_connection_id?: string | null
+    default_model?: string | null
   }): Promise<{
     id: string
     slack_team_id: string
     slack_team_name: string | null
     is_active: boolean
     default_llm_connection_id: string | null
+    default_model: string | null
     created_at: string
   }> {
     const response = await apiFetch(`${API_BASE_URL}/slack/config`, {

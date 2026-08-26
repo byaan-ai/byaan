@@ -66,31 +66,43 @@ class SlackAgentService:
         return SLACK_CLASSIFIER_MODEL_BY_PROVIDER.get(connection.type, fallback_model)
 
     @staticmethod
-    async def _resolve_model_for_connection(
-        llm_connection_id: UUID,
+    async def _resolve_model_for_workspace(
+        workspace: SlackWorkspace,
         session: AsyncSession,
-    ) -> str | None:
-        """Resolve the model string for a Slack LLM connection.
+    ) -> str:
+        """Return the model to use for Slack agent responses.
 
-        Order of preference:
-        1. Model stored in connection.config["model"] (user-selected at connection creation)
-        2. First entry in MODELS_BY_PROVIDER for the connection type (latest model)
+        Preference order:
+        1. workspace.default_model — operator's explicit pick in Slack settings.
+        2. Provider catalog head (first entry in MODELS_BY_PROVIDER for the
+           connection's provider) — legacy fallback for workspaces created
+           before the model dropdown existed. Emits a warning so the operator
+           knows to update settings.
         """
-        connection = await LLMConnectionRepository(session).get(llm_connection_id)
+        if not workspace.default_llm_connection_id:
+            raise ValueError("No LLM connection configured for Slack workspace")
+
+        if workspace.default_model:
+            return workspace.default_model
+
+        connection = await LLMConnectionRepository(session).get(workspace.default_llm_connection_id)
         if not connection:
-            return None
+            raise ValueError("Slack workspace's LLM connection no longer exists")
 
-        try:
-            cfg = await CryptoService.decrypt_config(connection.config, session) if connection.config else {}
-        except Exception:
-            cfg = {}
+        catalog = MODELS_BY_PROVIDER.get(connection.type, [])
+        if not catalog:
+            raise ValueError(
+                f"No default_model configured for Slack workspace and provider '{connection.type}' "
+                f"has no catalog fallback. Update Slack integration settings to pick a model."
+            )
 
-        stored_model = cfg.get("model") if isinstance(cfg, dict) else None
-        if stored_model:
-            return stored_model
-
-        provider_models = MODELS_BY_PROVIDER.get(connection.type, [])
-        return provider_models[0] if provider_models else None
+        fallback = catalog[0]
+        stripped = fallback.split("/", 1)[1] if "/" in fallback else fallback
+        logger.warning(
+            f"[SLACK] workspace {workspace.id} has no default_model; falling back to catalog head "
+            f"'{stripped}' for provider '{connection.type}'. Update Slack settings to pick a model explicitly."
+        )
+        return stripped
 
     @staticmethod
     async def process_mention(
@@ -142,10 +154,7 @@ class SlackAgentService:
             )
 
             llm_connection_id = workspace.default_llm_connection_id
-            if not llm_connection_id:
-                raise ValueError("No LLM connection configured for Slack workspace")
-
-            resolved_model = await SlackAgentService._resolve_model_for_connection(llm_connection_id, session)
+            resolved_model = await SlackAgentService._resolve_model_for_workspace(workspace, session)
             logger.info(f"[SLACK] Using model for connection {llm_connection_id}: {resolved_model}")
 
             slack_prompt = await SlackAgentService._build_slack_prompt(
@@ -793,7 +802,7 @@ User's question:
                 await session.commit()
                 return
 
-            resolved_model = await SlackAgentService._resolve_model_for_connection(llm_connection_id, session)
+            resolved_model = await SlackAgentService._resolve_model_for_workspace(workspace, session)
             classifier_model = await SlackAgentService._resolve_classifier_model(
                 llm_connection_id=llm_connection_id,
                 session=session,

@@ -8,6 +8,7 @@ export interface SlackConfig {
   slack_team_name: string | null
   is_active: boolean
   default_llm_connection_id: string | null
+  default_model: string | null
   created_at: string
 }
 
@@ -15,12 +16,14 @@ interface ConnectSlackData {
   bot_token: string
   signing_secret: string
   default_llm_connection_id?: string | null
+  default_model?: string | null
 }
 
 interface UpdateSlackData {
   bot_token?: string
   signing_secret?: string
   default_llm_connection_id?: string | null
+  default_model?: string | null
 }
 
 export function useSlackConfig(enabled = true) {
@@ -53,6 +56,7 @@ export function useSlackConfig(enabled = true) {
         bot_token: data.bot_token,
         signing_secret: data.signing_secret,
         default_llm_connection_id: data.default_llm_connection_id || null,
+        default_model: data.default_model || null,
       })
       setSlackConfig(config)
       return config
@@ -76,6 +80,7 @@ export function useSlackConfig(enabled = true) {
     try {
       const config = await ApiService.updateSlackConfig({
         default_llm_connection_id: data.default_llm_connection_id,
+        default_model: data.default_model,
       })
       setSlackConfig(config)
       return config
