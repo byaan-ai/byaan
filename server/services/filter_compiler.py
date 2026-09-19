@@ -338,15 +338,17 @@ class FilterCompilerService:
     @staticmethod
     def _resolve_operator(spec: dict[str, Any], value: Any) -> str:
         filter_type = str(spec.get("filter_type", "")).lower()
-        if filter_type == "multiselect" or isinstance(value, list):
-            return "in"
         if filter_type in {"date_range", "number_range"}:
+            # Range types must be checked before the generic list->"in" rule so that
+            # [lower, upper] endpoint lists compile to "between" instead of set membership.
             if isinstance(value, list):
                 return "between"
             allowed = [str(op).lower() for op in spec.get("allowed_operators", [])]
             for candidate in ("eq", "gte", "lte", "gt", "lt"):
                 if candidate in allowed:
                     return candidate
+        elif filter_type == "multiselect" or isinstance(value, list):
+            return "in"
         return str(spec.get("default_operator", "eq")).lower()
 
     @staticmethod
@@ -381,6 +383,17 @@ class FilterCompilerService:
         value: Any,
         operator_override: str | None,
     ) -> list[tuple[str, Any, str]]:
+        """
+        Expand one filter_values entry into (operator, value, context_key) tuples.
+
+        Accepted shapes for date_range/number_range filters:
+        - suffixed key (`<id>_start`/`_end`/`_min`/`_max`) -> single gte/lte entry
+        - dict of bounds (`{"min": ..., "max": ...}`) -> gte and/or lte entries; open-ended
+          dicts yield only the bound that is present
+        - two-item list `[lower, upper]` -> one "between" entry; any other list length is
+          rejected during coercion unless empty/all-empty (ignored by the caller)
+        - scalar -> first allowed operator in eq/gte/lte/gt/lt order, then the default
+        """
         filter_type = str(spec.get("filter_type", "")).lower()
 
         if operator_override:
