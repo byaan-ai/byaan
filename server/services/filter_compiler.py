@@ -147,11 +147,10 @@ class FilterCompilerService:
                 if FilterCompilerService._is_empty_filter_value(value):
                     continue
 
-                base_key, operator_override = FilterCompilerService._split_filter_key(filter_key)
-                spec = (
-                    by_id.get(base_key)
-                    or by_alias.get(base_key.lower())
-                    or by_alias.get(FilterCompilerService._canonicalize_filter_lookup_key(base_key))
+                spec, operator_override = FilterCompilerService._resolve_filter_value_spec(
+                    by_id=by_id,
+                    by_alias=by_alias,
+                    filter_key=str(filter_key),
                 )
                 if not spec:
                     raise FilterCompilationError(
@@ -303,6 +302,41 @@ class FilterCompilerService:
                     by_alias[alias] = normalized
 
         return by_id, by_field, by_alias
+
+    @staticmethod
+    def _lookup_spec(
+        by_id: dict[str, dict[str, Any]],
+        by_alias: dict[str, dict[str, Any]],
+        key: str,
+    ) -> dict[str, Any] | None:
+        return (
+            by_id.get(key)
+            or by_alias.get(key.lower())
+            or by_alias.get(FilterCompilerService._canonicalize_filter_lookup_key(key))
+        )
+
+    @staticmethod
+    def _resolve_filter_value_spec(
+        by_id: dict[str, dict[str, Any]],
+        by_alias: dict[str, dict[str, Any]],
+        filter_key: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """
+        Resolve a filter_values key to its contract spec.
+
+        An exactly configured id/alias always wins, so columns named like `period_end` or
+        `score_max` keep their identity. Range suffixes are only treated as operator
+        shorthand (`filter_date_end` -> lte on `filter_date`) when no exact match exists.
+        """
+        exact_spec = FilterCompilerService._lookup_spec(by_id, by_alias, filter_key)
+        if exact_spec:
+            return exact_spec, None
+
+        base_key, operator_override = FilterCompilerService._split_filter_key(filter_key)
+        if not operator_override:
+            return None, None
+
+        return FilterCompilerService._lookup_spec(by_id, by_alias, base_key), operator_override
 
     @staticmethod
     def _split_filter_key(filter_key: str) -> tuple[str, str | None]:

@@ -9,6 +9,7 @@ from server.services import database_operations as database_operations_module
 from server.services import raw_query as raw_query_module
 from server.services.database_operations import DatabaseOperationsService
 from server.services.filter_compiler import FilterCompilationError, FilterCompilerService
+from server.services.filter_config_service import normalize_filter_id
 from server.services.query_service import QueryService
 from server.services.raw_query import AsyncRawQueryService
 
@@ -436,6 +437,175 @@ def test_filter_compiler_rejects_unknown_filter_key() -> None:
         FilterCompilerService.compile_with_contract(
             query_id="query-1",
             filter_values={"filter_not_real": "x"},
+            filter_contract_json=json.dumps(contract),
+        )
+
+
+@pytest.mark.parametrize(
+    ("column_name", "value"),
+    [
+        ("period_start", "Q1"),
+        ("period_end", "Q4"),
+        ("score_min", "Bronze"),
+        ("score_max", "Gold"),
+    ],
+)
+def test_filter_compiler_matches_exact_configured_id_ending_with_range_suffix(column_name: str, value: str) -> None:
+    field_name = f"reports.{column_name}"
+    filter_id = normalize_filter_id(query_id="query-1", field_name=field_name)
+    contract = {
+        "filters": [
+            {
+                "id": filter_id,
+                "field_name": field_name,
+                "display_label": column_name,
+                "filter_type": "select",
+                "data_type": "string",
+                "allowed_operators": ["eq", "ne", "in"],
+                "default_operator": "eq",
+            }
+        ]
+    }
+
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={filter_id: value},
+        filter_contract_json=json.dumps(contract),
+    )
+
+    assert filter_id == f"filter_reports_{column_name}"
+    assert len(compiled) == 1
+    assert compiled[0].field == field_name
+    assert compiled[0].operator == "eq"
+    assert compiled[0].value == value
+
+
+def test_filter_compiler_matches_exact_column_alias_ending_with_range_suffix() -> None:
+    contract = {
+        "filters": [
+            {
+                "id": "auto_895955e0_period_end",
+                "field_name": "reports.period_end",
+                "display_label": "Period End",
+                "filter_type": "select",
+                "data_type": "string",
+                "allowed_operators": ["eq", "ne", "in"],
+                "default_operator": "eq",
+            }
+        ]
+    }
+
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"reports.period_end": "Q4"},
+        filter_contract_json=json.dumps(contract),
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].field == "reports.period_end"
+    assert compiled[0].operator == "eq"
+    assert compiled[0].value == "Q4"
+
+
+def test_filter_compiler_prefers_exact_id_over_base_field_shorthand() -> None:
+    contract = {
+        "filters": [
+            {
+                "id": "filter_period",
+                "field_name": "reports.period",
+                "display_label": "Period",
+                "filter_type": "date_range",
+                "data_type": "date",
+                "allowed_operators": ["between", "gte", "lte", "eq"],
+                "default_operator": "between",
+            },
+            {
+                "id": "filter_period_end",
+                "field_name": "reports.period_end",
+                "display_label": "Period End",
+                "filter_type": "select",
+                "data_type": "string",
+                "allowed_operators": ["eq", "ne", "in"],
+                "default_operator": "eq",
+            },
+        ]
+    }
+
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_period_end": "Q4"},
+        filter_contract_json=json.dumps(contract),
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].field == "reports.period_end"
+    assert compiled[0].operator == "eq"
+    assert compiled[0].value == "Q4"
+
+
+def test_filter_compiler_keeps_range_shorthand_when_only_base_filter_is_configured() -> None:
+    contract = {
+        "filters": [
+            {
+                "id": "filter_created_at",
+                "field_name": "orders.created_at",
+                "display_label": "Created Date",
+                "filter_type": "date_range",
+                "data_type": "date",
+                "allowed_operators": ["between", "gte", "lte", "eq"],
+                "default_operator": "between",
+            },
+            {
+                "id": "filter_amount",
+                "field_name": "orders.amount",
+                "display_label": "Amount",
+                "filter_type": "number_range",
+                "data_type": "number",
+                "allowed_operators": ["between", "gte", "lte", "eq", "gt", "lt"],
+                "default_operator": "between",
+            },
+        ]
+    }
+
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={
+            "filter_created_at_start": "2025-01-01",
+            "filter_created_at_end": "2025-01-31",
+            "filter_amount_min": "10",
+            "filter_amount_max": "20",
+        },
+        filter_contract_json=json.dumps(contract),
+    )
+
+    by_pair = {(item.field, item.operator): item.value for item in compiled}
+
+    assert len(compiled) == 4
+    assert by_pair[("orders.created_at", "gte")] == "2025-01-01"
+    assert by_pair[("orders.created_at", "lte")] == "2025-01-31T23:59:59.999999"
+    assert by_pair[("orders.amount", "gte")] == 10
+    assert by_pair[("orders.amount", "lte")] == 20
+
+
+def test_filter_compiler_rejects_suffixed_key_with_no_exact_or_base_match() -> None:
+    contract = {
+        "filters": [
+            {
+                "id": "filter_status",
+                "field_name": "orders.status",
+                "display_label": "Status",
+                "filter_type": "select",
+                "data_type": "string",
+                "allowed_operators": ["eq"],
+                "default_operator": "eq",
+            }
+        ]
+    }
+
+    with pytest.raises(FilterCompilationError, match="Unknown filter key"):
+        FilterCompilerService.compile_with_contract(
+            query_id="query-1",
+            filter_values={"filter_period_end": "Q4"},
             filter_contract_json=json.dumps(contract),
         )
 
