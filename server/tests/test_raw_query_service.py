@@ -4,9 +4,12 @@ Tests for AsyncRawQueryService — DuckDB literal rendering, parameter inlining,
 
 from datetime import date, datetime, time
 from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from server.services.database_operations import AsyncDatabaseService
+from server.services.file_operations import DataFrameFileService
 from server.services.raw_query import AsyncRawQueryService
 
 # ---------------------------------------------------------------------------
@@ -124,6 +127,62 @@ class TestInlineDuckdbParams:
 
 
 # ---------------------------------------------------------------------------
+# _inline_duckdb_params — values that look like regex replacement templates
+# ---------------------------------------------------------------------------
+
+
+class TestInlineDuckdbParamsBackslashValues:
+    def test_windows_path_value_inlined_verbatim(self):
+        query = "SELECT * FROM data WHERE source = :source"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"source": "C:\\Users\\analyst\\q1.csv"})
+        assert result == "SELECT * FROM data WHERE source = 'C:\\Users\\analyst\\q1.csv'"
+
+    def test_backreference_looking_text_not_expanded(self):
+        query = "SELECT * FROM data WHERE pattern = :pattern"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"pattern": "\\1 then \\g<name>"})
+        assert result == "SELECT * FROM data WHERE pattern = '\\1 then \\g<name>'"
+
+    def test_escape_spellings_not_unescaped(self):
+        query = "SELECT * FROM data WHERE token = :token"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"token": "a\\nb\\tc\\rd"})
+        assert result == "SELECT * FROM data WHERE token = 'a\\nb\\tc\\rd'"
+        assert "\n" not in result
+        assert "\t" not in result
+
+    def test_doubled_backslash_preserved(self):
+        query = "SELECT * FROM data WHERE share = :share"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"share": "\\\\nas01\\reports"})
+        assert result == "SELECT * FROM data WHERE share = '\\\\nas01\\reports'"
+
+    def test_trailing_backslash_value(self):
+        query = "SELECT * FROM data WHERE folder = :folder"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"folder": "D:\\exports\\"})
+        assert result == "SELECT * FROM data WHERE folder = 'D:\\exports\\'"
+
+    def test_quote_and_backslash_combination(self):
+        query = "SELECT * FROM data WHERE label = :label"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"label": "O'Brien\\2024"})
+        assert result == "SELECT * FROM data WHERE label = 'O''Brien\\2024'"
+
+    def test_repeated_placeholder_replaced_everywhere(self):
+        query = "SELECT * FROM data WHERE src = :path OR dst = :path"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"path": "C:\\tmp\\a.csv"})
+        assert result == "SELECT * FROM data WHERE src = 'C:\\tmp\\a.csv' OR dst = 'C:\\tmp\\a.csv'"
+
+    def test_prefix_param_names_with_backslash_values(self):
+        query = "SELECT * FROM data WHERE dir = :dir AND full = :dir_path"
+        result = AsyncRawQueryService._inline_duckdb_params(query, {"dir": "C:\\data", "dir_path": "C:\\data\\q1.csv"})
+        assert result == "SELECT * FROM data WHERE dir = 'C:\\data' AND full = 'C:\\data\\q1.csv'"
+
+    def test_datetime_and_backslash_params_together(self):
+        query = "SELECT * FROM data WHERE at > :since AND source = :source"
+        result = AsyncRawQueryService._inline_duckdb_params(
+            query, {"since": datetime(2025, 1, 15, 10, 30, 0), "source": "C:\\logs\\app.log"}
+        )
+        assert result == "SELECT * FROM data WHERE at > '2025-01-15T10:30:00' AND source = 'C:\\logs\\app.log'"
+
+
+# ---------------------------------------------------------------------------
 # execute_raw_query routing
 # ---------------------------------------------------------------------------
 
@@ -186,3 +245,62 @@ class TestExecuteRawQueryRouting:
             },
         )
         assert result.get("success") is False
+
+
+# ---------------------------------------------------------------------------
+# execute_raw_query parameter handling per backend (connectors mocked)
+# ---------------------------------------------------------------------------
+
+
+class TestExecuteRawQueryParamInlining:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("db_type", ["csv", "duckdb", "parquet", "excel", "json", "file"])
+    async def test_file_query_inlines_backslash_value(self, db_type):
+        execute = AsyncMock(return_value={"success": True, "result": []})
+        with patch.object(DataFrameFileService, "execute_duckdb_query", execute):
+            result = await AsyncRawQueryService.execute_raw_query(
+                query="SELECT * FROM data WHERE source = :source",
+                db_type=db_type,
+                connection_id="conn-1",
+                connection_obj={"dataset_id": "ds-1"},
+                params={"source": "C:\\Users\\analyst\\q1.csv"},
+            )
+
+        assert result == {"success": True, "result": []}
+        assert execute.await_args.kwargs["query"] == "SELECT * FROM data WHERE source = 'C:\\Users\\analyst\\q1.csv'"
+
+    @pytest.mark.asyncio
+    async def test_dynamodb_partiql_inlines_backslash_value(self):
+        connector = MagicMock()
+        connector.execute_partiql_query = AsyncMock(return_value={"success": True, "result": []})
+        with patch.object(AsyncDatabaseService, "get_or_create_dynamodb_connector", AsyncMock(return_value=connector)):
+            result = await AsyncRawQueryService.execute_raw_query(
+                query="SELECT * FROM Files WHERE path = :path",
+                db_type="dynamodb",
+                connection_id="conn-1",
+                connection_obj={"region": "us-east-1", "query_mode": "partiql"},
+                params={"path": "C:\\Users\\analyst\\q1.csv"},
+            )
+
+        assert result == {"success": True, "result": []}
+        statement = connector.execute_partiql_query.await_args.args[0]
+        assert statement == "SELECT * FROM Files WHERE path = 'C:\\Users\\analyst\\q1.csv'"
+
+    @pytest.mark.asyncio
+    async def test_sql_path_binds_params_without_inlining(self):
+        connector = MagicMock()
+        connector.execute_query = AsyncMock(return_value={"success": True, "result": []})
+        params = {"source": "C:\\Users\\analyst\\q1.csv"}
+        with patch.object(AsyncDatabaseService, "get_or_create_sql_connector", AsyncMock(return_value=connector)):
+            result = await AsyncRawQueryService.execute_raw_query(
+                query="SELECT * FROM data WHERE source = :source",
+                db_type="pg",
+                connection_id="conn-1",
+                connection_obj={"host": "localhost"},
+                params=params,
+            )
+
+        assert result == {"success": True, "result": []}
+        await_args = connector.execute_query.await_args
+        assert await_args.args[0] == "SELECT * FROM data WHERE source = :source"
+        assert await_args.kwargs["params"] == params

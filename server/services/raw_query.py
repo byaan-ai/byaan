@@ -45,7 +45,8 @@ class AsyncRawQueryService:
         for name in sorted(params.keys(), key=len, reverse=True):
             literal = AsyncRawQueryService._duckdb_sql_literal(params[name])
             pattern = rf":{re.escape(name)}\b"
-            inlined = re.sub(pattern, literal, inlined)
+            # Callable replacement: a literal string would be read as a template and mangle backslashes.
+            inlined = re.sub(pattern, lambda _match, literal=literal: literal, inlined)
         return inlined
 
     @staticmethod
