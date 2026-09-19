@@ -1,3 +1,10 @@
+"""Query result cache.
+
+Keys are ``byaan:query:{query_id}``, plus a digest of the normalized filters when filters are
+present. ``between`` bounds are order-sensitive and keyed as ordered bounds; every other list
+value (``in``/multiselect) stays order-insensitive.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -16,6 +23,10 @@ logger = get_logger(__name__)
 
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", 3600))  # 1 hour default
 CACHE_PREFIX = "byaan:query"
+
+# Marks the ordered-bounds encoding of a between filter. Bumping it separates new range
+# keys from any older entry whose bounds were flattened into an order-insensitive list.
+ORDERED_RANGE_FORMAT = "range.v1"
 
 
 async def _safe_rollback(session: AsyncSession | None) -> None:
@@ -36,8 +47,19 @@ class InMemoryCacheEntry:
     created_at: float
 
 
-def normalize_filter_value(value: Any, ui_type: str) -> Any:
+def normalize_ordered_range_value(value: Any, ui_type: str) -> dict[str, Any]:
+    """Normalize between bounds, keeping their order because [low, high] and [high, low] differ in SQL."""
+    if isinstance(value, list):
+        bounds = [str(v) for v in value]
+    else:
+        bounds = [str(normalize_filter_value(value, ui_type))]
+    return {"fmt": ORDERED_RANGE_FORMAT, "b": bounds}
+
+
+def normalize_filter_value(value: Any, ui_type: str, operator: str | None = None) -> Any:
     """Normalize filter values for deterministic cache keys."""
+    if operator and operator.lower() == "between":
+        return normalize_ordered_range_value(value, ui_type)
     if ui_type in ("date", "date_range"):
         if isinstance(value, str) and len(value) >= 10:
             return value[:10]
@@ -55,11 +77,12 @@ def generate_cache_key(query_id: str, filters: list[QueryFilter] | None = None) 
 
     normalized = []
     for f in sorted(filters, key=lambda x: x.field):
+        operator = f.operator.lower()
         normalized.append(
             {
                 "f": f.field,
-                "o": f.operator.lower(),
-                "v": normalize_filter_value(f.value, f.ui_type),
+                "o": operator,
+                "v": normalize_filter_value(f.value, f.ui_type, operator),
             }
         )
 
