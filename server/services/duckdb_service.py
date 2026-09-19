@@ -189,7 +189,14 @@ class DuckDBService:
 
     @staticmethod
     def _json_safe(value: Any) -> Any:
-        """Convert values produced by DuckDB into JSON-serialisable primitives."""
+        """
+        Convert values produced by DuckDB into JSON-serialisable primitives.
+
+        Leaf rules (NaN/Infinity, Decimal, temporal, UUID, bytes) are applied
+        recursively so LIST/STRUCT/MAP columns convert exactly like flat ones.
+        LIST/tuple become JSON arrays; STRUCT/MAP become JSON objects whose keys
+        are themselves made JSON-safe. Primitives are returned untouched.
+        """
         if value is None:
             return None
 
@@ -220,7 +227,41 @@ class DuckDBService:
             except Exception:
                 return value.hex()
 
+        if isinstance(value, dict):
+            return DuckDBService._json_safe_mapping(value)
+
+        if isinstance(value, (list, tuple)):
+            return [DuckDBService._json_safe(item) for item in value]
+
         return value
+
+    @staticmethod
+    def _json_safe_mapping(value: dict[Any, Any]) -> dict[Any, Any]:
+        """
+        Convert a DuckDB STRUCT/MAP into a JSON-safe object.
+
+        STRUCT keys are already strings. MAP keys of any other type are converted
+        with the same leaf rules; a conversion that would merge two distinct keys
+        raises instead of silently dropping an entry.
+        """
+        converted: dict[Any, Any] = {}
+        for raw_key, raw_value in value.items():
+            key = DuckDBService._json_safe_key(raw_key)
+            if key in converted:
+                raise ValueError(
+                    f"DuckDB map key {raw_key!r} collides with key {key!r} after JSON conversion. "
+                    "Cast the map keys to a distinct text representation in the query."
+                )
+            converted[key] = DuckDBService._json_safe(raw_value)
+        return converted
+
+    @staticmethod
+    def _json_safe_key(key: Any) -> str | int | float | bool | None:
+        """Convert a mapping key into a type json.dumps accepts as an object key."""
+        converted = DuckDBService._json_safe(key)
+        if converted is None or isinstance(converted, (str, int, float, bool)):
+            return converted
+        raise ValueError(f"Unsupported DuckDB map key type for JSON encoding: {type(key).__name__}")
 
     @classmethod
     def _collect_schema_sync(

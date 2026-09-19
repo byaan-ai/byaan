@@ -86,9 +86,18 @@ Byaan parses DuckDB SQL with `sqlglot`, requires a single statement, blocks disa
 
 The DuckDB path is used for analytical queries over uploaded or local file-backed datasets. It is intended for local analysis, with performance bounded by local machine resources.
 
+### Result And Sample Serialization
+
+Both query results and inferred schema samples are converted to JSON-safe values before they reach callers. The conversion is recursive: `DATE`, `TIMESTAMP`, `DECIMAL`, `UUID`, `BLOB`, and non-finite floats are converted the same way whether they appear as a plain column or nested inside a `LIST`, `STRUCT`, or `MAP`. Callers can therefore serialize these payloads with a plain `json.dumps` and no `default=` hook.
+
+`MAP` keys are converted with those same rules so that they remain valid JSON object keys. In the rare case where two distinct keys convert to the same string — for example the `BLOB` keys `'\xFF'` (hex-encoded to `"ff"`) and `'ff'` (UTF-8 decoded to `"ff"`) — the conversion raises a `ValueError` instead of silently dropping one entry. This rejection applies to query execution and to schema inference alike. The remedy is to cast the keys to a distinct text representation in the query, such as `MAP {hex(k): v}`.
+
+This is a deliberate tightening. Previously such a map was not rejected, so schema inference could return a sample that a caller's `json.dumps` then failed on; the failure now happens earlier and names the fix.
+
 Relevant tests:
 
 - [`server/tests/test_duckdb_service.py`](../../server/tests/test_duckdb_service.py)
+- [`server/tests/test_duckdb_nested_json_safe.py`](../../server/tests/test_duckdb_nested_json_safe.py)
 
 ## MCP
 
