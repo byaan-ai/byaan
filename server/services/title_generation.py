@@ -92,7 +92,7 @@ async def _generate_title_codex(
 
     prompt = _build_title_prompt(user_message, assistant_response)
     stream = await client.responses.create(
-        model="gpt-5.4",
+        model="gpt-6-luna",
         instructions=TITLE_SYSTEM_PROMPT,
         input=[{"role": "user", "content": prompt}],
         store=False,

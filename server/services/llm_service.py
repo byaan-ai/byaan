@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 from agents import Agent, ModelSettings
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.constants.models import MODELS_BY_PROVIDER
+from server.constants.models import MODELS_BY_PROVIDER, resolve_model
 from server.db.session import get_async_session
 from server.models.llm_connections import LLMConnection
 from server.repositories.llm_connections import LLMConnectionRepository
@@ -68,6 +68,7 @@ async def build_litellm_params(conn: LLMConnection, session=None, model: str = N
     else:
         model_name = model or cfg.get("model")
 
+    model_name = resolve_model(model_name, conn.type)
     logger.debug(f"build_litellm_params: conn.type={conn.type}, model={model}, model_name={model_name}")
 
     if model_name and conn.type not in [

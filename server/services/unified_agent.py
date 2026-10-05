@@ -1855,7 +1855,7 @@ async def stream_handoff_agent_response(
             return
 
         model_name = (request.model or "").lower()
-        is_gpt5 = "gpt-5" in model_name
+        is_gpt_reasoning = "gpt-5" in model_name or "gpt-6" in model_name
         is_sonnet = "sonnet" in model_name
         in_reasoning_mode = False
 
@@ -1954,7 +1954,7 @@ async def stream_handoff_agent_response(
                     }:
                         continue
 
-                    if (is_gpt5 or is_sonnet) and event_data_type not in {
+                    if (is_gpt_reasoning or is_sonnet) and event_data_type not in {
                         "output_text.delta",
                         "output_text",
                         "output_text.done",
@@ -2358,7 +2358,7 @@ async def stream_handoff_agent_response(
                             if "reasoning" in delta_type.lower() or "analysis" in delta_type.lower():
                                 continue
 
-                        if is_gpt5 or is_sonnet:
+                        if is_gpt_reasoning or is_sonnet:
                             reasoning_patterns = [
                                 "Alright, I've got the Orchestrator instructions",
                                 "I need to",

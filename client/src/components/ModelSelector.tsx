@@ -68,18 +68,17 @@ function formatModelName(modelPath: string): string {
 
   // Format specific model names for better readability
   const formatMap: Record<string, string> = {
+    "claude-opus-5-5": "Claude Opus 5.5",
+    "claude-opus-5.5": "Claude Opus 5.5",
     "claude-opus-5": "Claude Opus 5",
-    "claude-opus-4.8": "Claude Opus 4.8",
-    "claude-opus-4-8": "Claude Opus 4.8",
-    "claude-opus-4.7": "Claude Opus 4.7",
-    "claude-opus-4-7": "Claude Opus 4.7",
-    "claude-sonnet-4.6": "Claude Sonnet 4.6",
-    "claude-sonnet-4-6": "Claude Sonnet 4.6",
-    "claude-sonnet-4.5": "Claude Sonnet 4.5",
-    "claude-haiku-4.5": "Claude Haiku 4.5",
-    "grok-code-fast-1": "Grok Code Fast 1",
-    "glm-4.5": "GLM 4.5",
-    "glm-5.1": "GLM 5.1",
+    "claude-sonnet-5-5": "Claude Sonnet 5.5",
+    "claude-sonnet-5.5": "Claude Sonnet 5.5",
+    "gpt-6.1-sol": "GPT-6.1 Sol",
+    "gpt-6-astra": "GPT-6 Astra",
+    "gpt-6-luna": "GPT-6 Luna",
+    "grok-4.7": "Grok 4.7",
+    "glm-5.3": "GLM 5.3",
+    "kimi-k3": "Kimi K3",
   };
 
   return formatMap[modelName] || modelName;
