@@ -2596,7 +2596,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.35.0" },
     { name = "certifi", specifier = ">=2024.0.0" },
     { name = "chardet", specifier = ">=5.0.0" },
-    { name = "claude-agent-sdk", specifier = ">=0.1.37" },
+    { name = "claude-agent-sdk", specifier = ">=0.1.51" },
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "databricks-sql-connector", specifier = ">=3.0.0" },

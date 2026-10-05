@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import signal
+import tempfile
 from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import uuid4
@@ -116,6 +117,7 @@ async def stream_claude_with_mcp_tools(
         SSE events matching OpenAI Agents SDK format, plus session_id event
     """
     client = None
+    system_prompt_path: str | None = None
     try:
         _install_safe_message_parser()
         logger.info(f"[CLAUDE MCP] Starting with {len(tools) if tools else 0} tools")
@@ -177,8 +179,18 @@ async def stream_claude_with_mcp_tools(
         else:
             logger.warning("[CLAUDE MCP] No active Claude Code authentication found")
 
+        # Passed as a file: on the command line a prompt over 128 KiB fails with E2BIG ("Argument list too long").
+        system_prompt = None
+        if instructions:
+            with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", prefix="byaan-system-prompt-", suffix=".md", delete=False
+            ) as prompt_file:
+                prompt_file.write(instructions)
+                system_prompt_path = prompt_file.name
+            system_prompt = {"type": "file", "path": system_prompt_path}
+
         options_kwargs = {
-            "system_prompt": instructions if instructions else None,
+            "system_prompt": system_prompt,
             "mcp_servers": mcp_servers_dict,
             "allowed_tools": allowed_tools_list,
             "disallowed_tools": (disallowed_tools_override or DISALLOWED_BUILTIN_TOOLS) + disallowed_stdio_tools,
@@ -852,3 +864,9 @@ async def stream_claude_with_mcp_tools(
                 logger.error("[CLAUDE MCP] Timeout waiting for process to terminate")
             except Exception as kill_error:
                 logger.error(f"[CLAUDE MCP] Process cleanup failed: {kill_error}")
+
+        if system_prompt_path:
+            try:
+                os.unlink(system_prompt_path)
+            except OSError:
+                pass
