@@ -15,7 +15,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from server.constants.models import MODELS_BY_PROVIDER
+from server.constants.models import MODELS_BY_PROVIDER, resolve_model
 from server.models.connections import Connection
 from server.models.datasets import Dataset
 from server.models.notebooks import NotebookDataset
@@ -63,7 +63,9 @@ class NotebookImportService:
 
             if provider_setting and model_setting:
                 logger.info(f"Using preferred model: {provider_setting.setting_value}/{model_setting.setting_value}")
-                return provider_setting.setting_value, model_setting.setting_value
+                return provider_setting.setting_value, resolve_model(
+                    model_setting.setting_value, provider_setting.setting_value
+                )
 
             # No preferred model, get first available from LLM connections
             llm_repo = LLMConnectionRepository(session)

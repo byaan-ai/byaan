@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import AuthContext, require_scope
 from server.auth.scopes import Scope
+from server.constants.models import resolve_model
 from server.db.session import get_async_session
 from server.schemas.standard_response import success_response
 from server.services.posthog_service import ANALYTICS_OPT_OUT_KEY, PostHogService
@@ -45,7 +46,10 @@ async def get_preferred_model(
 
         response = PreferredModelResponse(
             provider=provider_setting.setting_value if provider_setting else None,
-            model=model_setting.setting_value if model_setting else None,
+            model=resolve_model(
+                model_setting.setting_value if model_setting else None,
+                provider_setting.setting_value if provider_setting else None,
+            ),
         )
 
         return success_response(

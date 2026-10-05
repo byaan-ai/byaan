@@ -12,7 +12,7 @@ from starlette.requests import ClientDisconnect
 
 from server.auth.dependencies import AuthContext, require_scope
 from server.auth.scopes import Scope
-from server.constants.models import MODELS_BY_PROVIDER
+from server.constants.models import MODELS_BY_PROVIDER, resolve_model
 from server.db.session import AsyncSessionFactory, get_async_session
 from server.repositories.llm_connections import LLMConnectionRepository
 from server.repositories.slack_workspace import SlackWorkspaceRepository
@@ -96,6 +96,7 @@ async def _validate_slack_model_selection(
             detail="LLM connection not found for this tenant",
         )
 
+    default_model = resolve_model(default_model, connection.type)
     allowed = await _resolve_allowed_models(connection, session)
     if not allowed:
         raise HTTPException(

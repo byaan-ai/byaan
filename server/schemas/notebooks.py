@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
+
+from server.constants.models import resolve_model
 
 
 class NotebookCreate(BaseModel):
@@ -33,6 +35,11 @@ class NotebookRead(BaseModel):
     model_config = {
         "from_attributes": True,
     }
+
+    @model_validator(mode="after")
+    def _upgrade_retired_model(self) -> NotebookRead:
+        self.last_used_model = resolve_model(self.last_used_model, self.last_used_provider)
+        return self
 
 
 class NotebookListResponse(BaseModel):
