@@ -4,6 +4,9 @@
 # Source: Official provider documentation (as of 2024-11)
 MODEL_CONTEXT_LIMITS: dict[str, int] = {
     # OpenAI
+    "gpt-6.1-sol": 1_050_000,
+    "gpt-6-astra": 1_050_000,
+    "gpt-6-luna": 1_050_000,
     # Keep the variant keys above bare "gpt-5.6": lookup falls back to substring
     # matching, and bare "gpt-5" would otherwise claim them at 128k.
     "gpt-5.6-sol": 1_000_000,
@@ -14,11 +17,15 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "gpt-5": 128_000,
     "gpt-4o": 128_000,
     # Anthropic
+    "claude-opus-5-5": 1_000_000,
+    "claude-opus-5.5": 1_000_000,
     "claude-opus-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,
     "claude-opus-4.8": 1_000_000,
     "claude-opus-4-7": 1_000_000,
     "claude-opus-4.7": 1_000_000,
+    "claude-sonnet-5-5": 1_000_000,
+    "claude-sonnet-5.5": 1_000_000,
     "claude-sonnet-4-6": 200_000,
     "claude-sonnet-4.6": 200_000,
     "claude-3-opus": 200_000,
@@ -32,10 +39,14 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
     "gemini-3-pro": 2_000_000,
     "gemini-pro": 1_000_000,
     # xAI Grok
+    "grok-4.7": 500_000,
     "grok-4.3": 1_000_000,
     "grok-4.20": 2_000_000,
     # Zhipu GLM
+    "glm-5.3": 1_048_576,
     "glm-5.1": 128_000,
+    # Moonshot Kimi
+    "kimi-k3": 1_048_576,
     # Default fallback
     "default": 128_000,
 }

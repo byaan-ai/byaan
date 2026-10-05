@@ -18,6 +18,7 @@ from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, SystemMessage,
 from claude_agent_sdk._errors import CLINotFoundError
 from claude_agent_sdk._internal.message_parser import MessageParseError
 
+from server.constants.models import resolve_model
 from server.services.claude_mcp_converter import convert_openai_tools_batch
 from server.services.claude_oauth_service import (
     get_active_token_with_refresh,
@@ -189,6 +190,7 @@ async def stream_claude_with_mcp_tools(
 
         if model:
             sdk_model = model.split("/", 1)[1] if model.startswith("claude_code/") else model
+            sdk_model = resolve_model(sdk_model, "claude_code")
             options_kwargs["model"] = sdk_model
             logger.info(f"[CLAUDE MCP] Passing model to SDK: {sdk_model}")
 
