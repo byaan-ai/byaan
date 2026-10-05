@@ -17,12 +17,17 @@ def get_html_dashboard_rules(batch_endpoint: str | None = None, model: str | Non
     return components["html_generation_rules"].format(batch_endpoint=endpoint)
 
 
+LEARNING_PREVIEW_CHARS = 500
+
+
 def _format_relevant_learnings(learnings: list[dict]) -> str:
     lines = ["<relevant_learnings>"]
     for entry in learnings[:10]:
         lid = entry.get("id", "")
         title = entry.get("title", "")
-        content = entry.get("learning", "")
+        content = entry.get("learning") or ""
+        if len(content) > LEARNING_PREVIEW_CHARS:
+            content = f"{content[:LEARNING_PREVIEW_CHARS].rstrip()}… [truncated: call get_learning for the full text]"
         if content:
             lines.append(f"- [{lid}] {title}: {content}")
         else:
