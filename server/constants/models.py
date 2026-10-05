@@ -77,6 +77,7 @@ SLACK_CLASSIFIER_MODEL_BY_PROVIDER: dict[str, str] = {
 
 # Retired models map to their successor so saved picks (user settings, notebooks, Slack) keep working.
 # Keys are bare model names, or the full stored id when the successor lives under another vendor prefix.
+# A successor containing "/" is a cross-vendor move: it is returned as-is, dropping the original prefix.
 RETIRED_MODEL_SUCCESSORS: dict[str, str] = {
     "claude-opus-4-8": "claude-opus-5-5",
     "claude-opus-4.8": "claude-opus-5-5",
@@ -91,6 +92,7 @@ RETIRED_MODEL_SUCCESSORS: dict[str, str] = {
     "grok-4.3": "grok-4.7",
     "grok-4.20": "grok-4.7",
     "glm-5.1": "glm-5.3",
+    "kimi-k2-instruct-0905": "openai/gpt-oss-120b",
     "moonshotai/kimi-k2-instruct-0905": "openai/gpt-oss-120b",
 }
 
@@ -104,12 +106,12 @@ def resolve_model(model: str | None, provider: str | None = None) -> str | None:
     """Swap a retired model for its successor, keeping whatever provider prefix it was stored with."""
     if not model:
         return model
-    if model in RETIRED_MODEL_SUCCESSORS:
-        return RETIRED_MODEL_SUCCESSORS[model]
     prefix, _, name = model.rpartition("/")
-    successor = RETIRED_MODEL_SUCCESSORS.get(name)
+    successor = RETIRED_MODEL_SUCCESSORS.get(model) or RETIRED_MODEL_SUCCESSORS.get(name)
     if not successor:
         return model
+    if "/" in successor:
+        return successor
     if provider == "openrouter" or prefix.startswith("openrouter"):
         successor = _OPENROUTER_SPELLINGS.get(successor, successor)
     return f"{prefix}/{successor}" if prefix else successor

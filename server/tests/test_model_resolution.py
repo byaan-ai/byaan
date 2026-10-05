@@ -19,6 +19,10 @@ from server.schemas.notebooks import NotebookRead
         ("x-ai/grok-4.3", "openrouter", "x-ai/grok-4.7"),
         ("z-ai/glm-5.1", "openrouter", "z-ai/glm-5.3"),
         ("moonshotai/kimi-k2-instruct-0905", "groq", "openai/gpt-oss-120b"),
+        ("claude-opus-4-8", "openrouter", "claude-opus-5.5"),
+        ("claude-sonnet-4-6", "openrouter", "claude-sonnet-5.5"),
+        ("claude-opus-4.7", "openrouter", "claude-opus-5.5"),
+        ("kimi-k2-instruct-0905", "groq", "openai/gpt-oss-120b"),
     ],
 )
 def test_retired_models_resolve_to_successor(model, provider, expected):
