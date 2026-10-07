@@ -47,7 +47,7 @@ dependencies = [
   "greenlet>=3.0.0",
   "email-validator>=2.1.0",
   "resend>=2.5.0",
-  "claude-agent-sdk>=0.1.51",
+  "claude-agent-sdk>=0.2.162",
   "fastapi-users[sqlalchemy]>=15.0.0",
   "google-auth>=2.0.0",
   "pytz>=2024.1",
@@ -115,6 +115,7 @@ line-ending = "auto"
 
 [tool.uv]
 exclude-newer = "2026-08-05T00:00:00Z"
+exclude-newer-package = { claude-agent-sdk = "2026-09-30T00:00:00Z" }
 constraint-dependencies = [
   "aiohttp>=3.14.2",
   "starlette>=1.3.1",
