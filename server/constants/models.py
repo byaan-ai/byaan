@@ -16,6 +16,10 @@ CLAUDE_CODE_MODELS = [
     "claude_code/claude-sonnet-5-5",
 ]
 
+# Older Claude Code CLIs reject the models above with a 400. Self-hosted images run the CLI bundled with
+# claude-agent-sdk, so tests/test_claude_cli_version.py fails CI when the locked SDK bundles an older one.
+CLAUDE_CODE_MIN_CLI_VERSION = "2.1.280"
+
 # OpenRouter spells Anthropic versions with dots, unlike Anthropic's own API.
 OPENROUTER_ANTHROPIC_MODELS = [
     "anthropic/claude-opus-5.5",
