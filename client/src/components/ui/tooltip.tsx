@@ -11,7 +11,7 @@ interface TooltipProps {
 export function Tooltip({ children, content, side = "top", align = "center", delayDuration = 200 }: TooltipProps) {
   const [isVisible, setIsVisible] = React.useState(false)
   const [isMounted, setIsMounted] = React.useState(false)
-  const timeoutRef = React.useRef<NodeJS.Timeout>()
+  const timeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const handleMouseEnter = () => {
     timeoutRef.current = setTimeout(() => {
@@ -63,7 +63,7 @@ export function Tooltip({ children, content, side = "top", align = "center", del
 
   return (
     <div className="relative inline-flex">
-      {React.cloneElement(children, {
+      {React.cloneElement(children as React.ReactElement<Record<string, unknown>>, {
         onMouseEnter: handleMouseEnter,
         onMouseLeave: handleMouseLeave,
       })}

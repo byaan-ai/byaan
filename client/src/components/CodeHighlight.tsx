@@ -3,7 +3,7 @@ import { Highlight, themes } from 'prism-react-renderer'
 
 interface CodeHighlightProps {
   code: string
-  language: 'html' | 'sql' | 'javascript' | 'typescript' | 'json'
+  language: 'html' | 'sql' | 'javascript' | 'typescript' | 'json' | 'graphql'
   showLineNumbers?: boolean
   customStyle?: React.CSSProperties
   className?: string

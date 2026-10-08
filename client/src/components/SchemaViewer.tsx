@@ -5,7 +5,7 @@ import { Button } from "./ui/button"
 import { Card } from "./ui/card"
 import { Table, Database, AlertCircle, Loader2, RefreshCw, ChevronDown, ChevronRight } from "lucide-react"
 import { Switch } from './ui/switch'
-import { type DatabaseTable, type MongoCollection, type DatabaseColumn } from "../services/api"
+import { type DatabaseTable, type MongoCollection, type DatabaseColumn, isMultiDatabaseSchema } from "../services/api"
 import { useStore } from "../stores/useStore"
 import { showToast } from "../utils/toast"
 import { toast } from "react-toastify"
@@ -134,6 +134,10 @@ export function SchemaViewer({ connection, onQueryChange, notebookId, onRefreshS
   const isCollection = (item: DatabaseTable | MongoCollection): item is MongoCollection => {
     return 'sample_fields' in item
   }
+
+  const singleSchema = schema && !isMultiDatabaseSchema(schema) ? schema : null
+  const schemaEntries = singleSchema ? Object.entries(singleSchema.schema) : []
+
   return (
     <div className="m-0 p-4 bg-[#1a1a1a] h-full overflow-auto">
       <div className="space-y-6">
@@ -164,7 +168,7 @@ export function SchemaViewer({ connection, onQueryChange, notebookId, onRefreshS
           <div>
             <h3 className="font-medium text-white text-lg">Database Schema</h3>
             <p className="text-sm text-[#888888]">
-              {schema ? `${schema.datasource_name || 'Database'} (${(schema.datasource_type || connection?.type || 'UNKNOWN').toUpperCase()})` : 'Explore your database structure'}
+              {singleSchema ? `${singleSchema.datasource_name || 'Database'} (${(singleSchema.datasource_type || connection?.type || 'UNKNOWN').toUpperCase()})` : 'Explore your database structure'}
             </p>
           </div>
           {connection && (
@@ -218,9 +222,9 @@ export function SchemaViewer({ connection, onQueryChange, notebookId, onRefreshS
               Try Again
             </Button>
           </div>
-        ) : schema?.schema && Object.keys(schema.schema).length > 0 ? (
+        ) : schemaEntries.length > 0 ? (
           <div className="space-y-4 max-h-full overflow-y-auto custom-scrollbar">
-            {Object.entries(schema.schema).map(([tableName, tableData]) => {
+            {schemaEntries.map(([tableName, tableData]) => {
               const table = tableData as DatabaseTable;
               const isExpanded = expandedTables.has(tableName);
 
@@ -252,9 +256,9 @@ export function SchemaViewer({ connection, onQueryChange, notebookId, onRefreshS
                     {/* Additional info when collapsed */}
                     {!isExpanded && (
                       <p className="text-xs text-[#888888] ml-6">
-                        {(schema.datasource_type === 'csv' || schema.datasource_type === 'excel' || schema.datasource_type === 'parquet' || schema.datasource_type === 'json') && isTable(tableData) && tableData.filename
-                          ? `${schema.datasource_type.toUpperCase()} File: ${tableData.filename}`
-                          : schema.datasource_type === 'mongo'
+                        {(singleSchema?.datasource_type === 'csv' || singleSchema?.datasource_type === 'excel' || singleSchema?.datasource_type === 'parquet' || singleSchema?.datasource_type === 'json') && isTable(tableData) && tableData.filename
+                          ? `${singleSchema.datasource_type.toUpperCase()} File: ${tableData.filename}`
+                          : singleSchema?.datasource_type === 'mongo'
                           ? 'MongoDB Collection'
                           : 'Database Table'}
                         {table.row_count !== undefined && ` • ${table.row_count} rows`}

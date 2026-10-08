@@ -246,7 +246,7 @@ const getFilterTypeLabel = (filterType: DashboardFilterDefinition["filter_type"]
 const useDismissableDropdown = (
   isOpen: boolean,
   onClose: () => void,
-): React.RefObject<HTMLDivElement> => {
+): React.RefObject<HTMLDivElement | null> => {
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {

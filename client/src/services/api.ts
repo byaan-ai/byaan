@@ -476,7 +476,7 @@ export interface ExecuteSavedQueryResponse {
 }
 
 // Connections - Only database connections now, files are handled by datasets
-export type ConnectionType = 'pg' | 'mongo' | 'mysql' | 'sqlite' | 'mssql' | 'dynamodb' | 'databricks'
+export type ConnectionType = 'pg' | 'mongo' | 'mysql' | 'sqlite' | 'mssql' | 'dynamodb' | 'databricks' | 'upload' | 'url'
 export type FileType = 'csv' | 'excel' | 'parquet' | 'json'
 export type DatasourceType = ConnectionType | FileType | 'duckdb'
 
@@ -691,6 +691,9 @@ export interface MultiDatabaseSchema {
   notebook_id: string
   total_databases: number
   databases: DatabaseInfo[]
+  schema?: never
+  datasource_type?: never
+  datasource_name?: never
 }
 
 // Union type for schema response (supports both single and multiple databases)
@@ -751,6 +754,7 @@ export interface Datasource {
   name: string
   type: DatasourceType
   db_type?: string
+  database_type?: DatasourceType
   source_type: 'connection' | 'dataset'
   connection_id?: string  // Only for connection-type datasources
   files_count?: number  // Only for datasets
@@ -3370,9 +3374,25 @@ export class ApiService {
     description: string
     is_configured: boolean
     required_credentials: string[]
+    credential_fields?: Array<{
+      key: string
+      label: string
+      placeholder: string
+      help: string
+      optional?: boolean
+      type?: string
+      options?: { value: string; label: string }[]
+      default?: string
+      depends_on?: { key: string; value: string }
+    }>
+    emoji?: string
+    homepage?: string
+    domain?: string
     scopes_configured: Array<'user' | 'org'>
     user_scope_created_by: string | null
     org_scope_created_by: string | null
+    org_scope_created_by_name?: string | null
+    domain_active?: boolean
   }>>> {
     try {
       const response = await apiFetch(`${API_BASE_URL}/skills`)
@@ -3482,13 +3502,23 @@ export class ApiService {
     name: string
     description: string
     scope: 'user' | 'org'
-    skill_type: 'general' | 'slack_inbound' | 'slack_outbound'
+    skill_type: 'general' | 'slack_inbound' | 'slack_outbound' | 'github_analysis'
     is_active: boolean
     created_by: string
     created_by_name: string
     created_at: string
     updated_at: string
     can_execute_api: boolean
+    instructions?: string
+    api_base_url?: string | null
+    api_type?: string | null
+    api_auth_type?: string | null
+    api_domain?: string | null
+    domain_active?: boolean
+    has_credentials?: boolean
+    github_repo_id?: string | null
+    github_analysis_type?: string | null
+    github_repo_name?: string | null
   }>>> {
     try {
       const response = await apiFetch(`${API_BASE_URL}/custom-skills`)
@@ -3511,13 +3541,22 @@ export class ApiService {
     description: string
     instructions: string
     scope: 'user' | 'org'
-    skill_type: 'general' | 'slack_inbound' | 'slack_outbound'
+    skill_type: 'general' | 'slack_inbound' | 'slack_outbound' | 'github_analysis'
     is_active: boolean
     created_by: string
     created_by_name: string
     created_at: string
     updated_at: string
     can_execute_api: boolean
+    api_base_url?: string | null
+    api_type?: string | null
+    api_auth_type?: string | null
+    api_domain?: string | null
+    domain_active?: boolean
+    has_credentials?: boolean
+    github_repo_id?: string | null
+    github_analysis_type?: string | null
+    github_repo_name?: string | null
   }>> {
     try {
       const response = await apiFetch(`${API_BASE_URL}/custom-skills/${id}`)
@@ -3539,7 +3578,7 @@ export class ApiService {
     description: string
     instructions: string
     scope?: 'user' | 'org'
-    skill_type?: 'general' | 'slack_inbound' | 'slack_outbound'
+    skill_type?: 'general' | 'slack_inbound' | 'slack_outbound' | 'github_analysis'
     api_config?: {
       api_base_url: string
       api_type: 'rest' | 'graphql'
@@ -3553,13 +3592,22 @@ export class ApiService {
     description: string
     instructions: string
     scope: 'user' | 'org'
-    skill_type: 'general' | 'slack_inbound' | 'slack_outbound'
+    skill_type: 'general' | 'slack_inbound' | 'slack_outbound' | 'github_analysis'
     is_active: boolean
     created_by: string
     created_by_name: string
     created_at: string
     updated_at: string
     can_execute_api: boolean
+    api_base_url?: string | null
+    api_type?: string | null
+    api_auth_type?: string | null
+    api_domain?: string | null
+    domain_active?: boolean
+    has_credentials?: boolean
+    github_repo_id?: string | null
+    github_analysis_type?: string | null
+    github_repo_name?: string | null
   }>> {
     try {
       const response = await apiFetch(`${API_BASE_URL}/custom-skills`, {
@@ -3599,13 +3647,22 @@ export class ApiService {
     description: string
     instructions: string
     scope: 'user' | 'org'
-    skill_type: 'general' | 'slack_inbound' | 'slack_outbound'
+    skill_type: 'general' | 'slack_inbound' | 'slack_outbound' | 'github_analysis'
     is_active: boolean
     created_by: string
     created_by_name: string
     created_at: string
     updated_at: string
     can_execute_api: boolean
+    api_base_url?: string | null
+    api_type?: string | null
+    api_auth_type?: string | null
+    api_domain?: string | null
+    domain_active?: boolean
+    has_credentials?: boolean
+    github_repo_id?: string | null
+    github_analysis_type?: string | null
+    github_repo_name?: string | null
   }>> {
     try {
       const response = await apiFetch(`${API_BASE_URL}/custom-skills/${id}`, {

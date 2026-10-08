@@ -53,6 +53,7 @@ async def _load_dashboard_body(
         dashboard = await dashboard_repo.get_version(notebook_id, session_version)
         if not dashboard:
             raise DashboardEditError(f"Session version {session_version} not found for notebook {notebook_id}.")
+        _ensure_legacy_html_dashboard(dashboard)
         return dashboard.html_content, session_version
 
     base_version = ctx.context.get("current_version")
@@ -60,10 +61,12 @@ async def _load_dashboard_body(
         dashboard = await dashboard_repo.get_version(notebook_id, base_version)
         if not dashboard:
             raise DashboardEditError(f"Base version {base_version} not found for notebook {notebook_id}.")
+        _ensure_legacy_html_dashboard(dashboard)
         return dashboard.html_content, None
 
     latest_dashboard = await dashboard_repo.get_latest_version(notebook_id)
     if latest_dashboard:
+        _ensure_legacy_html_dashboard(latest_dashboard)
         return latest_dashboard.html_content, None
 
     BASE_TEMPLATE = """<!DOCTYPE html>
@@ -79,6 +82,19 @@ async def _load_dashboard_body(
 </body>
 </html>"""
     return BASE_TEMPLATE, None
+
+
+def _ensure_legacy_html_dashboard(dashboard: Any) -> None:
+    if dashboard.asset_id and (
+        dashboard.manifest_json
+        or dashboard.manifest_schema_version
+        or dashboard.status != "legacy_unstructured"
+        or dashboard.migration_state != "legacy_unstructured"
+    ):
+        raise DashboardEditError(
+            "Legacy HTML tools are deprecated for structured dashboards. "
+            "Use governed dashboard manifest tools with base_etag JSON Patch instead."
+        )
 
 
 async def _persist_dashboard_body(
@@ -808,6 +824,8 @@ async def get_existing_html(ctx: RunContextWrapper[Any]) -> str:
                         indent=2,
                         default=str,
                     )
+
+                _ensure_legacy_html_dashboard(latest_dashboard)
 
                 # Get the HTML content from database
                 html_content = latest_dashboard.html_content

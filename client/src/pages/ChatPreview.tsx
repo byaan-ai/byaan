@@ -53,6 +53,7 @@ import { ResizableSplitPanel } from '../components/ResizableSplitPanel'
 type ScheduleFrequency = 'daily' | 'weekly' | 'custom'
 const CHAT_PREFLIGHT_DEBUG_STORAGE_KEY = 'chat_preview_filter_preflight_debug'
 const ACTIVE_PREVIEW_NOTEBOOK_KEY = 'byaan:active-preview-notebook-id'
+type SchemaDataset = { id: string; name: string; tables: Record<string, any> }
 
 function parseCronToScheduleConfig(cron: string): {
   frequency: ScheduleFrequency
@@ -1268,7 +1269,7 @@ Please modify this element to: `
   }, [isNotebookStreaming, isHtmlBeingEdited, loadDashboardFilters])
 
   // Get datasources from schema (supports both single and multiple databases)
-  const schemaDatasets = useMemo(() => {
+  const schemaDatasets = useMemo<SchemaDataset[]>(() => {
     if (isNewNotebook && pendingDatasourceIds.length > 0 && Object.keys(pendingDatasourceSchemas).length > 0) {
       const result = pendingDatasourceIds
         .map(datasourceId => {
@@ -1304,7 +1305,7 @@ Please modify this element to: `
     }
 
     if (allNotebookConnections && allNotebookConnections.length > 1) {
-      const result = allNotebookConnections.map((conn: any) => {
+      const result = allNotebookConnections.map((conn: any): SchemaDataset => {
         let tables = {}
 
         if (conn.database_schema && typeof conn.database_schema === 'object') {
@@ -1337,7 +1338,7 @@ Please modify this element to: `
     if (isMultiDB) {
       // Multiple databases - create structured datasources array
       const multiSchema = schema as any
-      const result = multiSchema.databases.map((db: any) => ({
+      const result = multiSchema.databases.map((db: any): SchemaDataset => ({
         id: db.connection_id || db.connection_name,
         name: db.connection_name,
         tables: db.schema || {}
@@ -2779,7 +2780,7 @@ Please modify this element to: `
   }, [isEditingName])
 
   // Handle model selection change from ModelSelector - shared by both instances
-  const handleModelSelectionChange = useCallback(async (selection: { provider: LLMProvider; model: string; connectionId: string } | null) => {
+  const handleModelSelectionChange = useCallback(async (selection: { provider: LLMProvider; model: string; connectionId: string } | undefined) => {
     if (selection) {
       setSelectedProvider(selection.provider)
       setSelectedModel(selection.model)

@@ -72,6 +72,10 @@ const BLOCK_ELEMENTS = new Set([
   "img",
 ])
 
+const hasReactChildProps = (props: unknown): props is { children?: ReactNode; className?: string } => {
+  return typeof props === "object" && props !== null
+}
+
 const SQL_CLAUSE_PATTERNS: RegExp[] = [
   /([^\n])\s*(FROM)\b/gi,
   /([^\n])\s*(WHERE)\b/gi,
@@ -486,13 +490,13 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
           }
 
           // Check for code blocks (which render as div)
-          if (typeof childType === "function" && child.props?.className?.includes("language-")) {
+          if (typeof childType === "function" && hasReactChildProps(child.props) && child.props.className?.includes("language-")) {
             return true
           }
 
           // Check if child has nested block elements (div, pre, etc.)
           const childProps = child.props
-          if (childProps && typeof childProps === "object") {
+          if (hasReactChildProps(childProps)) {
             const nestedChildren = childProps.children
             if (nestedChildren) {
               const checkNested = (node: any): boolean => {
@@ -503,7 +507,7 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
                   if (typeof nodeType === "string" && BLOCK_ELEMENTS.has(nodeType)) {
                     return true
                   }
-                  if (node.props?.children) {
+                  if (hasReactChildProps(node.props) && node.props.children) {
                     return checkNested(node.props.children)
                   }
                 }

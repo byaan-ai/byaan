@@ -5,6 +5,12 @@ import { showToast } from '../utils/toast';
 import { injectErrorCaptureScript } from '../utils/iframeErrorCapture';
 import { getAccessToken } from './tokenStore';
 
+declare global {
+  interface Window {
+    pdfDataReady?: boolean;
+  }
+}
+
 interface PdfGenerationOptions {
   notebookId: string;
   version?: number | null;

@@ -51,7 +51,7 @@ export function MCPKeysModal({ open, onClose }: MCPKeysModalProps) {
     localStorage.setItem('byaan_mcp_setup_dismissed', 'true')
     navigator.clipboard.writeText(text).catch(() => {})
     setCopiedSnippet(id)
-    showToast('Copied to clipboard', 'success')
+    showToast.success('Copied to clipboard')
     setTimeout(() => setCopiedSnippet(null), 2000)
   }
 
@@ -71,7 +71,7 @@ export function MCPKeysModal({ open, onClose }: MCPKeysModalProps) {
 
   const handleCreateKey = async () => {
     if (!newKeyName.trim()) {
-      showToast('Please enter a key name', 'error')
+      showToast.error('Please enter a key name')
       return
     }
 
@@ -88,7 +88,7 @@ export function MCPKeysModal({ open, onClose }: MCPKeysModalProps) {
       setShowCreatedKeyDialog(true)
       refetch()
     } catch (error: any) {
-      showToast(error?.response?.data?.detail || 'Failed to create API key', 'error')
+      showToast.error(error?.response?.data?.detail || 'Failed to create API key')
     } finally {
       setIsCreating(false)
     }
@@ -108,9 +108,9 @@ export function MCPKeysModal({ open, onClose }: MCPKeysModalProps) {
       setShowDeleteConfirm(false)
       setKeyToDelete(null)
       refetch()
-      showToast('API key deleted successfully', 'success')
+      showToast.success('API key deleted successfully')
     } catch (error: any) {
-      showToast(error?.response?.data?.detail || 'Failed to delete API key', 'error')
+      showToast.error(error?.response?.data?.detail || 'Failed to delete API key')
     } finally {
       setDeletingKeyId(null)
     }
@@ -124,7 +124,7 @@ export function MCPKeysModal({ open, onClose }: MCPKeysModalProps) {
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text)
     setIsCopied(true)
-    showToast('Copied to clipboard', 'success')
+    showToast.success('Copied to clipboard')
     setTimeout(() => setIsCopied(false), 2000)
   }
 

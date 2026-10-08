@@ -854,6 +854,10 @@ export default function DatabasesPage() {
         alert('Please select at least one file')
         return
       }
+      if (!uploadFileType) {
+        alert('Unable to detect file type. Supported: CSV, Excel, Parquet, JSON')
+        return
+      }
 
       uploadMultipleFilesMutation.mutate(
         { files: uploadFiles, name: uploadConnectionName, aliases: uploadFileAliases, fileType: uploadFileType },
@@ -898,6 +902,10 @@ export default function DatabasesPage() {
       // File upload mode
       if (uploadFiles.length === 0) {
         alert('Please select at least one file')
+        return
+      }
+      if (!uploadFileType) {
+        alert('Unable to detect file type. Supported: CSV, Excel, Parquet, JSON')
         return
       }
 

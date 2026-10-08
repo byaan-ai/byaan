@@ -191,6 +191,7 @@ export interface ViewerDashboardDetail {
   html_content: string
   version: number
   notebook_id: string
+  notebook_name?: string | null
   created_at: string | null
 }
 
