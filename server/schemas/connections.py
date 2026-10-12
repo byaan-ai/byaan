@@ -4,7 +4,11 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+# "require" encrypts without verifying the certificate (works through SSH/SSM tunnels);
+# "verify-full" also validates the certificate chain and hostname.
+SQL_SSL_MODES = ("require", "verify-full")
 
 
 class ConnectionCreate(BaseModel):
@@ -12,6 +16,14 @@ class ConnectionCreate(BaseModel):
     name: str | None = None
     connection_obj: dict[str, Any]
     is_public: bool | None = None
+
+    @field_validator("connection_obj")
+    @classmethod
+    def validate_ssl_mode(cls, connection_obj: dict[str, Any]) -> dict[str, Any]:
+        ssl_mode = connection_obj.get("ssl_mode")
+        if ssl_mode is not None and ssl_mode not in SQL_SSL_MODES:
+            raise ValueError(f"ssl_mode must be one of {', '.join(SQL_SSL_MODES)}")
+        return connection_obj
 
 
 class ConnectionRead(BaseModel):

@@ -407,6 +407,15 @@ export function ConnectionModal({
                     </div>
                   )}
 
+                  {currentConnection.connection_obj?.ssl_mode && (
+                    <div>
+                      <div className="text-gray-400 mb-1">SSL</div>
+                      <div className="text-white font-medium">
+                        {currentConnection.connection_obj.ssl_mode === 'verify-full' ? 'Encrypted + verified' : 'Encrypted'}
+                      </div>
+                    </div>
+                  )}
+
                   <div>
                     <div className="text-gray-400 mb-1">Connected At</div>
                     <div className="text-white font-medium">
