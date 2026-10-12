@@ -4,6 +4,7 @@ import ast
 import asyncio
 import json
 import re
+import ssl
 import urllib.parse
 from datetime import UTC, date, datetime, time
 from time import perf_counter
@@ -24,6 +25,7 @@ from sqlglot import errors as sqlglot_errors
 from sqlglot import exp
 
 from server.repositories.connections import ConnectionRepository
+from server.schemas.connections import SQL_SSL_MODES
 from server.services.dataset import DatasetService
 from server.services.file_operations import DataFrameFileService
 from server.utils.custom_logger import get_logger
@@ -968,9 +970,30 @@ class AsyncSQLConnector:
 
         # Add MSSQL-specific ODBC parameters
         if self.db_type == "mssql":
-            base_url += "?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes&Encrypt=no"
+            ssl_mode = self._ssl_mode()
+            encrypt = "yes" if ssl_mode else "no"
+            trust_cert = "no" if ssl_mode == "verify-full" else "yes"
+            base_url += f"?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate={trust_cert}&Encrypt={encrypt}"
 
         return base_url
+
+    def _ssl_mode(self) -> str | None:
+        ssl_mode = self.connection_obj.get("ssl_mode")
+        return ssl_mode if ssl_mode in SQL_SSL_MODES else None
+
+    def _connect_args(self) -> dict[str, Any]:
+        """Driver-level SSL settings for PostgreSQL and MySQL (MSSQL uses URL params)."""
+        ssl_mode = self._ssl_mode()
+        if not ssl_mode or self.db_type not in ("pg", "mysql"):
+            return {}
+
+        # OS trust store plus certifi, so teams can trust private CAs (e.g. the AWS RDS bundle) system-wide
+        context = ssl.create_default_context()
+        context.load_verify_locations(cafile=certifi.where())
+        if ssl_mode == "require":
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        return {"ssl": context}
 
     async def connect(self):
         """Create async SQLAlchemy engine."""
@@ -982,6 +1005,7 @@ class AsyncSQLConnector:
             # Create async engine
             self.engine = create_async_engine(
                 connection_url,
+                connect_args=self._connect_args(),
                 echo=False,
                 pool_size=10,
                 max_overflow=20,
@@ -2931,7 +2955,7 @@ class DatabaseOperationsService:
             temp_connector = AsyncSQLConnector(connection_obj, db_type=db_type)
             connection_url = temp_connector._build_connection_url()
             # Create temporary async engine for schema introspection
-            engine = create_async_engine(connection_url, echo=False)
+            engine = create_async_engine(connection_url, connect_args=temp_connector._connect_args(), echo=False)
 
             try:
                 async with engine.connect() as conn:

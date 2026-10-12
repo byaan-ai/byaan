@@ -7,7 +7,7 @@ API keys, connection strings) are never exposed to the frontend.
 
 SENSITIVE_FIELDS = {"password", "api_key", "secret", "token", "connection_string", "username", "user"}
 
-SAFE_FIELDS = {"host", "port", "database", "dataset_type", "db_type", "files", "ssl", "schema", "driver"}
+SAFE_FIELDS = {"host", "port", "database", "dataset_type", "db_type", "files", "ssl", "ssl_mode", "schema", "driver"}
 
 
 def redact_connection_obj(connection_obj: dict | None) -> dict:

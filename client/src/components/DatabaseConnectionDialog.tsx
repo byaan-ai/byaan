@@ -11,6 +11,7 @@ import type { ConnectionType, Datasource, DatabricksCatalog, DatabricksOAuthToke
 import { DatabricksOAuthSettings } from './databricks/DatabricksOAuthSettings'
 import { useAppConfig } from '../hooks/useAppConfig'
 import { openExternalUrl } from '../lib/tauri-api'
+import { SslModeField, type SslMode } from './SslModeField'
 
 type DatabricksPair = { catalog: string; schema: string | null }
 const pairKey = (p: DatabricksPair) => `${p.catalog}::${p.schema ?? '*'}`
@@ -107,6 +108,8 @@ export function DatabaseConnectionDialog({
     accessToken: '',
     catalog: '',
     databricksSchema: '',
+    sslEnabled: false,
+    sslMode: 'require' as SslMode,
   })
 
   // Upload files state
@@ -653,7 +656,8 @@ export function DatabaseConnectionDialog({
           port: parseInt(connectionConfig.port),
           database: connectionConfig.database,
           user: connectionConfig.user,
-          password: connectionConfig.password
+          password: connectionConfig.password,
+          ...(connectionConfig.sslEnabled && { ssl_mode: connectionConfig.sslMode }),
         }
       }
 
@@ -687,6 +691,8 @@ export function DatabaseConnectionDialog({
         accessToken: '',
         catalog: '',
         databricksSchema: '',
+        sslEnabled: false,
+        sslMode: 'require',
       })
       setUploadFiles([])
       setUploadFileAliases({})
@@ -1608,6 +1614,14 @@ export function DatabaseConnectionDialog({
                           />
                         </div>
                       </div>
+
+                      <SslModeField
+                        enabled={connectionConfig.sslEnabled}
+                        mode={connectionConfig.sslMode}
+                        onEnabledChange={(sslEnabled) => setConnectionConfig(prev => ({ ...prev, sslEnabled }))}
+                        onModeChange={(sslMode) => setConnectionConfig(prev => ({ ...prev, sslMode }))}
+                        disabled={isLoading}
+                      />
                     </div>
                   )}
                 </div>

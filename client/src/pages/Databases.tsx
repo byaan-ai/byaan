@@ -18,6 +18,7 @@ import { useScopes } from '../hooks/useScopes'
 import { useAppConfig } from '../hooks/useAppConfig'
 import { DatabricksOAuthSettings } from '../components/databricks/DatabricksOAuthSettings'
 import { isTauriApp, openExternalUrl } from '../lib/tauri-api'
+import { SslModeField, type SslMode } from '../components/SslModeField'
 
 export default function DatabasesPage() {
   const queryClient = useQueryClient()
@@ -73,6 +74,8 @@ export default function DatabasesPage() {
     accessToken: '',
     catalog: '',
     databricksSchema: '',
+    sslEnabled: false,
+    sslMode: 'require' as SslMode,
   })
 
   const [togglingVisibility, setTogglingVisibility] = useState<string | null>(null)
@@ -517,7 +520,8 @@ export default function DatabasesPage() {
         port: parseInt(connectionConfig.port),
         database: connectionConfig.database,
         user: connectionConfig.user,
-        password: connectionConfig.password
+        password: connectionConfig.password,
+        ...(connectionConfig.sslEnabled && { ssl_mode: connectionConfig.sslMode }),
       }
     }
 
@@ -555,6 +559,8 @@ export default function DatabasesPage() {
       accessToken: '',
       catalog: '',
       databricksSchema: '',
+      sslEnabled: false,
+      sslMode: 'require',
     })
     resetCSVForm()
     resetUploadForm()
@@ -2016,6 +2022,14 @@ export default function DatabasesPage() {
                             />
                           </div>
                         </div>
+
+                        <SslModeField
+                          enabled={connectionConfig.sslEnabled}
+                          mode={connectionConfig.sslMode}
+                          onEnabledChange={(sslEnabled) => setConnectionConfig(prev => ({ ...prev, sslEnabled }))}
+                          onModeChange={(sslMode) => setConnectionConfig(prev => ({ ...prev, sslMode }))}
+                          disabled={createMutation.isPending}
+                        />
                       </div>
                     )}
                   </div>

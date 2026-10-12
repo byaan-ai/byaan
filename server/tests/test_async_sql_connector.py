@@ -4,11 +4,15 @@ Tests for AsyncSQLConnector — limit logic, query execution, connection URL bui
 Uses SQLite in-memory for integration tests where a real engine is needed.
 """
 
+import ssl
+
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from server.schemas.connections import ConnectionCreate
 from server.services.database_operations import AsyncSQLConnector
 
 # ---------------------------------------------------------------------------
@@ -128,12 +132,67 @@ class TestBuildConnectionUrl:
 
     def test_url_encodes_special_chars_in_password(self):
         c = AsyncSQLConnector(
-            {"host": "localhost", "port": 5432, "database": "db", "user": "u", "password": "p@ss/word"},
+            {"host": "localhost", "port": 5432, "database": "db", "user": "u", "password": "a@b/c"},
             db_type="pg",
         )
         url = c._build_connection_url()
-        assert "p@ss/word" not in url
-        assert "p%40ss" in url
+        assert "a@b/c" not in url
+        assert "a%40b%2Fc" in url
+
+
+# ---------------------------------------------------------------------------
+# SSL mode (unit tests)
+# ---------------------------------------------------------------------------
+
+
+def _sql_obj(**extra):
+    return {"host": "db.example.com", "port": 5432, "database": "db", "user": "u", "password": "p", **extra}
+
+
+class TestSslMode:
+    @pytest.mark.parametrize("db_type", ["pg", "mysql"])
+    def test_no_ssl_mode_has_no_connect_args(self, db_type):
+        assert AsyncSQLConnector(_sql_obj(), db_type=db_type)._connect_args() == {}
+
+    @pytest.mark.parametrize("db_type", ["pg", "mysql"])
+    def test_require_encrypts_without_verifying(self, db_type):
+        ctx = AsyncSQLConnector(_sql_obj(ssl_mode="require"), db_type=db_type)._connect_args()["ssl"]
+        assert isinstance(ctx, ssl.SSLContext)
+        assert ctx.verify_mode == ssl.CERT_NONE
+        assert ctx.check_hostname is False
+
+    @pytest.mark.parametrize("db_type", ["pg", "mysql"])
+    def test_verify_full_checks_cert_and_hostname(self, db_type):
+        ctx = AsyncSQLConnector(_sql_obj(ssl_mode="verify-full"), db_type=db_type)._connect_args()["ssl"]
+        assert ctx.verify_mode == ssl.CERT_REQUIRED
+        assert ctx.check_hostname is True
+
+    def test_unknown_ssl_mode_is_ignored(self):
+        assert AsyncSQLConnector(_sql_obj(ssl_mode="bogus"), db_type="pg")._connect_args() == {}
+
+    def test_sqlite_ignores_ssl_mode(self):
+        assert (
+            AsyncSQLConnector({"database": ":memory:", "ssl_mode": "require"}, db_type="sqlite")._connect_args() == {}
+        )
+
+    @pytest.mark.parametrize(
+        ("ssl_mode", "encrypt", "trust_cert"),
+        [(None, "no", "yes"), ("require", "yes", "yes"), ("verify-full", "yes", "no")],
+    )
+    def test_mssql_url_params(self, ssl_mode, encrypt, trust_cert):
+        obj = _sql_obj(ssl_mode=ssl_mode) if ssl_mode else _sql_obj()
+        url = AsyncSQLConnector(obj, db_type="mssql")._build_connection_url()
+        assert f"Encrypt={encrypt}" in url
+        assert f"TrustServerCertificate={trust_cert}" in url
+
+    @pytest.mark.parametrize("ssl_mode", ["require", "verify-full"])
+    def test_api_accepts_known_ssl_modes(self, ssl_mode):
+        payload = ConnectionCreate(type="pg", connection_obj=_sql_obj(ssl_mode=ssl_mode))
+        assert payload.connection_obj["ssl_mode"] == ssl_mode
+
+    def test_api_rejects_unknown_ssl_mode(self):
+        with pytest.raises(ValidationError, match="ssl_mode must be one of"):
+            ConnectionCreate(type="pg", connection_obj=_sql_obj(ssl_mode="prefer"))
 
 
 # ---------------------------------------------------------------------------
