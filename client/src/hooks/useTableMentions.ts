@@ -1079,7 +1079,7 @@ export function useTableMentions({
             if (columnsForHoveredTable[selectedColumnIndex]) {
               e.preventDefault()
               e.stopPropagation()
-              handleColumnSelect(columnsForHoveredTable[selectedColumnIndex].name, hoveredTable)
+              handleColumnSelect(columnsForHoveredTable[selectedColumnIndex].name, hoveredTable || undefined)
               return
             }
             break

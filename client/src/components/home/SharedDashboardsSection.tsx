@@ -615,9 +615,14 @@ export default function SharedDashboardsSection({ onLoadingChange, onError, deep
   }
 
   const handleSaveTitle = async () => {
-    const notebookId = dashboardToEdit?.notebook_id || selectedDashboard?.notebook_id
+    const editingDashboard = dashboardToEdit
+    const notebookId = editingDashboard?.notebook_id || selectedDashboard?.notebook_id
     if (!notebookId) {
       showToast.error('Missing notebook information')
+      return
+    }
+    if (!editingDashboard) {
+      showToast.error('Missing dashboard information')
       return
     }
     if (!editingTitleValue.trim()) return
@@ -631,12 +636,12 @@ export default function SharedDashboardsSection({ onLoadingChange, onError, deep
           folders: prev.folders.map(folder => ({
             ...folder,
             dashboards: folder.dashboards.map(db =>
-              db.id === dashboardToEdit.id ? { ...db, notebook_name: editingTitleValue.trim() } : db
+              db.id === editingDashboard.id ? { ...db, notebook_name: editingTitleValue.trim() } : db
             )
           }))
         }
       })
-      setClickedDashboardInfo(prev => prev?.id === dashboardToEdit.id ? { ...prev, notebook_name: editingTitleValue.trim() } : prev)
+      setClickedDashboardInfo(prev => prev?.id === editingDashboard.id ? { ...prev, notebook_name: editingTitleValue.trim() } : prev)
       setIsEditingTitle(false)
       setDashboardToEdit(null)
       showToast.success('Title updated')

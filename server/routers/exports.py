@@ -4,20 +4,28 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import AuthContext, require_scope
+from server.auth.object_authorizer import NotebookAction, authorize_notebook_action
 from server.auth.scopes import Scope
 from server.db.session import get_async_session
 from server.schemas.notebook_export import ShareNotebookJsonRequest
 from server.schemas.standard_response import success_response
 from server.services.export_service import CompiledHtmlExportService
-from server.services.notebook import NotebookService
 from server.services.notebook_export_service import NotebookExportService
 from server.services.settings import SettingsService
+from server.services.sharing import SharingService
 from server.utils.config_loader import get_waitlist_config
 from server.utils.custom_logger import get_logger
 from server.utils.deployment import is_feature_enabled
+from server.utils.error_sanitizer import sanitize_error_message, sanitize_text
 
 router = APIRouter()
 logger = get_logger(__name__)
+
+
+def _log_worker_error(response: httpx.Response | object) -> None:
+    status_code = getattr(response, "status_code", "unknown")
+    body = sanitize_text(str(getattr(response, "text", "")))
+    logger.error(f"Worker returned error: {status_code} - {body}")
 
 
 def get_worker_url() -> str:
@@ -57,9 +65,12 @@ async def export_pdf(
 
     from server.services.pdf_service import PDFService, PDFServiceError
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.EXPORT,
+    )
 
     try:
         from uuid import UUID
@@ -74,7 +85,7 @@ async def export_pdf(
 
     except PDFServiceError as e:
         logger.error(
-            f"Failed to generate PDF: {str(e)}",
+            f"Failed to generate PDF: {sanitize_error_message(e)}",
             posthog_context={
                 "function": "export_pdf",
                 "notebook_id": notebook_id,
@@ -82,22 +93,24 @@ async def export_pdf(
             },
         )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to generate PDF: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate PDF: {sanitize_error_message(e)}",
         )
     except ValueError as e:
         logger.error(
-            f"Invalid notebook ID: {str(e)}",
+            f"Invalid notebook ID: {sanitize_error_message(e)}",
             posthog_context={"function": "export_pdf", "notebook_id": notebook_id},
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
     except Exception as e:
         logger.error(
-            f"Error generating PDF: {str(e)}",
+            f"Error generating PDF: {sanitize_error_message(e)}",
             exc_info=True,
             posthog_context={"function": "export_pdf", "notebook_id": notebook_id, "version": version},
         )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to generate PDF: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate PDF: {sanitize_error_message(e)}",
         )
 
 
@@ -116,10 +129,12 @@ async def export_compiled_html(
     - Works without a backend API
     - Can be opened in any browser
     """
-    # Verify notebook exists
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.EXPORT,
+    )
 
     try:
         # Generate compiled HTML with embedded data
@@ -136,7 +151,7 @@ async def export_compiled_html(
 
     except ValueError as e:
         logger.error(
-            f"Failed to generate compiled HTML: {str(e)}",
+            f"Failed to generate compiled HTML: {sanitize_error_message(e)}",
             posthog_context={
                 "function": "export_compiled_html",
                 "notebook_id": notebook_id,
@@ -147,11 +162,12 @@ async def export_compiled_html(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         logger.error(
-            f"Error generating compiled HTML: {str(e)}",
+            f"Error generating compiled HTML: {sanitize_error_message(e)}",
             posthog_context={"function": "export_compiled_html", "notebook_id": notebook_id, "version": version},
         )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to generate compiled HTML: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate compiled HTML: {sanitize_error_message(e)}",
         )
 
 
@@ -161,7 +177,7 @@ async def share_notebook(
     version: int | None = None,
     password: str | None = None,
     update_password: bool = False,
-    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_EXPORT)),
+    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_SHARE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """
@@ -178,9 +194,12 @@ async def share_notebook(
     if not api_key_setting:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.SHARE_MANAGE,
+    )
 
     try:
         worker_url = get_worker_url()
@@ -212,10 +231,20 @@ async def share_notebook(
             )
 
         if response.status_code != 200:
-            logger.error(f"Worker returned error: {response.status_code} - {response.text}")
+            _log_worker_error(response)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create share link")
 
         data = response.json()
+        await SharingService(session).ensure_notebook_worker_grant(
+            tenant_id=auth.tenant_id,
+            actor_id=auth.user_id,
+            notebook_id=notebook_id,
+            legacy_surface="html_notebook_share",
+            legacy_id=notebook_id,
+            has_password=bool(data.get("has_password", bool(password and password.strip()))),
+            password=password.strip() if password and password.strip() else None,
+            metadata={"version": version, "share_url": f"https://www.byaan.ai/share/{notebook_id}"},
+        )
         is_update = not data.get("is_new", True)
         return success_response(
             data={
@@ -227,7 +256,7 @@ async def share_notebook(
         )
 
     except httpx.ConnectError as e:
-        logger.error(f"Error sharing notebook: {str(e)}")
+        logger.error(f"Error sharing notebook: {sanitize_error_message(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to connect to sharing service. Please check your network connection.",
@@ -235,9 +264,10 @@ async def share_notebook(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error sharing notebook: {str(e)}")
+        logger.error(f"Error sharing notebook: {sanitize_error_message(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to share notebook: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to share notebook: {sanitize_error_message(e)}",
         ) from e
 
 
@@ -253,9 +283,12 @@ async def get_notebook_share(
     if not api_key_setting:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.SHARE_MANAGE,
+    )
 
     try:
         worker_url = get_worker_url()
@@ -271,7 +304,7 @@ async def get_notebook_share(
             return success_response(data={"share": None}, message="No share exists")
 
         if response.status_code != 200:
-            logger.error(f"Worker returned error: {response.status_code} - {response.text}")
+            _log_worker_error(response)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to get share")
 
         data = response.json()
@@ -281,13 +314,12 @@ async def get_notebook_share(
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "has_password": data.get("has_password", False),
-            "password": data.get("password"),
         }
 
         return success_response(data={"share": share}, message="Share retrieved")
 
     except httpx.ConnectError as e:
-        logger.error(f"Error getting share: {str(e)}")
+        logger.error(f"Error getting share: {sanitize_error_message(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to connect to sharing service.",
@@ -295,16 +327,17 @@ async def get_notebook_share(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting share: {str(e)}")
+        logger.error(f"Error getting share: {sanitize_error_message(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to get share: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get share: {sanitize_error_message(e)}",
         ) from e
 
 
 @router.delete("/notebooks/{notebook_id}/share")
 async def delete_share(
     notebook_id: str,
-    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_EXPORT)),
+    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_SHARE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Delete the share for a notebook (single share per notebook, uses notebook_id as share_id)."""
@@ -313,9 +346,12 @@ async def delete_share(
     if not api_key_setting:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.SHARE_MANAGE,
+    )
 
     try:
         worker_url = get_worker_url()
@@ -330,13 +366,20 @@ async def delete_share(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share not found")
 
         if response.status_code != 200:
-            logger.error(f"Worker returned error: {response.status_code} - {response.text}")
+            _log_worker_error(response)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete share")
 
+        await SharingService(session).revoke_legacy_grant(
+            tenant_id=auth.tenant_id,
+            legacy_surface="html_notebook_share",
+            legacy_id=notebook_id,
+            actor_id=auth.user_id,
+            reason="worker html notebook share deleted",
+        )
         return success_response(data=None, message="Share deleted")
 
     except httpx.ConnectError as e:
-        logger.error(f"Error deleting share: {str(e)}")
+        logger.error(f"Error deleting share: {sanitize_error_message(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to connect to sharing service.",
@@ -344,9 +387,10 @@ async def delete_share(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting share: {str(e)}")
+        logger.error(f"Error deleting share: {sanitize_error_message(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to delete share: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete share: {sanitize_error_message(e)}",
         ) from e
 
 
@@ -372,9 +416,12 @@ async def export_notebook_json(
 
     The exported JSON can be shared manually or imported into another Byaan instance.
     """
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.EXPORT,
+    )
 
     try:
         export_data = await NotebookExportService.export_notebook(session, notebook_id)
@@ -390,7 +437,7 @@ async def export_notebook_json(
 
     except ValueError as e:
         logger.error(
-            f"Failed to export notebook JSON: {str(e)}",
+            f"Failed to export notebook JSON: {sanitize_error_message(e)}",
             posthog_context={
                 "function": "export_notebook_json",
                 "notebook_id": notebook_id,
@@ -400,11 +447,12 @@ async def export_notebook_json(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         logger.error(
-            f"Error exporting notebook JSON: {str(e)}",
+            f"Error exporting notebook JSON: {sanitize_error_message(e)}",
             posthog_context={"function": "export_notebook_json", "notebook_id": notebook_id},
         )
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to export notebook: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to export notebook: {sanitize_error_message(e)}",
         )
 
 
@@ -412,7 +460,7 @@ async def export_notebook_json(
 async def share_notebook_json(
     notebook_id: str,
     request: ShareNotebookJsonRequest | None = None,
-    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_EXPORT)),
+    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_SHARE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """
@@ -433,9 +481,12 @@ async def share_notebook_json(
     if not api_key_setting:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.SHARE_MANAGE,
+    )
 
     try:
         # Export notebook to JSON format
@@ -461,17 +512,27 @@ async def share_notebook_json(
             )
 
         if response.status_code != 200:
-            logger.error(f"Worker returned error: {response.status_code} - {response.text}")
+            _log_worker_error(response)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create share link")
 
         data = response.json()
+        await SharingService(session).ensure_notebook_worker_grant(
+            tenant_id=auth.tenant_id,
+            actor_id=auth.user_id,
+            notebook_id=notebook_id,
+            legacy_surface="json_notebook_share",
+            legacy_id=str(data["id"]),
+            has_password=bool(request and request.password and request.password.strip()),
+            password=request.password.strip() if request and request.password and request.password.strip() else None,
+            metadata={"share_id": str(data["id"])},
+        )
         return success_response(
             data={"share_id": data["id"]},
             message="Notebook shared successfully",
         )
 
     except httpx.ConnectError as e:
-        logger.error(f"Error sharing notebook JSON: {str(e)}")
+        logger.error(f"Error sharing notebook JSON: {sanitize_error_message(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to connect to sharing service. Please check your network connection.",
@@ -479,16 +540,17 @@ async def share_notebook_json(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error sharing notebook JSON: {str(e)}")
+        logger.error(f"Error sharing notebook JSON: {sanitize_error_message(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to share notebook: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to share notebook: {sanitize_error_message(e)}",
         ) from e
 
 
 @router.get("/notebooks/{notebook_id}/shares/notebook")
 async def list_notebook_json_shares(
     notebook_id: str,
-    auth: AuthContext = Depends(require_scope(Scope.NOTEBOOK_READ_OWN)),
+    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_SHARE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """List all JSON shares for a notebook."""
@@ -497,9 +559,12 @@ async def list_notebook_json_shares(
     if not api_key_setting:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.SHARE_MANAGE,
+    )
 
     try:
         worker_url = get_worker_url()
@@ -511,7 +576,7 @@ async def list_notebook_json_shares(
             )
 
         if response.status_code != 200:
-            logger.error(f"Worker returned error: {response.status_code} - {response.text}")
+            _log_worker_error(response)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list shares")
 
         data = response.json()
@@ -521,7 +586,6 @@ async def list_notebook_json_shares(
                 "id": share["id"],
                 "created_at": share["created_at"],
                 "has_password": share.get("has_password", False),
-                "password": share.get("password"),
             }
             for share in data.get("shares", [])
         ]
@@ -529,7 +593,7 @@ async def list_notebook_json_shares(
         return success_response(data={"shares": shares}, message="Shares retrieved")
 
     except httpx.ConnectError as e:
-        logger.error(f"Error listing JSON shares: {str(e)}")
+        logger.error(f"Error listing JSON shares: {sanitize_error_message(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to connect to sharing service.",
@@ -537,9 +601,10 @@ async def list_notebook_json_shares(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error listing JSON shares: {str(e)}")
+        logger.error(f"Error listing JSON shares: {sanitize_error_message(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to list shares: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list shares: {sanitize_error_message(e)}",
         ) from e
 
 
@@ -548,7 +613,7 @@ async def update_notebook_json_share_password(
     notebook_id: str,
     share_id: str,
     password: str | None = None,
-    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_EXPORT)),
+    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_SHARE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Update or remove password for a notebook JSON share."""
@@ -557,9 +622,12 @@ async def update_notebook_json_share_password(
     if not api_key_setting:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.SHARE_MANAGE,
+    )
 
     try:
         worker_url = get_worker_url()
@@ -575,7 +643,7 @@ async def update_notebook_json_share_password(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share not found")
 
         if response.status_code != 200:
-            logger.error(f"Worker returned error: {response.status_code} - {response.text}")
+            _log_worker_error(response)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update password")
 
         data = response.json()
@@ -585,7 +653,7 @@ async def update_notebook_json_share_password(
         )
 
     except httpx.ConnectError as e:
-        logger.error(f"Error updating share password: {str(e)}")
+        logger.error(f"Error updating share password: {sanitize_error_message(e)}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Unable to connect to sharing service.",
@@ -593,9 +661,10 @@ async def update_notebook_json_share_password(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating share password: {str(e)}")
+        logger.error(f"Error updating share password: {sanitize_error_message(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to update password: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update password: {sanitize_error_message(e)}",
         ) from e
 
 
@@ -603,7 +672,7 @@ async def update_notebook_json_share_password(
 async def delete_notebook_json_share(
     notebook_id: str,
     share_id: str,
-    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_EXPORT)),
+    auth: AuthContext = Depends(require_scope(Scope.DASHBOARD_SHARE)),
     session: AsyncSession = Depends(get_async_session),
 ):
     """Delete a JSON share."""
@@ -612,9 +681,12 @@ async def delete_notebook_json_share(
     if not api_key_setting:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
 
-    notebook = await NotebookService.get_notebook(session, notebook_id)
-    if notebook is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notebook not found")
+    await authorize_notebook_action(
+        session=session,
+        auth=auth,
+        notebook_id=notebook_id,
+        action=NotebookAction.SHARE_MANAGE,
+    )
 
     try:
         worker_url = get_worker_url()
@@ -629,9 +701,16 @@ async def delete_notebook_json_share(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Share not found")
 
         if response.status_code != 200:
-            logger.error(f"Worker returned error: {response.status_code} - {response.text}")
+            _log_worker_error(response)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to delete share")
 
+        await SharingService(session).revoke_legacy_grant(
+            tenant_id=auth.tenant_id,
+            legacy_surface="json_notebook_share",
+            legacy_id=share_id,
+            actor_id=auth.user_id,
+            reason="worker json notebook share deleted",
+        )
         return success_response(data=None, message="Share deleted")
 
     except httpx.ConnectError as e:

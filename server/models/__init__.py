@@ -1,9 +1,24 @@
 from server.models.connections import Connection
 from server.models.conversation_evaluation import ConversationEvaluation
 from server.models.custom_skill import CustomSkill
-from server.models.dashboard import Dashboard
+from server.models.dashboard import Dashboard, DashboardAsset, DashboardAuditEvent, DashboardRun
 from server.models.datasets import Dataset
 from server.models.datasource_annotations import DatasourceAnnotation
+from server.models.evaluation import (
+    AdvisorChangeSet,
+    AdvisorSuggestion,
+    EvaluationArtifact,
+    EvaluationAssessment,
+    EvaluationAuditEvent,
+    EvaluationCase,
+    EvaluationCaseRun,
+    EvaluationOverride,
+    EvaluationRun,
+    EvaluationSuite,
+    EvaluationSuiteVersion,
+    EvaluationTargetSnapshot,
+    PromotionDecision,
+)
 from server.models.files import File
 from server.models.folder import Folder
 from server.models.folder_dashboard import FolderDashboard
@@ -22,7 +37,15 @@ from server.models.queries import Query
 from server.models.query_cache import QueryCache
 from server.models.refresh_token import RefreshToken
 from server.models.schedules import Schedule, ScheduleRun
+from server.models.semantic_models import SemanticModel, SemanticModelAuditEvent, SemanticModelVersion
 from server.models.settings import Setting
+from server.models.sharing import (
+    SharingAuditEvent,
+    SharingCompatibilityLink,
+    SharingGrant,
+    SharingSecret,
+    SharingViewerSession,
+)
 from server.models.skill_citation import SkillCitation
 from server.models.skill_credentials import SkillCredential
 from server.models.skill_loop_lease import SkillLoopLease
@@ -32,6 +55,9 @@ from server.models.skill_version import SkillVersion
 from server.models.slack_conversation import SlackConversation
 from server.models.slack_event_log import SlackEventLog
 from server.models.slack_workspace import SlackWorkspace
+from server.models.source_connections import SourceConnection
+from server.models.source_resources import SourceResource
+from server.models.source_snapshots import SourceSnapshot
 from server.models.tenant import Tenant
 from server.models.tenant_invitation import InvitationRole, InvitationStatus, TenantInvitation
 from server.models.tenant_member import TenantMember, TenantRole
@@ -45,8 +71,23 @@ __all__ = [
     "ConversationEvaluation",
     "CustomSkill",
     "Dashboard",
+    "DashboardAsset",
+    "DashboardAuditEvent",
+    "DashboardRun",
     "DatasourceAnnotation",
     "Dataset",
+    "AdvisorChangeSet",
+    "AdvisorSuggestion",
+    "EvaluationArtifact",
+    "EvaluationAssessment",
+    "EvaluationAuditEvent",
+    "EvaluationCase",
+    "EvaluationCaseRun",
+    "EvaluationOverride",
+    "EvaluationRun",
+    "EvaluationSuite",
+    "EvaluationSuiteVersion",
+    "EvaluationTargetSnapshot",
     "File",
     "Folder",
     "GitHubRepository",
@@ -67,9 +108,21 @@ __all__ = [
     "Query",
     "QueryCache",
     "RefreshToken",
+    "PromotionDecision",
     "Schedule",
     "ScheduleRun",
+    "SemanticModel",
+    "SemanticModelAuditEvent",
+    "SemanticModelVersion",
     "Setting",
+    "SharingAuditEvent",
+    "SharingCompatibilityLink",
+    "SharingGrant",
+    "SharingSecret",
+    "SharingViewerSession",
+    "SourceConnection",
+    "SourceResource",
+    "SourceSnapshot",
     "SkillCitation",
     "SkillCredential",
     "SkillLoopLease",

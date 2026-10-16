@@ -1,6 +1,10 @@
 import { toast, type ToastOptions } from 'react-toastify'
 
-const defaultOptions: ToastOptions = {
+type ByaanToastOptions = ToastOptions & {
+  progressStyle?: React.CSSProperties
+}
+
+const defaultOptions: ByaanToastOptions = {
   position: 'bottom-right',
   autoClose: 3000,
   hideProgressBar: false,
@@ -21,7 +25,7 @@ const defaultOptions: ToastOptions = {
 }
 
 export const showToast = {
-  success: (message: string, options?: ToastOptions) => {
+  success: (message: string, options?: ByaanToastOptions) => {
     toast.success(message, {
       ...defaultOptions,
       style: {
@@ -37,7 +41,7 @@ export const showToast = {
     })
   },
 
-  error: (message: string, options?: ToastOptions) => {
+  error: (message: string, options?: ByaanToastOptions) => {
     toast.error(message, {
       ...defaultOptions,
       style: {
@@ -53,7 +57,7 @@ export const showToast = {
     })
   },
 
-  warning: (message: string, options?: ToastOptions) => {
+  warning: (message: string, options?: ByaanToastOptions) => {
     toast.warning(message, {
       ...defaultOptions,
       style: {
@@ -69,7 +73,7 @@ export const showToast = {
     })
   },
 
-  info: (message: string, options?: ToastOptions) => {
+  info: (message: string, options?: ByaanToastOptions) => {
     toast.info(message, {
       ...defaultOptions,
       style: {
@@ -85,7 +89,7 @@ export const showToast = {
     })
   },
 
-  loading: (message: string, options?: ToastOptions) => {
+  loading: (message: string, options?: ByaanToastOptions) => {
     return toast.loading(message, {
       ...defaultOptions,
       style: {

@@ -48,7 +48,7 @@ interface DashboardPreviewPanelProps {
   iframeErrors?: unknown[]
   activeTab?: TabKey
   onActiveTabChange?: (tab: TabKey) => void
-  iframeRef?: React.RefObject<HTMLIFrameElement>
+  iframeRef?: React.RefObject<HTMLIFrameElement | null>
   htmlEditTimeline?: HtmlEditTimelineEntry[]
   liveCodeOverride?: string | null
   isLiveStreamEnabled?: boolean

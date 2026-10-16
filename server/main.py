@@ -52,11 +52,13 @@ from server.routers import claude_oauth as claude_oauth_router
 from server.routers import codex_oauth as codex_oauth_router
 from server.routers import connections as connections_router
 from server.routers import custom_skills as custom_skills_router
+from server.routers import dashboard as dashboard_router
 from server.routers import databricks_oauth as databricks_oauth_router
 from server.routers import datasets as datasets_router  # Dataset management
 from server.routers import (
     datasources as datasources_router,
 )  # Unified datasources (connections + datasets)
+from server.routers import evaluation as evaluation_router
 from server.routers import exports as exports_router
 from server.routers import (
     file_upload as file_upload_router,
@@ -73,11 +75,15 @@ from server.routers import queries as queries_router
 from server.routers import raw_query as raw_query_router
 from server.routers import schedules as schedules_router
 from server.routers import scopes as scopes_router
+from server.routers import semantic_models as semantic_models_router
 from server.routers import settings as settings_router
+from server.routers import sharing as sharing_router
 from server.routers import skill_loop as skill_loop_router
 from server.routers import skill_suggestions as skill_suggestions_router
 from server.routers import skills as skills_router
 from server.routers import slack as slack_router
+from server.routers import source_connections as source_connections_router
+from server.routers import source_resources as source_resources_router
 from server.routers import tenant as tenant_router
 from server.routers import user_preferences as user_preferences_router
 from server.routers import users as users_router
@@ -582,6 +588,11 @@ app.include_router(codex_oauth_router.router, tags=["codex-oauth"])
 app.include_router(exports_router.router, prefix="/api", tags=["exports"])
 
 app.include_router(imports_router.router, prefix="/api", tags=["imports"])
+app.include_router(dashboard_router.router, prefix="/api", tags=["dashboard"])
+app.include_router(evaluation_router.router, prefix="/api", tags=["evaluation"])
+app.include_router(source_connections_router.router, prefix="/api", tags=["source-connections"])
+app.include_router(source_resources_router.router, prefix="/api", tags=["source-resources"])
+app.include_router(semantic_models_router.router, prefix="/api", tags=["semantic-models"])
 
 app.include_router(user_preferences_router.router, prefix="/api", tags=["user-preferences"])
 app.include_router(learnings_router.router, prefix="/api", tags=["learnings"])
@@ -615,6 +626,7 @@ app.include_router(settings_router.router, prefix="/api", tags=["settings"])
 app.include_router(tenant_router.router, prefix="/api", tags=["tenants"])
 
 app.include_router(folders_router.router, prefix="/api", tags=["folders"])
+app.include_router(sharing_router.router, prefix="/api", tags=["sharing"])
 
 app.include_router(github_router.router, prefix="/api", tags=["github"])
 app.include_router(databricks_oauth_router.router, prefix="/api", tags=["databricks-oauth"])

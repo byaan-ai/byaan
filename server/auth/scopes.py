@@ -61,6 +61,9 @@ class Scope(str, Enum):
     DASHBOARD_EXPORT = "dashboard.export"
     DASHBOARD_SHARE = "dashboard.share"
 
+    # Sharing scopes
+    SHARING_READ = "sharing.read"
+
     # Annotation scopes
     ANNOTATION_CREATE = "annotation.create"
     ANNOTATION_READ = "annotation.read"
@@ -135,6 +138,8 @@ OWNER_SCOPES: list[str] = [
     Scope.DASHBOARD_READ.value,
     Scope.DASHBOARD_EXPORT.value,
     Scope.DASHBOARD_SHARE.value,
+    # Sharing
+    Scope.SHARING_READ.value,
     # Annotation
     Scope.ANNOTATION_CREATE.value,
     Scope.ANNOTATION_READ.value,
@@ -198,6 +203,8 @@ ADMIN_SCOPES: list[str] = [
     Scope.DASHBOARD_READ.value,
     Scope.DASHBOARD_EXPORT.value,
     Scope.DASHBOARD_SHARE.value,
+    # Sharing
+    Scope.SHARING_READ.value,
     # Annotation
     Scope.ANNOTATION_CREATE.value,
     Scope.ANNOTATION_READ.value,
@@ -258,6 +265,8 @@ MEMBER_SCOPES: list[str] = [
     # Dashboard
     Scope.DASHBOARD_READ.value,
     Scope.DASHBOARD_EXPORT.value,
+    # Sharing
+    Scope.SHARING_READ.value,
     # Annotation (read-only)
     Scope.ANNOTATION_READ.value,
     # Tenant (read-only)

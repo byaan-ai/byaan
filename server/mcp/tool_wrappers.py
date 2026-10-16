@@ -5,15 +5,27 @@ These wrappers adapt Byaan's internal tools (which use RunContextWrapper)
 to work with FastMCP's tool protocol.
 """
 
+import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from agents.run_context import RunContextWrapper
+from fastapi import HTTPException
+from pydantic import ValidationError
+from sqlalchemy import select
 
+from server.auth.scopes import Scope, get_scopes_for_role, has_scope
 from server.auth.tenant_context import set_tenant_id
 from server.db.session import AsyncSessionFactory
+from server.models.dashboard import Dashboard, DashboardAsset
+from server.models.notebooks import Notebook
+from server.models.tenant import Tenant
+from server.models.tenant_member import TenantMember, TenantRole
+from server.repositories.dashboard import DashboardRepository
+from server.services.dashboard import DashboardService
 from server.utils.custom_logger import get_logger
+from server.utils.error_sanitizer import sanitize_error_message, sanitize_error_payload
 
 if TYPE_CHECKING:
     from server.mcp.session_manager import MCPSessionManager
@@ -27,6 +39,226 @@ LEARNING_HINT = (
 )
 
 _session_manager: "MCPSessionManager | None" = None
+
+MCP_EVALUATION_DEFAULT_LIMIT = 20
+MCP_EVALUATION_MAX_LIMIT = 50
+MCP_DASHBOARD_DEFAULT_LIMIT = 20
+MCP_DASHBOARD_MAX_LIMIT = 50
+MCP_SOURCE_DEFAULT_LIMIT = 50
+MCP_SOURCE_MAX_LIMIT = 100
+MCP_SEMANTIC_DEFAULT_LIMIT = 50
+MCP_SEMANTIC_MAX_LIMIT = 100
+
+
+def _json_error(error: Exception | str, *, operation: str | None = None) -> str:
+    if isinstance(error, HTTPException):
+        detail = sanitize_error_payload(error.detail)
+        message = detail if isinstance(detail, str) else detail.get("message", detail.get("error", str(detail)))
+        payload: dict[str, Any] = {
+            "success": False,
+            "error": message,
+            "status_code": error.status_code,
+            "retryable": error.status_code >= 500,
+        }
+        if operation:
+            payload["operation"] = operation
+        if isinstance(detail, dict):
+            payload["details"] = detail
+        return json.dumps(payload, ensure_ascii=False, default=str)
+    payload = {"success": False, "error": sanitize_error_message(error)}
+    if operation:
+        payload["operation"] = operation
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+def _json_success(**payload: Any) -> str:
+    return json.dumps({"success": True, **payload}, ensure_ascii=False, default=str)
+
+
+def _parse_json_object(payload_json: str, *, operation: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(payload_json or "{}")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail=f"{operation} payload must be valid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail=f"{operation} payload must be a JSON object")
+    return payload
+
+
+def _value_error_to_http(error: ValueError) -> HTTPException:
+    message = str(error)
+    code = 404 if "not found" in message.lower() else 400
+    return HTTPException(status_code=code, detail=message)
+
+
+def _validation_error_to_http(operation: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=f"Invalid {operation} payload")
+
+
+def _stable_feedback_case_key(feedback: dict[str, Any]) -> str:
+    if feedback.get("case_key"):
+        return str(feedback["case_key"])
+    feedback_id = feedback.get("feedback_id") or feedback.get("trace_id")
+    if feedback_id:
+        return f"mcp-feedback-{feedback_id}"
+    digest = hashlib.sha256(json.dumps(feedback, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
+    return f"mcp-feedback-{digest}"
+
+
+async def _mcp_role_and_scopes(db_session, tenant_id: UUID, user_id: UUID) -> tuple[TenantRole, list[str]]:
+    tenant = await db_session.get(Tenant, tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    role = TenantRole.OWNER if tenant.owner_id == user_id else None
+    if role is None:
+        membership = await db_session.scalar(
+            select(TenantMember).where(TenantMember.tenant_id == tenant_id, TenantMember.user_id == user_id)
+        )
+        if not membership:
+            raise HTTPException(status_code=403, detail="MCP principal is not a tenant member")
+        role = TenantRole(membership.role)
+    return role, get_scopes_for_role(role)
+
+
+async def _require_mcp_scope(db_session, tenant_id: UUID, user_id: UUID, scope: Scope) -> TenantRole:
+    role, scopes = await _mcp_role_and_scopes(db_session, tenant_id, user_id)
+    if not has_scope(scopes, scope):
+        raise HTTPException(status_code=403, detail=f"Permission denied. Required scope: {scope.value}")
+    return role
+
+
+async def _require_mcp_any_scope(db_session, tenant_id: UUID, user_id: UUID, *required_scopes: Scope) -> TenantRole:
+    role, scopes = await _mcp_role_and_scopes(db_session, tenant_id, user_id)
+    if not any(has_scope(scopes, scope) for scope in required_scopes):
+        required = ", ".join(scope.value for scope in required_scopes)
+        raise HTTPException(status_code=403, detail=f"Permission denied. Required one of: {required}")
+    return role
+
+
+async def _require_mcp_dashboard_scope(db_session, tenant_id: UUID, user_id: UUID, scope: Scope) -> TenantRole:
+    return await _require_mcp_scope(db_session, tenant_id, user_id, scope)
+
+
+async def _assert_mcp_notebook_access(db_session, tenant_id: UUID, user_id: UUID, notebook_id: UUID) -> None:
+    notebook = await db_session.scalar(
+        select(Notebook).where(Notebook.id == notebook_id, Notebook.tenant_id == tenant_id)
+    )
+    if not notebook:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    role = await _require_mcp_dashboard_scope(db_session, tenant_id, user_id, Scope.DASHBOARD_SHARE)
+    if role == TenantRole.MEMBER and str(notebook.created_by) != str(user_id):
+        raise HTTPException(status_code=403, detail="MCP principal can only use notebooks they created")
+
+
+def _asset_compact(asset: DashboardAsset) -> dict[str, Any]:
+    return {
+        "id": str(asset.id),
+        "slug": asset.slug,
+        "name": asset.name,
+        "description": asset.description,
+        "notebook_id": str(asset.notebook_id) if asset.notebook_id else None,
+        "lifecycle": asset.lifecycle,
+        "etag": asset.etag,
+        "current_draft_version_id": str(asset.current_draft_version_id) if asset.current_draft_version_id else None,
+        "published_version_id": str(asset.published_version_id) if asset.published_version_id else None,
+        "freshness_policy": asset.freshness_policy_json or {},
+        "health_summary": asset.health_summary_json or {},
+        "updated_at": asset.updated_at.isoformat() if asset.updated_at else None,
+    }
+
+
+def _version_compact(version: Dashboard, *, include_manifest: bool = False) -> dict[str, Any]:
+    payload = {
+        "id": str(version.id),
+        "version_num": version.version_num,
+        "status": version.status,
+        "content_hash": version.content_hash,
+        "manifest_schema_version": version.manifest_schema_version,
+        "pinned_model_versions": version.pinned_model_versions_json or {},
+        "pinned_source_snapshots": version.pinned_source_snapshots_json or [],
+        "validation_result": version.validation_result_json or {},
+        "migration_state": version.migration_state,
+        "is_published_immutable": version.is_published_immutable,
+        "created_at": version.created_at.isoformat() if version.created_at else None,
+    }
+    if include_manifest:
+        payload["manifest"] = version.manifest_json or {}
+    return payload
+
+
+def _lineage_from_manifest(manifest: dict[str, Any] | None, tile_id: str = "") -> dict[str, Any]:
+    manifest = manifest or {}
+    tile_data_view_ids = {
+        tile.get("data_view_id") for tile in manifest.get("tiles", []) if not tile_id or tile.get("id") == tile_id
+    }
+    data_views = []
+    for data_view in manifest.get("data_views", []):
+        if tile_id and data_view.get("id") not in tile_data_view_ids:
+            continue
+        data_views.append(
+            {
+                "id": data_view.get("id"),
+                "kind": data_view.get("kind"),
+                "question": data_view.get("question"),
+                "lineage": data_view.get("lineage") or data_view.get("saved_query", {}).get("lineage", []),
+                "evidence": data_view.get("evidence") or [],
+            }
+        )
+    return {
+        "dashboard_id": manifest.get("dashboard_id"),
+        "semantic_bindings": manifest.get("semantic_bindings") or [],
+        "data_views": data_views,
+        "migration": manifest.get("migration") or {},
+    }
+
+
+def _compact_dashboard_run(run: dict[str, Any], limit: int = MCP_DASHBOARD_DEFAULT_LIMIT) -> dict[str, Any]:
+    limit = max(1, min(limit, MCP_DASHBOARD_MAX_LIMIT))
+    views = []
+    for view in run.get("views", []):
+        result = view.get("result")
+        has_more = False
+        if isinstance(result, list):
+            has_more = len(result) > limit
+            result = result[:limit]
+        views.append(
+            {
+                "data_view_id": view.get("data_view_id"),
+                "status": view.get("status"),
+                "schema": view.get("schema", []),
+                "result": result,
+                "row_count": view.get("row_count", 0),
+                "cached": view.get("cached", False),
+                "stale": view.get("stale", False),
+                "as_of": view.get("as_of"),
+                "warnings": view.get("warnings", []),
+                "error": view.get("error"),
+                "evidence": view.get("evidence", []),
+                "lineage": view.get("lineage", []),
+                "pagination": {"limit": limit, "has_more": has_more},
+            }
+        )
+    return {
+        "contract_version": run.get("contract_version"),
+        "run_id": run.get("run_id"),
+        "dashboard_id": run.get("dashboard_id"),
+        "dashboard_version_id": run.get("dashboard_version_id"),
+        "actor_type": run.get("actor_type"),
+        "actor_id": run.get("actor_id"),
+        "correlation_id": run.get("correlation_id"),
+        "idempotency_key": run.get("idempotency_key"),
+        "mode": run.get("mode"),
+        "normalized_filters": run.get("normalized_filters", {}),
+        "filter_digest": run.get("filter_digest"),
+        "pinned_versions": run.get("pinned_versions", {}),
+        "execution_plan_digest": run.get("execution_plan_digest"),
+        "overall_freshness": run.get("overall_freshness"),
+        "started_at": run.get("started_at"),
+        "completed_at": run.get("completed_at"),
+        "views": views,
+        "warnings": run.get("warnings", []),
+        "errors": run.get("errors", []),
+    }
 
 
 def set_session_manager(manager: "MCPSessionManager") -> None:
@@ -1241,3 +1473,1291 @@ async def create_custom_skill_wrapper(
     except Exception as e:
         logger.error(f"Error in create_custom_skill_wrapper: {e}", exc_info=True)
         return json.dumps({"success": False, "error": str(e)})
+
+
+async def list_connector_definitions_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    provider: str = "",
+    category: str = "",
+    include_planned: bool = True,
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_connections import SourceConnectionService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+        catalog = SourceConnectionService().list_connector_definitions()
+        items = list(catalog["items"])
+        if provider:
+            items = [item for item in items if item.get("provider") == provider or item.get("id") == provider]
+        if category:
+            items = [item for item in items if item.get("category") == category]
+        if not include_planned:
+            items = [item for item in items if item.get("availability") != "planned"]
+        limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+        return _json_success(
+            items=sanitize_error_payload(items[:limit]),
+            total=len(items),
+            has_more=len(items) > limit,
+            summary=catalog["summary"],
+            commercial_status="PARTIAL",
+            runtime_status="not_certified",
+        )
+    except Exception as e:
+        logger.error(f"Error in list_connector_definitions_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_connector_definitions")
+
+
+async def create_source_connection_wrapper(
+    connection_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.source_connections import SourceConnectionCreate
+        from server.services.source_connections import SourceConnectionService
+
+        try:
+            payload = SourceConnectionCreate.model_validate(
+                _parse_json_object(connection_json, operation="create_source_connection")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("source connection")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.CONNECTION_CREATE)
+            service = SourceConnectionService()
+            connection = await service.create_connection(
+                session=session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                payload=payload,
+            )
+            return _json_success(
+                connection=sanitize_error_payload(service.connection_payload(connection)),
+                commercial_status="PARTIAL",
+                runtime_status="not_certified",
+            )
+    except ValueError as e:
+        logger.error(f"Error in create_source_connection_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="create_source_connection")
+    except Exception as e:
+        logger.error(f"Error in create_source_connection_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_source_connection")
+
+
+async def list_source_connections_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    provider: str = "",
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_connections import SourceConnectionService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_scope(session, tenant_id, user_id, Scope.CONNECTION_READ)
+            service = SourceConnectionService()
+            connections = await service.list_connections(
+                session=session,
+                tenant_id=tenant_id,
+                provider=provider or None,
+                user_id=user_id,
+                include_all=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+            items = [service.connection_payload(connection) for connection in connections]
+            return _json_success(
+                items=sanitize_error_payload(items[:limit]),
+                total=len(items),
+                has_more=len(items) > limit,
+            )
+    except Exception as e:
+        logger.error(f"Error in list_source_connections_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_source_connections")
+
+
+async def disconnect_source_connection_wrapper(
+    connection_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.services.source_connections import SourceConnectionService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_any_scope(
+                session,
+                tenant_id,
+                user_id,
+                Scope.CONNECTION_DELETE,
+                Scope.CONNECTION_DELETE_OWN,
+            )
+            ok, resource_count = await SourceConnectionService().delete_connection(
+                session=session,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                user_id=user_id,
+                include_all=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            if not ok:
+                raise HTTPException(status_code=404, detail="Source connection not found")
+            return _json_success(disconnected=True, affected_resource_count=resource_count)
+    except Exception as e:
+        logger.error(f"Error in disconnect_source_connection_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="disconnect_source_connection")
+
+
+async def create_source_resource_wrapper(
+    resource_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.source_resources import SourceResourceCreate
+        from server.services.source_resources import SourceResourceService
+
+        try:
+            payload = SourceResourceCreate.model_validate(
+                _parse_json_object(resource_json, operation="create_source_resource")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("source resource")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_CREATE)
+            resource = await SourceResourceService().create_resource(
+                session=session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                payload=payload,
+                include_all_connections=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            return _json_success(resource=sanitize_error_payload(resource), commercial_status="PARTIAL")
+    except ValueError as e:
+        logger.error(f"Error in create_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="create_source_resource")
+    except Exception as e:
+        logger.error(f"Error in create_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_source_resource")
+
+
+async def list_source_resources_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    query: str = "",
+    resource_type: str = "",
+    status: str = "",
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_resources import SourceResourceService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            items = await SourceResourceService().list_resources(session=session, tenant_id=tenant_id)
+            query_lower = query.lower().strip()
+            if query_lower:
+                items = [
+                    item
+                    for item in items
+                    if query_lower in str(item.get("name") or "").lower()
+                    or query_lower in str(item.get("external_id") or "").lower()
+                    or query_lower in str(item.get("source_url") or "").lower()
+                ]
+            if resource_type:
+                items = [item for item in items if item.get("resource_type") == resource_type]
+            if status:
+                items = [item for item in items if item.get("status") == status]
+            limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+            return _json_success(
+                items=sanitize_error_payload(items[:limit]),
+                total=len(items),
+                has_more=len(items) > limit,
+            )
+    except Exception as e:
+        logger.error(f"Error in list_source_resources_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_source_resources")
+
+
+async def describe_source_resource_wrapper(
+    resource_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_snapshots: bool = True,
+    limit: int = MCP_SOURCE_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.source_resources import SourceResourceService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            service = SourceResourceService()
+            resource = await service.get_resource(session=session, tenant_id=tenant_id, resource_id=resource_id)
+            if resource is None:
+                raise HTTPException(status_code=404, detail="Source resource not found")
+            payload = await service.resource_payload(session=session, resource=resource)
+            response: dict[str, Any] = {"resource": sanitize_error_payload(payload)}
+            if include_snapshots:
+                snapshots = await service.list_snapshots(session=session, tenant_id=tenant_id, resource_id=resource_id)
+                limit = max(1, min(limit, MCP_SOURCE_MAX_LIMIT))
+                items = list(snapshots["items"])
+                response["snapshots"] = {
+                    "items": sanitize_error_payload(items[:limit]),
+                    "total": len(items),
+                    "has_more": len(items) > limit,
+                }
+            return _json_success(**response)
+    except ValueError as e:
+        logger.error(f"Error in describe_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="describe_source_resource")
+    except Exception as e:
+        logger.error(f"Error in describe_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_source_resource")
+
+
+async def sync_source_resource_wrapper(
+    resource_id: str,
+    sync_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.source_resources import SourceResourceSyncRequest
+        from server.services.source_resources import SourceResourceService
+
+        try:
+            payload = SourceResourceSyncRequest.model_validate(
+                _parse_json_object(sync_json, operation="sync_source_resource")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("source resource sync")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            role = await _require_mcp_any_scope(
+                session,
+                tenant_id,
+                user_id,
+                Scope.DATASET_UPDATE,
+                Scope.DATASET_UPDATE_OWN,
+            )
+            resource = await SourceResourceService().sync_resource(
+                session=session,
+                tenant_id=tenant_id,
+                resource_id=resource_id,
+                payload=payload,
+                user_id=user_id,
+                include_all=role in {TenantRole.OWNER, TenantRole.ADMIN},
+            )
+            return _json_success(resource=sanitize_error_payload(resource), commercial_status="PARTIAL")
+    except PermissionError as e:
+        logger.error(f"Error in sync_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=403, detail=str(e)), operation="sync_source_resource")
+    except ValueError as e:
+        logger.error(f"Error in sync_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="sync_source_resource")
+    except Exception as e:
+        logger.error(f"Error in sync_source_resource_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="sync_source_resource")
+
+
+async def list_semantic_models_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    query: str = "",
+    status: str = "",
+    limit: int = MCP_SEMANTIC_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            items = await SemanticModelService.list_models(session=session, tenant_id=tenant_id)
+            query_lower = query.lower().strip()
+            if query_lower:
+                items = [
+                    item
+                    for item in items
+                    if query_lower in str(item.get("slug") or "").lower()
+                    or query_lower in str(item.get("name") or "").lower()
+                    or query_lower in str(item.get("domain") or "").lower()
+                ]
+            if status:
+                items = [item for item in items if item.get("status") == status]
+            limit = max(1, min(limit, MCP_SEMANTIC_MAX_LIMIT))
+            return _json_success(
+                items=sanitize_error_payload(items[:limit]),
+                total=len(items),
+                has_more=len(items) > limit,
+                commercial_status="PARTIAL",
+                runtime_status="not_certified",
+            )
+    except Exception as e:
+        logger.error(f"Error in list_semantic_models_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_semantic_models")
+
+
+async def describe_semantic_model_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_READ)
+            model = await SemanticModelService.get_model(session=session, tenant_id=tenant_id, slug=model_slug)
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except Exception as e:
+        logger.error(f"Error in describe_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_semantic_model")
+
+
+async def create_semantic_model_wrapper(model_json: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.schemas.semantic_models import SemanticModelCreate
+        from server.services.semantic_model_service import SemanticModelService
+
+        try:
+            payload = SemanticModelCreate.model_validate(
+                _parse_json_object(model_json, operation="create_semantic_model")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("semantic model")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_CREATE)
+            model = await SemanticModelService.create_model(
+                session=session,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                payload=payload,
+            )
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except ValueError as e:
+        logger.error(f"Error in create_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="create_semantic_model")
+    except Exception as e:
+        logger.error(f"Error in create_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_semantic_model")
+
+
+async def _assert_mcp_semantic_model_mutation_allowed(
+    session,
+    tenant_id: UUID,
+    user_id: UUID,
+    model_slug: str,
+) -> None:
+    from server.services.semantic_model_service import SemanticModelService
+
+    role = await _require_mcp_any_scope(session, tenant_id, user_id, Scope.DATASET_UPDATE, Scope.DATASET_UPDATE_OWN)
+    if role in {TenantRole.OWNER, TenantRole.ADMIN}:
+        return
+    model = await SemanticModelService.get_model(session=session, tenant_id=tenant_id, slug=model_slug)
+    if model is None:
+        raise HTTPException(status_code=404, detail="Semantic model not found")
+    if str(model.created_by) != str(user_id):
+        raise HTTPException(status_code=403, detail="MCP principal can only update semantic models they created")
+
+
+async def update_semantic_model_wrapper(
+    model_slug: str,
+    patch_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.semantic_models import SemanticModelPatch
+        from server.services.semantic_model_service import SemanticModelService
+
+        try:
+            payload = SemanticModelPatch.model_validate(
+                _parse_json_object(patch_json, operation="update_semantic_model")
+            )
+        except ValidationError:
+            raise _validation_error_to_http("semantic model patch")
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _assert_mcp_semantic_model_mutation_allowed(session, tenant_id, user_id, model_slug)
+            model = await SemanticModelService.update_model(
+                session=session,
+                tenant_id=tenant_id,
+                slug=model_slug,
+                user_id=user_id,
+                payload=payload,
+            )
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except RuntimeError as e:
+        logger.error(f"Error in update_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=409, detail=str(e)), operation="update_semantic_model")
+    except ValueError as e:
+        logger.error(f"Error in update_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(_value_error_to_http(e), operation="update_semantic_model")
+    except Exception as e:
+        logger.error(f"Error in update_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="update_semantic_model")
+
+
+async def validate_semantic_model_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _assert_mcp_semantic_model_mutation_allowed(session, tenant_id, user_id, model_slug)
+            model = await SemanticModelService.validate_model(
+                session=session,
+                tenant_id=tenant_id,
+                slug=model_slug,
+                user_id=user_id,
+            )
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(
+                model=sanitize_error_payload(SemanticModelService.model_to_payload(model)),
+                commercial_status="PARTIAL",
+                runtime_status="not_certified",
+            )
+    except Exception as e:
+        logger.error(f"Error in validate_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="validate_semantic_model")
+
+
+async def publish_semantic_model_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.DATASET_UPDATE)
+            model = await SemanticModelService.publish_model(session=session, tenant_id=tenant_id, slug=model_slug)
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except RuntimeError as e:
+        logger.error(f"Error in publish_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=409, detail=str(e)), operation="publish_semantic_model")
+    except Exception as e:
+        logger.error(f"Error in publish_semantic_model_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="publish_semantic_model")
+
+
+async def query_semantic_metric_wrapper(model_slug: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.services.semantic_model_service import SemanticModelService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            await _require_mcp_scope(session, tenant_id, user_id, Scope.QUERY_EXECUTE)
+            model = await SemanticModelService.query_metric(session=session, tenant_id=tenant_id, slug=model_slug)
+            if model is None:
+                raise HTTPException(status_code=404, detail="Semantic model not found")
+            return _json_success(model=sanitize_error_payload(SemanticModelService.model_to_payload(model)))
+    except RuntimeError as e:
+        logger.error(f"Error in query_semantic_metric_wrapper: {e}", exc_info=True)
+        return _json_error(HTTPException(status_code=409, detail=str(e)), operation="query_semantic_metric")
+    except Exception as e:
+        logger.error(f"Error in query_semantic_metric_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="query_semantic_metric")
+
+
+async def list_sharing_grants_wrapper(
+    tenant_id: UUID,
+    user_id: UUID,
+    object_type: str | None = None,
+    object_id: str | None = None,
+    legacy_surface: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+) -> str:
+    try:
+        from server.serializers.sharing import sharing_grant_payload
+        from server.services.sharing import SharingService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            grants = await SharingService(session).list_grants(
+                tenant_id=tenant_id,
+                object_type=object_type,
+                object_id=object_id,
+                legacy_surface=legacy_surface,
+                status=status,
+                limit=limit,
+            )
+        return json.dumps(
+            {
+                "success": True,
+                "items": [sharing_grant_payload(grant) for grant in grants],
+                "total": len(grants),
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in list_sharing_grants_wrapper: {e}", exc_info=True)
+        return json.dumps({"success": False, "error": str(e)})
+
+
+async def describe_sharing_grant_wrapper(grant_id: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        from server.serializers.sharing import sharing_grant_evidence_payload
+        from server.services.sharing import SharingService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            evidence = await SharingService(session).grant_evidence(tenant_id=tenant_id, grant_id=grant_id)
+        return json.dumps({"success": True, **sharing_grant_evidence_payload(evidence)})
+    except Exception as e:
+        logger.error(f"Error in describe_sharing_grant_wrapper: {e}", exc_info=True)
+        return json.dumps({"success": False, "error": str(e)})
+
+
+async def search_evaluation_suites_wrapper(
+    query: str,
+    target_kind: str,
+    status: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_suite_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            suites = await EvaluationService(session).list_suites(
+                tenant_id=tenant_id,
+                query=query,
+                target_kind=target_kind,
+                status=status,
+                limit=max(1, min(limit, MCP_EVALUATION_MAX_LIMIT)),
+            )
+        return _json_success(items=[evaluation_suite_payload(suite) for suite in suites], total=len(suites))
+    except Exception as e:
+        logger.error(f"Error in search_evaluation_suites_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="search_evaluation_suites")
+
+
+async def describe_evaluation_suite_wrapper(
+    suite_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_manifests: bool = False,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_suite_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            suite, versions = await EvaluationService(session).describe_suite(
+                tenant_id=tenant_id,
+                suite_id=UUID(suite_id),
+            )
+        return _json_success(
+            suite=evaluation_suite_payload(
+                suite,
+                versions=versions,
+                include_versions=True,
+                include_manifests=include_manifests,
+            )
+        )
+    except Exception as e:
+        logger.error(f"Error in describe_evaluation_suite_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_evaluation_suite")
+
+
+async def list_evaluation_cases_wrapper(
+    suite_version_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_expected_contract: bool = False,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            cases = await EvaluationService(session).list_cases(
+                tenant_id=tenant_id,
+                suite_version_id=UUID(suite_version_id),
+            )
+        limit = max(1, min(limit, MCP_EVALUATION_MAX_LIMIT))
+        return _json_success(
+            items=[
+                evaluation_case_payload(case, include_expected_contract=include_expected_contract)
+                for case in cases[:limit]
+            ],
+            total=len(cases),
+            has_more=len(cases) > limit,
+        )
+    except Exception as e:
+        logger.error(f"Error in list_evaluation_cases_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="list_evaluation_cases")
+
+
+async def create_evaluation_case_draft_wrapper(
+    suite_version_id: str,
+    case_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_payload
+        from server.services.evaluation import EvaluationService
+
+        payload = json.loads(case_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("case_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            case, created = await EvaluationService(session).create_case_draft(
+                tenant_id=tenant_id,
+                suite_version_id=UUID(suite_version_id),
+                case_key=str(payload["case_key"]),
+                title=str(payload.get("title") or payload["case_key"]),
+                target_kinds=list(payload.get("target_kinds") or []),
+                operation=str(payload.get("operation") or "answer_question"),
+                question=str(payload["question"]),
+                expected_contract=dict(payload.get("expected_contract") or {}),
+                provenance=dict(payload.get("provenance") or {"source": "manual"}),
+                tags=[str(tag) for tag in payload.get("tags") or []],
+                actor_id=str(user_id),
+                actor_type="agent",
+            )
+        return _json_success(case=evaluation_case_payload(case), created=created)
+    except Exception as e:
+        logger.error(f"Error in create_evaluation_case_draft_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_evaluation_case_draft")
+
+
+async def preview_evaluation_ground_truth_wrapper(
+    expected_contract_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.schemas.evaluation import EvaluationExpectedContract
+
+        payload = json.loads(expected_contract_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("expected_contract_json must be a JSON object")
+        expected = EvaluationExpectedContract.model_validate(payload)
+        ground_truth = expected.ground_truth_sql
+        if ground_truth is None:
+            return _json_success(ground_truth={"present": False, "readonly": None})
+        return _json_success(
+            ground_truth={
+                "present": True,
+                "readonly": True,
+                "dialect": ground_truth.dialect,
+                "must_reference": ground_truth.must_reference,
+                "must_not_reference": ground_truth.must_not_reference,
+            }
+        )
+    except Exception as e:
+        logger.error(f"Error in preview_evaluation_ground_truth_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="preview_evaluation_ground_truth")
+
+
+async def run_evaluation_wrapper(
+    suite_version_id: str,
+    target_snapshot_json: str,
+    idempotency_key: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        payload = json.loads(target_snapshot_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("target_snapshot_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            run = await EvaluationService(session).create_preflight_run(
+                tenant_id=tenant_id,
+                suite_version_id=UUID(suite_version_id),
+                target_snapshot_payload=payload,
+                actor_id=str(user_id),
+                idempotency_key=idempotency_key or None,
+                actor_type="agent",
+            )
+        return _json_success(run=evaluation_run_payload(run))
+    except Exception as e:
+        logger.error(f"Error in run_evaluation_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="run_evaluation")
+
+
+async def get_evaluation_run_wrapper(
+    run_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    include_case_results: bool = True,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_run_payload, evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            run, case_runs = await EvaluationService(session).get_run_report(
+                tenant_id=tenant_id,
+                run_id=UUID(run_id),
+            )
+        limit = max(1, min(limit, MCP_EVALUATION_MAX_LIMIT))
+        payload: dict[str, Any] = {"run": evaluation_run_payload(run)}
+        if include_case_results:
+            payload["case_runs"] = [
+                evaluation_case_run_payload(case_run, assessments=assessments)
+                for case_run, assessments in case_runs[:limit]
+            ]
+            payload["has_more_case_runs"] = len(case_runs) > limit
+        return _json_success(**payload)
+    except Exception as e:
+        logger.error(f"Error in get_evaluation_run_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="get_evaluation_run")
+
+
+async def compare_evaluation_runs_wrapper(
+    baseline_run_id: str,
+    candidate_run_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            comparison = await EvaluationService(session).compare_runs(
+                tenant_id=tenant_id,
+                baseline_run_id=UUID(baseline_run_id),
+                candidate_run_id=UUID(candidate_run_id),
+            )
+        return _json_success(comparison=sanitize_error_payload(comparison))
+    except Exception as e:
+        logger.error(f"Error in compare_evaluation_runs_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="compare_evaluation_runs")
+
+
+async def describe_evaluation_failure_wrapper(
+    run_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    limit: int = MCP_EVALUATION_DEFAULT_LIMIT,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_run_payload, evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            run, case_runs = await EvaluationService(session).get_run_report(
+                tenant_id=tenant_id,
+                run_id=UUID(run_id),
+            )
+        failures = []
+        for case_run, assessments in case_runs:
+            failed_assessments = [
+                assessment for assessment in assessments if assessment.status != "passed" or assessment.hard_fail
+            ]
+            if case_run.status != "passed" or failed_assessments:
+                failures.append(evaluation_case_run_payload(case_run, assessments=failed_assessments))
+        limit = max(1, min(limit, MCP_EVALUATION_MAX_LIMIT))
+        return _json_success(
+            run=evaluation_run_payload(run),
+            failures=failures[:limit],
+            total=len(failures),
+            has_more=len(failures) > limit,
+        )
+    except Exception as e:
+        logger.error(f"Error in describe_evaluation_failure_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_evaluation_failure")
+
+
+async def create_advisor_change_set_wrapper(
+    skill_suggestion_id: str,
+    suite_version_id: str,
+    affected_case_ids: list[str] | None,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import advisor_change_set_payload, advisor_suggestion_payload
+        from server.services.evaluation import EvaluationService
+
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            change_set, suggestions, created = await EvaluationService(
+                session
+            ).create_advisor_change_set_from_skill_suggestion(
+                tenant_id=tenant_id,
+                suggestion_id=UUID(skill_suggestion_id),
+                suite_version_id=UUID(suite_version_id) if suite_version_id else None,
+                affected_case_ids=[UUID(case_id) for case_id in affected_case_ids or []],
+                actor_id=str(user_id),
+            )
+        return _json_success(
+            change_set=advisor_change_set_payload(change_set),
+            advisor_suggestions=[advisor_suggestion_payload(suggestion) for suggestion in suggestions],
+            created=created,
+        )
+    except Exception as e:
+        logger.error(f"Error in create_advisor_change_set_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_advisor_change_set")
+
+
+async def run_advisor_gate_wrapper(
+    change_set_id: str,
+    target_snapshot_json: str,
+    gate_kind: str,
+    idempotency_key: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import advisor_change_set_payload, evaluation_run_payload
+        from server.services.evaluation import EvaluationService
+
+        payload = json.loads(target_snapshot_json or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("target_snapshot_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            change_set, run = await EvaluationService(session).create_advisor_gate_run(
+                tenant_id=tenant_id,
+                change_set_id=UUID(change_set_id),
+                gate_kind=gate_kind,
+                target_snapshot_payload=payload,
+                actor_id=str(user_id),
+                idempotency_key=idempotency_key or None,
+            )
+        return _json_success(change_set=advisor_change_set_payload(change_set), run=evaluation_run_payload(run))
+    except Exception as e:
+        logger.error(f"Error in run_advisor_gate_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation=f"run_advisor_{gate_kind}")
+
+
+async def submit_evaluation_feedback_wrapper(
+    suite_version_id: str,
+    feedback_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        from server.serializers.evaluation import evaluation_case_payload
+        from server.services.evaluation import EvaluationService
+
+        feedback = json.loads(feedback_json or "{}")
+        if not isinstance(feedback, dict):
+            raise ValueError("feedback_json must be a JSON object")
+        set_tenant_id(tenant_id)
+        async with AsyncSessionFactory() as session:
+            service = EvaluationService(session)
+            legacy_id = feedback.get("legacy_conversation_evaluation_id") or feedback.get("conversation_evaluation_id")
+            if legacy_id:
+                case, created = await service.promote_conversation_evaluation_to_case_draft(
+                    tenant_id=tenant_id,
+                    evaluation_id=UUID(str(legacy_id)),
+                    suite_version_id=UUID(suite_version_id),
+                    question=feedback.get("question"),
+                    tags=list(feedback.get("tags") or []),
+                    actor_id=str(user_id),
+                )
+            else:
+                description = str(feedback.get("description") or "")
+                expected_contract = dict(feedback.get("expected_contract") or {})
+                if not expected_contract:
+                    expected_contract = {
+                        "semantic_intent": {"description": description},
+                        "answer": {"must_include_any": list(feedback.get("must_include_any") or [])},
+                    }
+                case, created = await service.create_case_draft(
+                    tenant_id=tenant_id,
+                    suite_version_id=UUID(suite_version_id),
+                    case_key=_stable_feedback_case_key(feedback),
+                    title=str(feedback.get("title") or description or "MCP evaluation feedback")[:255],
+                    target_kinds=list(feedback.get("target_kinds") or ["agent_answer"]),
+                    operation=str(feedback.get("operation") or "answer_question"),
+                    question=str(feedback.get("question") or description or "Review feedback regression"),
+                    expected_contract=expected_contract,
+                    provenance=sanitize_error_payload(
+                        {
+                            "source": feedback.get("source") or "human_feedback",
+                            "feedback_id": feedback.get("feedback_id"),
+                            "trace_id": feedback.get("trace_id"),
+                            "principal": feedback.get("principal") or {},
+                        }
+                    ),
+                    tags=[str(tag) for tag in feedback.get("tags") or []],
+                    actor_id=str(user_id),
+                    actor_type="agent",
+                )
+        return _json_success(case=evaluation_case_payload(case), created=created)
+    except Exception as e:
+        logger.error(f"Error in submit_evaluation_feedback_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="submit_evaluation_feedback")
+
+
+async def _select_dashboard_version(
+    repo: DashboardRepository,
+    tenant_id: UUID,
+    asset: DashboardAsset,
+    version: str,
+) -> Dashboard | None:
+    if version in {"", "published"}:
+        version_id = asset.published_version_id or asset.current_draft_version_id
+        if not version_id:
+            return None
+        return await repo.get_asset_version(tenant_id=tenant_id, asset_id=asset.id, version_id=version_id)
+    if version == "draft":
+        if not asset.current_draft_version_id:
+            return None
+        return await repo.get_asset_version(
+            tenant_id=tenant_id, asset_id=asset.id, version_id=asset.current_draft_version_id
+        )
+    return await repo.get_asset_version_by_num(tenant_id=tenant_id, asset_id=asset.id, version_num=int(version))
+
+
+async def search_dashboards_wrapper(
+    query: str,
+    tags: list[str] | None,
+    status: str,
+    freshness: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    limit: int = MCP_DASHBOARD_DEFAULT_LIMIT,
+) -> str:
+    try:
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_READ)
+            repo = DashboardRepository(session)
+            assets = await repo.list_assets(tenant_id, limit=MCP_DASHBOARD_MAX_LIMIT)
+            query_lower = query.lower().strip()
+            tag_filter = {tag.lower() for tag in tags or []}
+            items = []
+            for asset in assets:
+                if status and asset.lifecycle != status:
+                    continue
+                if query_lower and query_lower not in asset.name.lower() and query_lower not in asset.slug.lower():
+                    continue
+                asset_tags = {str(tag).lower() for tag in asset.tags_json or []}
+                if tag_filter and not tag_filter.issubset(asset_tags):
+                    continue
+                freshness_status = (asset.health_summary_json or {}).get("freshness")
+                if freshness and freshness_status != freshness:
+                    continue
+                items.append(_asset_compact(asset))
+            limit = max(1, min(limit, MCP_DASHBOARD_MAX_LIMIT))
+            return _json_success(items=items[:limit], total=len(items), cursor=None, has_more=len(items) > limit)
+    except Exception as e:
+        logger.error(f"Error in search_dashboards_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="search_dashboards")
+
+
+async def describe_dashboard_wrapper(
+    dashboard_id: str,
+    version: str,
+    detail: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        asset_id = UUID(dashboard_id)
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_READ)
+            repo = DashboardRepository(session)
+            asset = await repo.get_asset(asset_id, tenant_id)
+            if not asset:
+                raise HTTPException(status_code=404, detail="Dashboard asset not found")
+            selected_version = await _select_dashboard_version(repo, tenant_id, asset, version)
+            return _json_success(
+                dashboard=_asset_compact(asset),
+                version=_version_compact(selected_version, include_manifest=detail != "compact")
+                if selected_version
+                else None,
+            )
+    except Exception as e:
+        logger.error(f"Error in describe_dashboard_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="describe_dashboard")
+
+
+async def query_dashboard_wrapper(
+    dashboard_id: str,
+    data_view_ids: list[str] | None,
+    filters: dict[str, Any] | None,
+    cursor: str,
+    limit: int,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        if cursor:
+            raise HTTPException(status_code=400, detail="Cursor pagination is not available for dashboard runs yet")
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_EXPORT)
+            run = await DashboardService().query_dashboard(
+                session=session,
+                tenant_id=tenant_id,
+                asset_id=UUID(dashboard_id),
+                actor_id=str(user_id),
+                actor_type="agent",
+                filters=filters or {},
+                data_view_ids=data_view_ids,
+                correlation_id="mcp",
+            )
+            return _json_success(run=_compact_dashboard_run(run, limit=limit))
+    except Exception as e:
+        logger.error(f"Error in query_dashboard_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="query_dashboard")
+
+
+async def get_dashboard_state_wrapper(
+    dashboard_id: str,
+    filters_json: str,
+    data_view_ids: list[str] | None,
+    tenant_id: UUID,
+    user_id: UUID,
+    limit: int = MCP_DASHBOARD_DEFAULT_LIMIT,
+) -> str:
+    try:
+        filters = json.loads(filters_json or "{}")
+        run_result = await query_dashboard_wrapper(dashboard_id, data_view_ids, filters, "", limit, tenant_id, user_id)
+        run_payload = json.loads(run_result)
+        if not run_payload.get("success"):
+            return run_result
+        return _json_success(state=run_payload["run"])
+    except Exception as e:
+        logger.error(f"Error in get_dashboard_state_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="get_dashboard_state")
+
+
+async def explain_dashboard_tile_wrapper(
+    dashboard_id: str,
+    tile_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        asset_id = UUID(dashboard_id)
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_READ)
+            repo = DashboardRepository(session)
+            asset = await repo.get_asset(asset_id, tenant_id)
+            if not asset:
+                raise HTTPException(status_code=404, detail="Dashboard asset not found")
+            version = await _select_dashboard_version(repo, tenant_id, asset, "published")
+            if not version or not version.manifest_json:
+                raise HTTPException(status_code=404, detail="Dashboard version not found")
+            manifest = version.manifest_json
+            tile = next((item for item in manifest.get("tiles", []) if item.get("id") == tile_id), None)
+            if not tile:
+                raise HTTPException(status_code=404, detail="Dashboard tile not found")
+            data_view = next(
+                (item for item in manifest.get("data_views", []) if item.get("id") == tile.get("data_view_id")),
+                None,
+            )
+            return _json_success(
+                tile=tile,
+                data_view=data_view,
+                pinned_versions={
+                    "semantic_models": version.pinned_model_versions_json or {},
+                    "source_snapshots": version.pinned_source_snapshots_json or [],
+                },
+                lineage=_lineage_from_manifest(manifest, tile_id),
+            )
+    except Exception as e:
+        logger.error(f"Error in explain_dashboard_tile_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="explain_dashboard_tile")
+
+
+async def get_dashboard_lineage_wrapper(
+    dashboard_id: str,
+    tile_id: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        asset_id = UUID(dashboard_id)
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_READ)
+            repo = DashboardRepository(session)
+            asset = await repo.get_asset(asset_id, tenant_id)
+            if not asset:
+                raise HTTPException(status_code=404, detail="Dashboard asset not found")
+            version = await _select_dashboard_version(repo, tenant_id, asset, "published")
+            return _json_success(
+                dashboard_id=str(asset.id),
+                version_id=str(version.id) if version else None,
+                lineage=_lineage_from_manifest(version.manifest_json if version else None, tile_id),
+            )
+    except Exception as e:
+        logger.error(f"Error in get_dashboard_lineage_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="get_dashboard_lineage")
+
+
+async def create_dashboard_draft_wrapper(
+    slug: str,
+    notebook_id: str,
+    manifest_json: str,
+    tenant_id: UUID,
+    user_id: UUID,
+    description: str = "",
+    tags: list[str] | None = None,
+) -> str:
+    try:
+        manifest = json.loads(manifest_json)
+        notebook_uuid = UUID(notebook_id)
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _assert_mcp_notebook_access(session, tenant_id, user_id, notebook_uuid)
+            asset = await DashboardService().create_asset_draft(
+                session=session,
+                tenant_id=tenant_id,
+                actor_id=user_id,
+                manifest_payload=manifest,
+                slug=slug,
+                notebook_id=notebook_uuid,
+                description=description,
+                tags=tags or [],
+                actor_type="agent",
+            )
+            return _json_success(dashboard=_asset_compact(asset))
+    except Exception as e:
+        logger.error(f"Error in create_dashboard_draft_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="create_dashboard_draft")
+
+
+async def patch_dashboard_draft_wrapper(
+    dashboard_id: str,
+    base_etag: str,
+    json_patch: str,
+    change_summary: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        patch_operations = json.loads(json_patch or "[]")
+        if not isinstance(patch_operations, list):
+            raise HTTPException(status_code=400, detail="json_patch must be a JSON array")
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_SHARE)
+            version = await DashboardService().apply_draft_patch(
+                session=session,
+                tenant_id=tenant_id,
+                asset_id=UUID(dashboard_id),
+                actor_id=user_id,
+                base_etag=base_etag,
+                patch_operations=patch_operations,
+                change_summary=change_summary,
+                actor_type="agent",
+            )
+            return _json_success(version=_version_compact(version, include_manifest=True))
+    except Exception as e:
+        logger.error(f"Error in patch_dashboard_draft_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="patch_dashboard_draft")
+
+
+async def validate_dashboard_wrapper(dashboard_id: str, tenant_id: UUID, user_id: UUID) -> str:
+    try:
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_SHARE)
+            repo = DashboardRepository(session)
+            asset = await repo.get_asset(UUID(dashboard_id), tenant_id)
+            if not asset:
+                raise HTTPException(status_code=404, detail="Dashboard asset not found")
+            if not asset.current_draft_version_id:
+                raise HTTPException(status_code=409, detail="Dashboard has no editable draft")
+            draft = await repo.get_asset_version(
+                tenant_id=tenant_id,
+                asset_id=asset.id,
+                version_id=asset.current_draft_version_id,
+            )
+            if not draft or not draft.manifest_json:
+                raise HTTPException(status_code=404, detail="Dashboard draft not found")
+            manifest = DashboardService.validate_manifest_payload(draft.manifest_json)
+            return _json_success(validation=DashboardService.validation_summary(manifest), manifest=manifest)
+    except Exception as e:
+        logger.error(f"Error in validate_dashboard_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="validate_dashboard")
+
+
+async def preview_dashboard_wrapper(
+    dashboard_id: str,
+    filters: dict[str, Any] | None,
+    data_view_ids: list[str] | None,
+    tenant_id: UUID,
+    user_id: UUID,
+    limit: int = MCP_DASHBOARD_DEFAULT_LIMIT,
+) -> str:
+    try:
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_EXPORT)
+            run = await DashboardService().preview_dashboard(
+                session=session,
+                tenant_id=tenant_id,
+                asset_id=UUID(dashboard_id),
+                actor_id=str(user_id),
+                actor_type="agent",
+                filters=filters or {},
+                data_view_ids=data_view_ids,
+                correlation_id="mcp-preview",
+            )
+            return _json_success(run=_compact_dashboard_run(run, limit=limit))
+    except Exception as e:
+        logger.error(f"Error in preview_dashboard_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="preview_dashboard")
+
+
+async def publish_dashboard_wrapper(
+    dashboard_id: str,
+    base_etag: str,
+    change_summary: str,
+    tenant_id: UUID,
+    user_id: UUID,
+) -> str:
+    try:
+        async with AsyncSessionFactory() as session:
+            set_tenant_id(tenant_id)
+            await _require_mcp_dashboard_scope(session, tenant_id, user_id, Scope.DASHBOARD_SHARE)
+            version = await DashboardService().publish(
+                session=session,
+                tenant_id=tenant_id,
+                asset_id=UUID(dashboard_id),
+                actor_id=user_id,
+                base_etag=base_etag,
+                change_summary=change_summary,
+                actor_type="agent",
+            )
+            return _json_success(version=_version_compact(version, include_manifest=True))
+    except Exception as e:
+        logger.error(f"Error in publish_dashboard_wrapper: {e}", exc_info=True)
+        return _json_error(e, operation="publish_dashboard")
