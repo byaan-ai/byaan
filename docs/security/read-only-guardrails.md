@@ -86,6 +86,8 @@ Byaan parses DuckDB SQL with `sqlglot`, requires a single statement, blocks disa
 
 The DuckDB path is used for analytical queries over uploaded or local file-backed datasets. It is intended for local analysis, with performance bounded by local machine resources.
 
+Byaan currently inlines named parameters for file-backed and DynamoDB PartiQL queries in [`server/services/raw_query.py`](../../server/services/raw_query.py), rather than binding them at the driver level. String values are quoted with embedded single quotes doubled; nulls, booleans and numbers use their respective SQL literals. Literal backslashes in string values are preserved. SQL database connectors continue to bind parameters through the driver.
+
 Relevant tests:
 
 - [`server/tests/test_duckdb_service.py`](../../server/tests/test_duckdb_service.py)
