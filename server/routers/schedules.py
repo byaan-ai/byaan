@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.auth.dependencies import AuthContext, require_any_scope, require_scope
@@ -25,6 +25,7 @@ router = APIRouter()
 
 @router.get("/schedules")
 async def list_all_schedules(
+    status_filter: str | None = Query(None, alias="status"),
     auth: AuthContext = Depends(require_any_scope(Scope.SCHEDULE_READ, Scope.SCHEDULE_READ_OWN)),
     session: AsyncSession = Depends(get_async_session),
 ):
@@ -34,6 +35,16 @@ async def list_all_schedules(
 
         if not auth.has_scope(Scope.SCHEDULE_READ):
             schedules = [s for s in schedules if s.created_by is not None and str(s.created_by) == str(auth.user_id)]
+
+        if status_filter:
+            from server.models.schedules import MONITOR_STATUSES
+
+            if status_filter not in MONITOR_STATUSES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid status; must be one of {sorted(MONITOR_STATUSES)}",
+                )
+            schedules = [s for s in schedules if s.status == status_filter]
 
         data = []
         for s in schedules:

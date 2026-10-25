@@ -426,7 +426,197 @@ async def slack_interactivity(
 
             return JSONResponse(status_code=200, content={"ok": True})
 
+        elif action_id in ("monitor_turn_on", "monitor_cancel", "monitor_edit"):
+            monitor_id = action.get("value") or ""
+            response_url = payload.get("response_url")
+            slack_user_id = payload.get("user", {}).get("id")
+            background_tasks.add_task(
+                _process_monitor_draft_action,
+                action_id=action_id,
+                team_id=team_id,
+                monitor_id=monitor_id,
+                response_url=response_url,
+                slack_user_id=slack_user_id,
+            )
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        elif action_id in ("monitor_toggle", "monitor_delete"):
+            monitor_id = action.get("value") or ""
+            response_url = payload.get("response_url")
+            background_tasks.add_task(
+                _process_monitor_row_action,
+                action_id=action_id,
+                team_id=team_id,
+                monitor_id=monitor_id,
+                response_url=response_url,
+            )
+            return JSONResponse(status_code=200, content={"ok": True})
+
     return JSONResponse(status_code=200, content={"ok": True})
+
+
+async def _post_response_url(response_url: str | None, text: str, replace_original: bool = False) -> None:
+    """Best-effort ephemeral update via Slack response_url."""
+    if not response_url:
+        return
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                response_url,
+                json={
+                    "response_type": "ephemeral",
+                    "replace_original": replace_original,
+                    "text": text,
+                },
+            )
+    except Exception as e:
+        logger.warning(f"Failed to notify response_url: {e}")
+
+
+async def _process_monitor_draft_action(
+    action_id: str,
+    team_id: str,
+    monitor_id: str,
+    response_url: str | None,
+    slack_user_id: str | None,
+) -> None:
+    """Turn on / cancel / edit a draft monitor from a Slack button click."""
+    from server.repositories.schedules import ScheduleRepository
+    from server.services.schedule_service import ScheduleService as _ScheduleService
+    from server.utils.slack_block_elements import SlackBlockBuilder
+
+    try:
+        async with AsyncSessionFactory() as session:
+            repo = SlackWorkspaceRepository(session)
+            workspace = await repo.get_by_team_id(team_id)
+            if not workspace:
+                return
+
+            sched_repo = ScheduleRepository(session)
+            schedule = await sched_repo.get_with_notebook(monitor_id)
+            if not schedule or schedule.tenant_id != workspace.tenant_id:
+                await _post_response_url(response_url, "This monitor is no longer available.", replace_original=True)
+                return
+            if schedule.slack_workspace_id and schedule.slack_workspace_id != workspace.id:
+                await _post_response_url(
+                    response_url, "This monitor belongs to a different workspace.", replace_original=True
+                )
+                return
+
+            if action_id == "monitor_cancel":
+                if schedule.status == "draft":
+                    await sched_repo.delete(str(schedule.id))
+                await _post_response_url(response_url, "Cancelled.", replace_original=True)
+                return
+
+            if action_id == "monitor_edit":
+                hint = (
+                    "Tell Byaan what to change (name, cron, timezone, channel, instruction) in this thread "
+                    "and it will update the draft."
+                )
+                await _post_response_url(response_url, hint, replace_original=False)
+                return
+
+            if schedule.status != "draft":
+                await _post_response_url(response_url, "This monitor is already active.", replace_original=True)
+                return
+
+            next_run_at = _ScheduleService.calculate_next_run(schedule.cron_expression, schedule.timezone)
+            await sched_repo.update(
+                str(schedule.id),
+                {
+                    "status": "active",
+                    "is_enabled": True,
+                    "paused_until": None,
+                    "consecutive_failures": 0,
+                    "next_run_at": next_run_at,
+                },
+            )
+            refreshed = await sched_repo.get_with_notebook(str(schedule.id))
+
+            blocks = SlackBlockBuilder.schedule_success_card(
+                schedule_id=str(refreshed.id),
+                name=refreshed.name,
+                cron_expression=refreshed.cron_expression,
+                timezone=refreshed.timezone,
+                next_run_at=refreshed.next_run_at.isoformat() if refreshed.next_run_at else None,
+            )
+            bot_token = await SlackAgentService._get_bot_token(workspace, session)
+            slack_client = SlackService(bot_token)
+            await slack_client.post_message(
+                channel=refreshed.slack_channel_id or "",
+                text=f"Monitor active: {refreshed.name}",
+                thread_ts=refreshed.slack_thread_ts,
+                blocks=blocks,
+            )
+            logger.info(f"[SLACK] monitor turned on id={refreshed.id} by user={slack_user_id}")
+    except Exception as e:
+        logger.error(f"Error in monitor draft action: {e}", exc_info=True)
+
+
+async def _process_monitor_row_action(
+    action_id: str,
+    team_id: str,
+    monitor_id: str,
+    response_url: str | None,
+) -> None:
+    """Toggle (pause/resume) or delete an existing monitor from a list card."""
+    from server.repositories.schedules import ScheduleRepository
+
+    try:
+        async with AsyncSessionFactory() as session:
+            repo = SlackWorkspaceRepository(session)
+            workspace = await repo.get_by_team_id(team_id)
+            if not workspace:
+                return
+            sched_repo = ScheduleRepository(session)
+            schedule = await sched_repo.get_with_notebook(monitor_id)
+            if not schedule or schedule.tenant_id != workspace.tenant_id:
+                await _post_response_url(response_url, "Monitor not found.", replace_original=False)
+                return
+            if schedule.slack_workspace_id and schedule.slack_workspace_id != workspace.id:
+                await _post_response_url(
+                    response_url, "Monitor belongs to a different workspace.", replace_original=False
+                )
+                return
+
+            if action_id == "monitor_delete":
+                await sched_repo.delete(str(schedule.id))
+                await _post_response_url(response_url, f"Deleted monitor *{schedule.name}*.", replace_original=False)
+                return
+
+            if schedule.status == "active":
+                await sched_repo.set_status(schedule.id, "paused")
+                label = "Paused"
+            else:
+                next_run_at = _next_run_safe(schedule)
+                await sched_repo.update(
+                    str(schedule.id),
+                    {
+                        "status": "active",
+                        "is_enabled": True,
+                        "paused_until": None,
+                        "next_run_at": next_run_at,
+                    },
+                )
+                label = "Resumed"
+            await _post_response_url(response_url, f"{label} monitor *{schedule.name}*.", replace_original=False)
+    except Exception as e:
+        logger.error(f"Error in monitor row action: {e}", exc_info=True)
+
+
+def _next_run_safe(schedule):
+    """Return next_run_at; fall back to now when the stored cron is invalid."""
+    from datetime import datetime as _dt
+
+    from server.services.schedule_service import ScheduleService
+
+    try:
+        return ScheduleService.calculate_next_run(schedule.cron_expression, schedule.timezone)
+    except Exception:
+        return _dt.utcnow()
 
 
 async def _process_generate_dashboard_button(

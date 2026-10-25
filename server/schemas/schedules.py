@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -11,6 +12,13 @@ class ScheduleCreate(BaseModel):
     is_enabled: bool = True
     webhook_url: str | None = None
     slack_channel_id: str | None = None
+    slack_thread_ts: str | None = Field(None, max_length=50)
+    broadcast_to_channel: bool = False
+    origin: str = Field(default="ui", max_length=20)
+    status: str = Field(default="active", max_length=20)
+    notify_policy: str = Field(default="always", max_length=20)
+    llm_connection_id: UUID | None = None
+    model: str | None = Field(None, max_length=255)
     instruction: str | None = None
 
 
@@ -21,6 +29,13 @@ class ScheduleUpdate(BaseModel):
     is_enabled: bool | None = None
     webhook_url: str | None = None
     slack_channel_id: str | None = None
+    slack_thread_ts: str | None = Field(None, max_length=50)
+    broadcast_to_channel: bool | None = None
+    status: str | None = Field(None, max_length=20)
+    notify_policy: str | None = Field(None, max_length=20)
+    paused_until: datetime | None = None
+    llm_connection_id: UUID | None = None
+    model: str | None = Field(None, max_length=255)
     instruction: str | None = None
 
 
@@ -34,6 +49,15 @@ class ScheduleRead(BaseModel):
     is_enabled: bool
     webhook_url: str | None = None
     slack_channel_id: str | None = None
+    slack_thread_ts: str | None = None
+    broadcast_to_channel: bool = False
+    origin: str = "ui"
+    status: str = "active"
+    notify_policy: str = "always"
+    paused_until: datetime | None = None
+    consecutive_failures: int = 0
+    llm_connection_id: UUID | None = None
+    model: str | None = None
     instruction: str | None = None
     next_run_at: datetime | None = None
     is_running: bool
@@ -56,6 +80,11 @@ class ScheduleRunRead(BaseModel):
     queries_failed: int | None = None
     error_message: str | None = None
     message_id: UUID | None = None
+    outcome: str | None = None
+    headline: str | None = None
+    findings: list[dict[str, Any]] | None = None
+    deliveries: list[dict[str, Any]] | None = None
+    trigger: str = "scheduled"
 
     model_config = {"from_attributes": True}
 

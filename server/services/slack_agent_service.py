@@ -17,6 +17,7 @@ from server.constants.models import MODELS_BY_PROVIDER, SLACK_CLASSIFIER_MODEL_B
 from server.models.slack_conversation import SlackConversation
 from server.models.slack_event_log import SlackEventLog
 from server.models.slack_workspace import SlackWorkspace
+from server.models.user import User
 from server.repositories.custom_skill import CustomSkillRepository
 from server.repositories.llm_connections import LLMConnectionRepository
 from server.schemas.agent import AgentRequest
@@ -24,6 +25,7 @@ from server.services.completion_service import CompletionError, CompletionServic
 from server.services.crypto_service import CryptoService
 from server.services.export_service import CompiledHtmlExportService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
+from server.services.slack_context import SlackContext, slack_context_scope
 from server.services.slack_intent_classifier import classify_intent
 from server.services.slack_service import SlackService, strip_bot_mentions
 from server.services.slack_thread_filter import (
@@ -157,6 +159,14 @@ class SlackAgentService:
             resolved_model = await SlackAgentService._resolve_model_for_workspace(workspace, session)
             logger.info(f"[SLACK] Using model for connection {llm_connection_id}: {resolved_model}")
 
+            user_tz = await slack_client.get_user_timezone(user_id, workspace_id=str(workspace.id))
+            byaan_user_id = await SlackAgentService._resolve_byaan_user_id(
+                workspace=workspace,
+                slack_user_id=user_id,
+                slack_client=slack_client,
+                session=session,
+            )
+
             slack_prompt = await SlackAgentService._build_slack_prompt(
                 question=question,
                 tenant_id=workspace.tenant_id,
@@ -171,12 +181,24 @@ class SlackAgentService:
                 model=resolved_model,
             )
 
-            raw_response, new_notebook_id, dashboard_generated, query_executed = await SlackAgentService._run_agent(
-                request=agent_request,
-                session=session,
+            slack_run_ctx = SlackContext(
+                workspace_id=workspace.id,
                 tenant_id=workspace.tenant_id,
-                user_id=None,
+                team_id=workspace.slack_team_id,
+                channel_id=channel_id,
+                thread_ts=thread_ts or event_ts,
+                slack_user_id=user_id,
+                user_timezone=user_tz or "UTC",
+                byaan_user_id=byaan_user_id,
             )
+
+            with slack_context_scope(slack_run_ctx):
+                raw_response, new_notebook_id, dashboard_generated, query_executed = await SlackAgentService._run_agent(
+                    request=agent_request,
+                    session=session,
+                    tenant_id=workspace.tenant_id,
+                    user_id=byaan_user_id,
+                )
 
             if new_notebook_id and conversation.notebook_id is None:
                 conversation.notebook_id = new_notebook_id
@@ -237,6 +259,45 @@ class SlackAgentService:
         """Decrypt and return the signing secret."""
         decrypted = await CryptoService.decrypt_config(workspace.signing_secret_encrypted, session)
         return decrypted.get("signing_secret", decrypted) if isinstance(decrypted, dict) else decrypted
+
+    @staticmethod
+    async def _resolve_byaan_user_id(
+        workspace: SlackWorkspace,
+        slack_user_id: str,
+        slack_client: SlackService,
+        session: AsyncSession,
+    ) -> UUID | None:
+        """Map a Slack user to a Byaan user.
+
+        Preference order:
+        1. Match the Slack user's email against a Byaan ``User`` in this tenant.
+        2. Fall back to ``workspace.installed_by`` so monitors created from Slack
+           still have an owner for permissions and user-scoped skills.
+        """
+        from sqlalchemy import select
+
+        try:
+            info = await slack_client.get_user_info(slack_user_id)
+            email = (info or {}).get("email")
+        except Exception as exc:
+            logger.warning(f"Could not look up Slack user {slack_user_id}: {exc}")
+            email = None
+
+        if email:
+            from server.models.tenant_member import TenantMember
+
+            query = (
+                select(User.id)
+                .join(TenantMember, TenantMember.user_id == User.id)
+                .where(User.email == email, TenantMember.tenant_id == workspace.tenant_id)
+                .limit(1)
+            )
+            result = await session.execute(query)
+            user_id = result.scalar_one_or_none()
+            if user_id:
+                return user_id
+
+        return workspace.installed_by
 
     @staticmethod
     def _extract_question(text: str, bot_user_id: str | None) -> str:
@@ -469,8 +530,21 @@ SLACK INBOUND SKILLS (follow these instructions when processing this request):
 {combined}
 """
 
+        from server.utils.deployment import is_feature_enabled
+
+        cron_section = ""
+        if is_feature_enabled("conversational_schedules_enabled"):
+            cron_section = """
+SCHEDULED REPORTS ("CRONS"):
+You can create, update, pause/resume, remove, list, run and inspect recurring reports ("monitors") via the create_monitor, set_monitor_status, update_monitor, delete_monitor, list_monitors, run_monitor_now, and get_monitor_runs tools. Rules:
+- If the user asks to monitor, schedule, or run something recurring, and the thread has no prior analysis for it, run the analysis once first so they see what each fire will look like.
+- Always call create_monitor first. It saves the monitor as a draft and nothing runs until the user confirms. Then call set_monitor_status(id, status="active") after the user says yes.
+- For "alert if X" / "only ping if X" requests, encode the condition in the instruction field and tell the user the cron will stay quiet when the condition is false.
+- Default the timezone to the user's Slack timezone. Default the channel and thread to the current ones.
+"""
+
         return f"""This message came from Slack.
-{skill_instructions}
+{skill_instructions}{cron_section}
 When processing this request:
 - Format your response appropriately for Slack (use Slack markdown, keep it concise)
 - IMPORTANT: Always format query results as markdown tables using pipe (|) delimiters, even for small result sets
@@ -863,12 +937,36 @@ User's question:
                     model=resolved_model,
                 )
 
-                raw_response, new_notebook_id, dashboard_generated, query_executed = await SlackAgentService._run_agent(
-                    request=agent_request,
+                user_tz = await slack_client.get_user_timezone(user_id, workspace_id=str(workspace.id))
+                byaan_user_id = await SlackAgentService._resolve_byaan_user_id(
+                    workspace=workspace,
+                    slack_user_id=user_id,
+                    slack_client=slack_client,
                     session=session,
-                    tenant_id=workspace.tenant_id,
-                    user_id=None,
                 )
+                slack_run_ctx = SlackContext(
+                    workspace_id=workspace.id,
+                    tenant_id=workspace.tenant_id,
+                    team_id=workspace.slack_team_id,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    slack_user_id=user_id,
+                    user_timezone=user_tz or "UTC",
+                    byaan_user_id=byaan_user_id,
+                )
+
+                with slack_context_scope(slack_run_ctx):
+                    (
+                        raw_response,
+                        new_notebook_id,
+                        dashboard_generated,
+                        query_executed,
+                    ) = await SlackAgentService._run_agent(
+                        request=agent_request,
+                        session=session,
+                        tenant_id=workspace.tenant_id,
+                        user_id=byaan_user_id,
+                    )
 
                 if new_notebook_id and conversation.notebook_id is None:
                     conversation.notebook_id = new_notebook_id

@@ -306,6 +306,12 @@ export interface ScheduleUpdate {
   instruction?: string | null
 }
 
+export type MonitorStatus = 'draft' | 'active' | 'paused' | 'auto_paused'
+export type NotifyPolicy = 'always' | 'on_alert' | 'on_change'
+export type MonitorOrigin = 'ui' | 'notebook_chat' | 'slack'
+export type RunOutcome = 'ok' | 'alert' | 'no_change'
+export type RunTrigger = 'scheduled' | 'manual' | 'catchup'
+
 export interface ScheduleRead {
   id: string
   notebook_id: string
@@ -316,12 +322,40 @@ export interface ScheduleRead {
   is_enabled: boolean
   webhook_url?: string | null
   slack_channel_id?: string | null
+  slack_thread_ts?: string | null
+  broadcast_to_channel?: boolean
+  origin?: MonitorOrigin
+  status?: MonitorStatus
+  notify_policy?: NotifyPolicy
+  paused_until?: string | null
+  consecutive_failures?: number
+  llm_connection_id?: string | null
+  model?: string | null
   instruction?: string | null
   next_run_at?: string | null
   is_running: boolean
   created_by?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface ScheduleRunRead {
+  id: string
+  schedule_id: string
+  status: string
+  started_at: string
+  completed_at?: string | null
+  duration_ms?: number | null
+  queries_total?: number | null
+  queries_succeeded?: number | null
+  queries_failed?: number | null
+  error_message?: string | null
+  message_id?: string | null
+  outcome?: RunOutcome | null
+  headline?: string | null
+  findings?: Array<Record<string, unknown>> | null
+  deliveries?: Array<Record<string, unknown>> | null
+  trigger?: RunTrigger
 }
 
 export interface ScheduleTestResult {

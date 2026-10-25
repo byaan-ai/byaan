@@ -625,12 +625,17 @@ def _build_agent_tools(
     plan_mode: bool = False,
     has_github_repos: bool = False,
     has_local_repos: bool = False,
+    scheduled_run: bool = False,
 ) -> list:
     """
     Build the unified tool list for the agent.
 
     This is the SINGLE SOURCE OF TRUTH for tool configuration.
     Used by both OpenAI Agents SDK and Claude SDK paths.
+
+    When ``scheduled_run=True`` the tool set is read-only: query/schema access
+    plus learnings plus ``record_monitor_findings``. No dashboard edits, no
+    skill or monitor management, no filter mutations.
     """
     tools = []
 
@@ -658,6 +663,32 @@ def _build_agent_tools(
         [
             save_query,
             get_database_schema,
+        ]
+    )
+
+    tools.extend(
+        [
+            search_datasets,
+            get_dataset_schema_by_id,
+            saved_query_schema,
+        ]
+    )
+
+    from server.tools.learnings import get_learning_tools
+
+    tools.extend(get_learning_tools())
+
+    from server.utils.deployment import is_feature_enabled
+
+    if scheduled_run:
+        if is_feature_enabled("conversational_schedules_enabled"):
+            from server.tools.monitors import get_monitor_tools
+
+            tools.extend(get_monitor_tools(scheduled_run=True))
+        return tools
+
+    tools.extend(
+        [
             get_chart_styling,
         ]
     )
@@ -668,7 +699,6 @@ def _build_agent_tools(
             get_existing_html,
             apply_html_patch,
             dashboard_search_replace,
-            saved_query_schema,
             generate_dashboard_screenshot,
         ]
     )
@@ -691,17 +721,11 @@ def _build_agent_tools(
 
     tools.extend(
         [
-            search_datasets,
-            get_dataset_schema_by_id,
             save_skill_query,
         ]
     )
 
     tools.extend(get_instruction_tools())
-
-    from server.tools.learnings import get_learning_tools
-
-    tools.extend(get_learning_tools())
 
     from server.tools.skill_executor import get_skill_management_tools
 
@@ -720,6 +744,11 @@ def _build_agent_tools(
 
         tools.extend(get_local_repo_tools())
 
+    if is_feature_enabled("conversational_schedules_enabled"):
+        from server.tools.monitors import get_monitor_tools
+
+        tools.extend(get_monitor_tools(scheduled_run=False))
+
     return tools
 
 
@@ -735,6 +764,7 @@ async def create_unified_agent(
     instructions: str | None = None,
     memory: str | None = None,
     learnings: list[dict] | None = None,
+    scheduled_run: bool = False,
 ) -> tuple[Agent, dict[str, dict], list[str], dict[str, dict]]:
     """
     Create a unified agent with all tools - no handoffs.
@@ -777,6 +807,7 @@ async def create_unified_agent(
             plan_mode=plan_mode,
             has_github_repos=bool(github_repos),
             has_local_repos=bool(local_repos),
+            scheduled_run=scheduled_run,
         )
 
         if database_schemas:
@@ -1334,6 +1365,7 @@ async def stream_handoff_agent_response(
                     plan_mode=request.plan_mode,
                     has_github_repos=bool(github_repos),
                     has_local_repos=bool(local_repos),
+                    scheduled_run=bool(getattr(request, "scheduled_run", False)),
                 )
 
                 instructions, enabled_skills, enabled_skill_names, custom_skills = await _load_skills_for_agent(
@@ -1359,6 +1391,8 @@ async def stream_handoff_agent_response(
                     "redaction_rules": redaction_rules,
                     "plan_mode": request.plan_mode,
                     "plan_started": request.plan_mode and bool(request.notebook_id) and not is_first_message,
+                    "scheduled_run": bool(getattr(request, "scheduled_run", False)),
+                    "schedule_id": getattr(request, "scheduled_run_schedule_id", None),
                 }
                 _add_skill_credentials_to_context(context, enabled_skills, custom_skills)
 
@@ -1623,6 +1657,7 @@ async def stream_handoff_agent_response(
                 plan_mode=request.plan_mode,
                 memory=notebook_memory,
                 learnings=relevant_learnings,
+                scheduled_run=bool(getattr(request, "scheduled_run", False)),
             )
         except Exception as agent_error:
             error_msg = f"Failed to create unified agent: {agent_error}"
@@ -1659,6 +1694,8 @@ async def stream_handoff_agent_response(
             "redaction_rules": redaction_rules,
             "plan_mode": request.plan_mode,
             "plan_started": request.plan_mode and bool(request.notebook_id) and not is_first_message,
+            "scheduled_run": bool(getattr(request, "scheduled_run", False)),
+            "schedule_id": getattr(request, "scheduled_run_schedule_id", None),
         }
         _add_skill_credentials_to_context(context, enabled_skills, custom_skills)
 

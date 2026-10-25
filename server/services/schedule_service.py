@@ -144,6 +144,155 @@ class ScheduleService:
 
     @staticmethod
     async def _execute_with_agent(session: AsyncSession, schedule: Schedule, start_time: datetime) -> dict:
+        llm_connection_id, pinned_model = await ScheduleService._resolve_run_model(session, schedule)
+        if not llm_connection_id:
+            await ScheduleService._handle_run_failure(session, schedule, "No LLM connection configured")
+            return {"status": "failed", "error": "No LLM connection configured"}
+
+        current_datetime = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+        last_findings_block = await ScheduleService._format_last_findings(session, schedule)
+
+        scheduled_run_prompt = f"""## SCHEDULED MONITOR RUN
+
+Current execution time: {current_datetime}
+
+You are running a recurring monitor. The user set this up ahead of time; nobody is
+watching this run live. Follow their instruction, run fresh queries each time (data
+can change between runs — do not reuse cached results), and summarize what you
+found.
+
+**User's monitor instruction:**
+{schedule.instruction or "(no instruction provided)"}
+
+{last_findings_block}
+
+Date handling:
+- "past week" / "last week" = last 7 days
+- "this week" = start of current week to today
+- "last month" = previous calendar month
+- "past 30 days" = last 30 days
+
+When you are done, call ``record_monitor_findings`` exactly once:
+- ``outcome='alert'`` when something in the instruction's alert criteria matches.
+- ``outcome='no_change'`` when the data looks the same as the previous run.
+- ``outcome='ok'`` otherwise.
+Include a short ``headline`` and (for alerts) a ``findings`` list with
+``entity``, ``check``, ``value``, ``previous_value``, and ``why``.
+
+Then produce the human-readable summary. Use markdown tables for query results
+and put units in headers (e.g. "Revenue (USD)"). Do not emit tool-call markers
+in the final text.
+"""
+
+        agent_request = AgentRequest(
+            message=scheduled_run_prompt,
+            notebook_id=schedule.notebook_id,
+            llm_connection_id=llm_connection_id,
+            model=pinned_model,
+            scheduled_run=True,
+            scheduled_run_schedule_id=str(schedule.id),
+        )
+
+        from server.tools.monitors import MANUAL_RUN_PENDING, RUN_FINDINGS
+
+        schedule_key = str(schedule.id)
+        RUN_FINDINGS.pop(schedule_key, None)
+        trigger_label = "manual" if schedule_key in MANUAL_RUN_PENDING else "scheduled"
+        MANUAL_RUN_PENDING.discard(schedule_key)
+
+        response_parts: list[str] = []
+        try:
+            async for event in stream_handoff_agent_response(
+                agent_request,
+                session,
+                tenant_id=schedule.tenant_id,
+                user_id=schedule.created_by,
+            ):
+                if event.startswith("data: "):
+                    try:
+                        data = json.loads(event[6:])
+                        etype = data.get("type")
+                        if etype == "content":
+                            response_parts.append(data.get("text", ""))
+                        elif etype == "html_edit_complete":
+                            logger.info(f"Dashboard generation detected for schedule {schedule.id}")
+                        elif etype == "error":
+                            await ScheduleService._handle_run_failure(session, schedule, data.get("text", ""))
+                            return {"status": "failed", "error": data.get("text", "Unknown error")}
+                    except json.JSONDecodeError:
+                        pass
+        except Exception as e:
+            logger.error(f"Error running agent for schedule {schedule.id}: {e}", exc_info=True)
+            await ScheduleService._handle_run_failure(session, schedule, str(e))
+            return {"status": "failed", "error": str(e)}
+
+        monitor_findings = RUN_FINDINGS.pop(schedule_key, None)
+
+        agent_response = _clean_tool_markers("".join(response_parts))
+        outcome = (monitor_findings or {}).get("outcome") or "ok"
+        headline = (monitor_findings or {}).get("headline") or ""
+        findings = (monitor_findings or {}).get("findings") or []
+
+        message = await ScheduleService._write_to_notebook(session, schedule, agent_response, start_time)
+
+        deliveries: list[dict[str, Any]] = []
+
+        should_notify = ScheduleService._should_notify(schedule.notify_policy, outcome, agent_response)
+
+        slack_error = None
+        if should_notify and schedule.slack_channel_id and agent_response.strip():
+            override_broadcast = outcome == "alert"
+            _, slack_error = await ScheduleService._send_to_slack(
+                session, schedule, agent_response, force_broadcast=override_broadcast
+            )
+            deliveries.append({"target": "slack", "ok": slack_error is None, "error": slack_error})
+
+        webhook_error = None
+        if should_notify and schedule.webhook_url:
+            _, webhook_error = await ScheduleService._send_webhook(
+                schedule.webhook_url,
+                schedule.name,
+                agent_response,
+            )
+            deliveries.append({"target": "webhook", "ok": webhook_error is None, "error": webhook_error})
+
+        duration_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
+        has_errors = bool(webhook_error or slack_error)
+        error_messages = [e for e in [webhook_error, slack_error] if e]
+        run_repo = ScheduleRunRepository(session)
+        await run_repo.create_run(
+            {
+                "schedule_id": schedule.id,
+                "status": "success" if not has_errors else "partial",
+                "started_at": start_time.replace(tzinfo=None),
+                "completed_at": datetime.now(UTC).replace(tzinfo=None),
+                "duration_ms": duration_ms,
+                "queries_total": 0,
+                "queries_succeeded": 0,
+                "queries_failed": 0,
+                "message_id": message.id if message else None,
+                "error_message": "; ".join(error_messages) if error_messages else None,
+                "outcome": outcome,
+                "headline": headline[:500] if headline else None,
+                "findings": findings,
+                "deliveries": deliveries,
+                "trigger": trigger_label,
+            }
+        )
+
+        from server.repositories.schedules import ScheduleRepository as _SchedRepo
+
+        await _SchedRepo(session).reset_failure(schedule.id)
+
+        return {"status": "success", "summary": agent_response, "message_id": message.id if message else None}
+
+    @staticmethod
+    async def _resolve_run_model(session: AsyncSession, schedule: Schedule) -> tuple[Any, str | None]:
+        """Return (llm_connection_id, model) using pinned values first, then fallbacks."""
+        if schedule.llm_connection_id:
+            return schedule.llm_connection_id, schedule.model
+
         result = await session.execute(
             select(SlackWorkspace)
             .where(SlackWorkspace.tenant_id == schedule.tenant_id)
@@ -162,7 +311,6 @@ class ScheduleService:
                     .where(LLMConnection.type == provider)
                 )
                 connections = conn_result.scalars().all()
-
                 for conn in connections:
                     if conn.config and model:
                         try:
@@ -171,13 +319,11 @@ class ScheduleService:
                             if isinstance(conn_model, list):
                                 conn_model = conn_model[0] if conn_model else None
                             if conn_model == model:
-                                llm_connection_id = conn.id
-                                break
+                                return conn.id, model
                         except Exception:
                             pass
-
-                if not llm_connection_id and connections:
-                    llm_connection_id = connections[0].id
+                if connections:
+                    return connections[0].id, model
 
         if not llm_connection_id:
             conn_result = await session.execute(
@@ -185,112 +331,56 @@ class ScheduleService:
             )
             connection = conn_result.scalar_one_or_none()
             if connection:
-                llm_connection_id = connection.id
+                return connection.id, None
 
-        if not llm_connection_id:
-            return {"status": "failed", "error": "No LLM connection configured"}
+        return llm_connection_id, None
 
-        current_datetime = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    @staticmethod
+    async def _format_last_findings(session: AsyncSession, schedule: Schedule) -> str:
+        """Pull the most recent run's findings so the agent can compare against them."""
+        from server.repositories.schedules import ScheduleRunRepository as _RunRepo
 
-        scheduled_run_prompt = f"""## SCHEDULED RUN MODE
+        runs = await _RunRepo(session).get_recent_runs(str(schedule.id), limit=1)
+        if not runs:
+            return ""
+        run = runs[0]
+        if not (run.findings or run.headline):
+            return ""
+        parts = ["**Previous run:**"]
+        if run.headline:
+            parts.append(f"- {run.headline}")
+        if run.findings:
+            for f in run.findings[:10]:
+                entity = f.get("entity") or ""
+                check = f.get("check") or ""
+                value = f.get("value")
+                prev = f.get("previous_value")
+                why = f.get("why") or ""
+                parts.append(f"  - {entity} · {check}: {value} (was {prev}) — {why}")
+        return "\n".join(parts)
 
-This is an automated scheduled report execution.
+    @staticmethod
+    def _should_notify(policy: str, outcome: str, agent_response: str) -> bool:
+        if not agent_response.strip():
+            return False
+        if policy == "always":
+            return True
+        if policy == "on_alert":
+            return outcome == "alert"
+        if policy == "on_change":
+            return outcome != "no_change"
+        return True
 
-**Current execution time:** {current_datetime}
+    @staticmethod
+    async def _handle_run_failure(session: AsyncSession, schedule: Schedule, error: str) -> None:
+        """Record failure, auto-pause after 3 consecutive."""
+        from server.repositories.schedules import ScheduleRepository as _SchedRepo
 
-**Your task:**
-
-1. **Always run fresh queries** - Execute new queries to get the latest data. Do not rely on cached or previous results. If any integrations are configured (e.g., PostHog, analytics tools via skills), run fresh queries there too.
-
-2. **Date Handling (CRITICAL):**
-   Interpret ALL relative time references based on current time ({current_datetime}):
-   - "past week" / "last week" = 7 days ago to today
-   - "this week" = start of current week to today
-   - "last month" = previous calendar month
-   - "past 30 days" = 30 days ago to today
-
-3. **Compare with previous report** - Review the notebook conversation history for the last scheduled report and highlight what changed (new trends, increases/decreases in key metrics, anomalies).
-
-4. **Output Formatting:**
-   - Start with "This is your scheduled report"
-   - Use proper markdown formatting for text: **bold** for emphasis, ## headings for sections, and clear structure
-   - IMPORTANT: Always format query results as markdown tables using pipe (|) delimiters, even for small result sets
-   - When creating tables with numeric data, include units in column headers (e.g., "Revenue (USD)", "Duration (hours)") rather than in cell values (e.g., "1500" not "$1500")
-   - Example table format:
-     | Column1 | Column2 | Column3 |
-     |---------|---------|---------|
-     | Value1  | Value2  | Value3  |
-   - Do NOT include any [[TOOL_CALL:...]] markers or "Tool executed successfully" messages in your final output - only include the cleaned summary
-
----
-
-**User's scheduled instruction:**
-{schedule.instruction}
-"""
-
-        agent_request = AgentRequest(
-            message=scheduled_run_prompt,
-            notebook_id=schedule.notebook_id,
-            llm_connection_id=llm_connection_id,
-        )
-
-        response_parts = []
-        try:
-            async for event in stream_handoff_agent_response(agent_request, session, tenant_id=schedule.tenant_id):
-                if event.startswith("data: "):
-                    try:
-                        data = json.loads(event[6:])
-                        if data.get("type") == "content":
-                            response_parts.append(data.get("text", ""))
-                        elif data.get("type") == "html_edit_complete":
-                            logger.info(f"Dashboard generation detected for schedule {schedule.id}")
-                        elif data.get("type") == "error":
-                            return {"status": "failed", "error": data.get("text", "Unknown error")}
-                    except json.JSONDecodeError:
-                        pass
-        except Exception as e:
-            logger.error(f"Error running agent for schedule {schedule.id}: {e}", exc_info=True)
-            return {"status": "failed", "error": str(e)}
-
-        agent_response = "".join(response_parts)
-        agent_response = _clean_tool_markers(agent_response)
-
-        message = await ScheduleService._write_to_notebook(session, schedule, agent_response, start_time)
-
-        slack_error = None
-        if schedule.slack_channel_id and agent_response.strip():
-            _, slack_error = await ScheduleService._send_to_slack(session, schedule, agent_response)
-            if slack_error:
-                logger.warning(f"Slack delivery failed for schedule {schedule.id}: {slack_error}")
-
-        webhook_error = None
-        if schedule.webhook_url:
-            _, webhook_error = await ScheduleService._send_webhook(
-                schedule.webhook_url,
-                schedule.name,
-                agent_response,
-            )
-
-        duration_ms = int((datetime.now(UTC) - start_time).total_seconds() * 1000)
-        has_errors = webhook_error or slack_error
-        error_messages = [e for e in [webhook_error, slack_error] if e]
-        run_repo = ScheduleRunRepository(session)
-        await run_repo.create_run(
-            {
-                "schedule_id": schedule.id,
-                "status": "success" if not has_errors else "partial",
-                "started_at": start_time.replace(tzinfo=None),
-                "completed_at": datetime.now(UTC).replace(tzinfo=None),
-                "duration_ms": duration_ms,
-                "queries_total": 0,
-                "queries_succeeded": 0,
-                "queries_failed": 0,
-                "message_id": message.id if message else None,
-                "error_message": "; ".join(error_messages) if error_messages else None,
-            }
-        )
-
-        return {"status": "success", "summary": agent_response, "message_id": message.id if message else None}
+        repo = _SchedRepo(session)
+        count = await repo.increment_failure(schedule.id)
+        if count >= 3:
+            await repo.set_status(schedule.id, "auto_paused")
+            logger.warning(f"Monitor {schedule.id} auto-paused after {count} consecutive failures: {error}")
 
     @staticmethod
     async def test_schedule(session: AsyncSession, schedule: Schedule) -> dict:
@@ -516,8 +606,13 @@ Focus on what the data shows, not technical details about queries."""
         session: AsyncSession,
         schedule: Schedule,
         summary: str,
+        force_broadcast: bool = False,
     ) -> tuple[bool, str | None]:
-        """Post schedule output to Slack with outbound skill transformation and optional screenshot."""
+        """Post schedule output to Slack with outbound skill transformation and optional screenshot.
+
+        ``force_broadcast=True`` enables ``reply_broadcast`` for alert outcomes
+        even when the schedule normally posts quietly in-thread.
+        """
         result = await session.execute(
             select(SlackWorkspace)
             .where(SlackWorkspace.tenant_id == schedule.tenant_id)
@@ -546,6 +641,8 @@ Focus on what the data shows, not technical details about queries."""
             return False, "No Slack channel ID configured"
 
         slack_client = SlackService(bot_token)
+        thread_ts = schedule.slack_thread_ts
+        reply_broadcast = (schedule.broadcast_to_channel or force_broadcast) if thread_ts else False
         try:
             has_dashboard = False
             if schedule.notebook and hasattr(schedule.notebook, "dashboards"):
@@ -558,6 +655,8 @@ Focus on what the data shows, not technical details about queries."""
                     notebook_id=schedule.notebook_id,
                     text_summary=final_message,
                     session=session,
+                    thread_ts=thread_ts,
+                    reply_broadcast=reply_broadcast,
                 )
             else:
                 if SlackTableParser.has_markdown_table(final_message):
@@ -569,15 +668,80 @@ Focus on what the data shows, not technical details about queries."""
                     message_blocks, fallback = markdown_to_slack_blocks(final_message)
                     all_blocks = message_blocks
 
-                await slack_client.post_message(
-                    channel=schedule.slack_channel_id,
+                await ScheduleService._post_with_thread_fallback(
+                    slack_client=slack_client,
+                    schedule=schedule,
+                    session=session,
                     text=fallback,
                     blocks=all_blocks,
+                    thread_ts=thread_ts,
+                    reply_broadcast=reply_broadcast,
                 )
             return True, None
         except Exception as e:
             logger.error(f"Error posting to Slack: {e}", exc_info=True)
             return False, f"Slack error: {str(e)}"
+
+    @staticmethod
+    async def _post_with_thread_fallback(
+        slack_client: SlackService,
+        schedule: Schedule,
+        session: AsyncSession,
+        text: str,
+        blocks: list,
+        thread_ts: str | None,
+        reply_broadcast: bool,
+    ) -> None:
+        """Post to thread; on thread_not_found fall back to channel root and clear the stored thread."""
+        from slack_sdk.errors import SlackApiError
+
+        from server.repositories.schedules import ScheduleRepository
+
+        try:
+            await slack_client.post_message(
+                channel=schedule.slack_channel_id,
+                text=text,
+                blocks=blocks,
+                thread_ts=thread_ts,
+                reply_broadcast=reply_broadcast if thread_ts else False,
+            )
+        except SlackApiError as e:
+            err = (e.response or {}).get("error", "")
+            if thread_ts and err in {"thread_not_found", "not_in_channel", "channel_not_found"}:
+                logger.warning(f"Thread post failed for schedule {schedule.id} ({err}); falling back to channel root")
+                await ScheduleRepository(session).clear_lost_thread(schedule.id)
+                await slack_client.post_message(
+                    channel=schedule.slack_channel_id,
+                    text=text,
+                    blocks=blocks,
+                )
+            else:
+                raise
+
+    @staticmethod
+    def preview_fire_times(cron_expression: str, tz: str, count: int = 3) -> list[datetime]:
+        """Return the next `count` fire times for a cron expression in the given tz."""
+        try:
+            tz_obj = pytz.timezone(tz)
+        except pytz.UnknownTimeZoneError:
+            tz_obj = pytz.UTC
+        now = datetime.now(tz_obj)
+        cron = croniter(cron_expression, now)
+        return [cron.get_next(datetime) for _ in range(count)]
+
+    @staticmethod
+    async def auto_create_notebook_for_cron(session: AsyncSession, tenant_id: UUID, name: str) -> UUID:
+        """Create an empty notebook so pure-prompt crons have a conversation-memory container."""
+        from server.models.notebooks import Notebook
+
+        notebook = Notebook(
+            tenant_id=tenant_id,
+            notebook_name=name[:255] if name else "Scheduled report",
+        )
+        session.add(notebook)
+        await session.commit()
+        await session.refresh(notebook)
+        return notebook.id
 
     @staticmethod
     async def _apply_outbound_skill(
@@ -618,6 +782,8 @@ TRANSFORMED TEXT:"""
         notebook_id: UUID,
         text_summary: str,
         session: AsyncSession,
+        thread_ts: str | None = None,
+        reply_broadcast: bool = False,
     ) -> None:
         """
         Generate and upload a dashboard screenshot to Slack for scheduled reports.
@@ -640,7 +806,13 @@ TRANSFORMED TEXT:"""
                 "Posting text summary only."
             )
             blocks, fallback = markdown_to_slack_blocks(text_summary)
-            await slack_client.post_message(channel=channel_id, text=fallback, blocks=blocks)
+            await slack_client.post_message(
+                channel=channel_id,
+                text=fallback,
+                blocks=blocks,
+                thread_ts=thread_ts,
+                reply_broadcast=reply_broadcast if thread_ts else False,
+            )
             return
 
         try:
@@ -655,6 +827,7 @@ TRANSFORMED TEXT:"""
                 file_bytes=png_bytes,
                 filename="scheduled_dashboard.png",
                 initial_comment="📊Scheduled Report",
+                thread_ts=thread_ts,
             )
 
             if SlackTableParser.has_markdown_table(text_summary):
@@ -678,9 +851,21 @@ TRANSFORMED TEXT:"""
         except ScreenshotServiceError as e:
             logger.warning(f"Failed to generate dashboard screenshot: {e}. Will post text summary only.")
             blocks, fallback = markdown_to_slack_blocks(text_summary)
-            await slack_client.post_message(channel=channel_id, text=fallback, blocks=blocks)
+            await slack_client.post_message(
+                channel=channel_id,
+                text=fallback,
+                blocks=blocks,
+                thread_ts=thread_ts,
+                reply_broadcast=reply_broadcast if thread_ts else False,
+            )
 
         except Exception as e:
             logger.error(f"Unexpected error uploading dashboard screenshot: {e}. Will post text summary only.")
             blocks, fallback = markdown_to_slack_blocks(text_summary)
-            await slack_client.post_message(channel=channel_id, text=fallback, blocks=blocks)
+            await slack_client.post_message(
+                channel=channel_id,
+                text=fallback,
+                blocks=blocks,
+                thread_ts=thread_ts,
+                reply_broadcast=reply_broadcast if thread_ts else False,
+            )
