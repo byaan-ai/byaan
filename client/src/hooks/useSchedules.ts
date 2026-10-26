@@ -81,7 +81,10 @@ export function useTestSchedule() {
           queryClient.invalidateQueries({ queryKey: ['threads'] })
           try {
             window.dispatchEvent(new CustomEvent('byaan:monitor-test-complete'))
-          } catch {}
+          } catch {
+            // Dispatching the event is a best-effort hint for the open notebook
+            // to re-fetch; failing it just means the user may need to refresh.
+          }
         }
         setTimeout(refresh, 15_000)
         setTimeout(refresh, 45_000)
