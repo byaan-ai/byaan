@@ -234,7 +234,9 @@ in the final text.
         headline = (monitor_findings or {}).get("headline") or ""
         findings = (monitor_findings or {}).get("findings") or []
 
-        message = await ScheduleService._write_to_notebook(session, schedule, agent_response, start_time)
+        # The agent already saved its own assistant message via the stream; no
+        # extra wrapper is written here. ``schedule_runs.message_id`` stays null
+        # (it was legacy-only and no downstream code reads it).
 
         deliveries: list[dict[str, Any]] = []
 
@@ -271,7 +273,7 @@ in the final text.
                 "queries_total": 0,
                 "queries_succeeded": 0,
                 "queries_failed": 0,
-                "message_id": message.id if message else None,
+                "message_id": None,
                 "error_message": "; ".join(error_messages) if error_messages else None,
                 "outcome": outcome,
                 "headline": headline[:500] if headline else None,
@@ -285,7 +287,7 @@ in the final text.
 
         await _SchedRepo(session).reset_failure(schedule.id)
 
-        return {"status": "success", "summary": agent_response, "message_id": message.id if message else None}
+        return {"status": "success", "summary": agent_response, "message_id": None}
 
     @staticmethod
     async def _resolve_run_model(session: AsyncSession, schedule: Schedule) -> tuple[Any, str | None]:
@@ -321,7 +323,14 @@ in the final text.
                             if conn_model == model:
                                 return conn.id, model
                         except Exception:
-                            pass
+                            logger.exception(
+                                "Failed to decrypt or parse LLM connection config while resolving run model",
+                                extra={
+                                    "tenant_id": str(schedule.tenant_id),
+                                    "schedule_id": str(schedule.id),
+                                    "llm_connection_id": str(conn.id),
+                                },
+                            )
                 if connections:
                     return connections[0].id, model
 
@@ -384,6 +393,25 @@ in the final text.
 
     @staticmethod
     async def test_schedule(session: AsyncSession, schedule: Schedule) -> dict:
+        if schedule.instruction:
+            # Monitor-style row: queue a manual run through the normal runner so
+            # the full agent path executes and findings land in schedule_runs.
+            from datetime import UTC, datetime
+
+            from server.repositories.schedules import ScheduleRepository
+            from server.tools.monitors import MANUAL_RUN_PENDING
+
+            due_at = datetime.now(UTC).replace(tzinfo=None)
+            await ScheduleRepository(session).update(str(schedule.id), {"next_run_at": due_at})
+            MANUAL_RUN_PENDING.add(str(schedule.id))
+            return {
+                "success": True,
+                "summary": "Queued a manual run — results will appear in this notebook within ~60 seconds.",
+                "queries_total": 0,
+                "queries_succeeded": 0,
+                "queries_failed": 0,
+            }
+
         query_repo = QueryRepository(session)
         queries = await query_repo.get_by_notebook_id(str(schedule.notebook_id))
 
@@ -668,6 +696,8 @@ Focus on what the data shows, not technical details about queries."""
                     message_blocks, fallback = markdown_to_slack_blocks(final_message)
                     all_blocks = message_blocks
 
+                all_blocks = all_blocks + ScheduleService._monitor_run_action_blocks(schedule)
+
                 await ScheduleService._post_with_thread_fallback(
                     slack_client=slack_client,
                     schedule=schedule,
@@ -681,6 +711,26 @@ Focus on what the data shows, not technical details about queries."""
         except Exception as e:
             logger.error(f"Error posting to Slack: {e}", exc_info=True)
             return False, f"Slack error: {str(e)}"
+
+    @staticmethod
+    def _monitor_run_action_blocks(schedule: Schedule) -> list[dict]:
+        """Append Pause/Resume + Delete context buttons under a scheduled result."""
+        from server.utils.slack_block_elements import SlackBlockBuilder
+
+        if not schedule.instruction:
+            # Legacy query-based schedules don't participate in the monitor UI.
+            return []
+        b = SlackBlockBuilder
+        monitor_id = str(schedule.id)
+        toggle_label = "Pause" if schedule.status == "active" else "Resume"
+        return [
+            b.actions(
+                [
+                    b.button(toggle_label, action_id="monitor_toggle", value=monitor_id),
+                    b.button("Delete", action_id="monitor_delete", value=monitor_id, style="danger"),
+                ]
+            )
+        ]
 
     @staticmethod
     async def _post_with_thread_fallback(

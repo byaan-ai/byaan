@@ -65,11 +65,27 @@ export function useDeleteSchedule() {
 }
 
 export function useTestSchedule() {
+  const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (scheduleId: string) => ApiService.testSchedule(scheduleId),
     onSuccess: (result: ScheduleTestResult) => {
       if (result.success) {
-        showToast.success('Test run completed successfully')
+        showToast.success(result.summary || 'Test run queued')
+        // Monitor runs land in the notebook as a new assistant message once
+        // the runner picks them up (usually within 60s). Nudge the message
+        // and schedule caches a few times so the UI refreshes without the
+        // user manually reloading the notebook.
+        const refresh = () => {
+          queryClient.invalidateQueries({ queryKey: ['schedules'] })
+          queryClient.invalidateQueries({ queryKey: ['messages'] })
+          queryClient.invalidateQueries({ queryKey: ['threads'] })
+          try {
+            window.dispatchEvent(new CustomEvent('byaan:monitor-test-complete'))
+          } catch {}
+        }
+        setTimeout(refresh, 15_000)
+        setTimeout(refresh, 45_000)
+        setTimeout(refresh, 90_000)
       } else {
         showToast.error(result.error || 'Test run failed')
       }

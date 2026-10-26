@@ -207,6 +207,8 @@ async def update_schedule(
                     detail="You can only update schedules you created",
                 )
 
+        from server.models.schedules import MONITOR_STATUSES, NOTIFY_POLICIES
+
         update_data = {}
         if payload.name is not None:
             update_data["name"] = payload.name
@@ -225,6 +227,37 @@ async def update_schedule(
             update_data["webhook_url"] = payload.webhook_url
         if payload.slack_channel_id is not None:
             update_data["slack_channel_id"] = payload.slack_channel_id
+        if payload.slack_thread_ts is not None:
+            update_data["slack_thread_ts"] = payload.slack_thread_ts or None
+        if payload.broadcast_to_channel is not None:
+            update_data["broadcast_to_channel"] = payload.broadcast_to_channel
+        if payload.status is not None:
+            if payload.status not in MONITOR_STATUSES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"status must be one of {sorted(MONITOR_STATUSES)}",
+                )
+            update_data["status"] = payload.status
+            if payload.status == "active":
+                update_data["is_enabled"] = True
+                update_data["paused_until"] = None
+            elif payload.status in {"paused", "auto_paused"}:
+                update_data["is_enabled"] = False
+            elif payload.status == "draft":
+                update_data["is_enabled"] = False
+        if payload.notify_policy is not None:
+            if payload.notify_policy not in NOTIFY_POLICIES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"notify_policy must be one of {sorted(NOTIFY_POLICIES)}",
+                )
+            update_data["notify_policy"] = payload.notify_policy
+        if payload.paused_until is not None:
+            update_data["paused_until"] = payload.paused_until
+        if payload.llm_connection_id is not None:
+            update_data["llm_connection_id"] = payload.llm_connection_id
+        if payload.model is not None:
+            update_data["model"] = payload.model
         if payload.instruction is not None:
             update_data["instruction"] = payload.instruction
 

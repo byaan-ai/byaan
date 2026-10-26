@@ -5,6 +5,7 @@ import { Copy, Play } from "lucide-react"
 import { Button } from "./ui/button"
 import { parseMessage } from "../utils/parseMessage"
 import { ToolCallCard } from "./ToolCallCard"
+import { ChatMonitorCard } from "./monitors/ChatMonitorCard"
 import { CodeHighlight } from "./CodeHighlight"
 
 interface MarkdownRendererProps {
@@ -584,6 +585,15 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
           />
         )
       }
+      if (part.type === "monitor_card") {
+        return (
+          <ChatMonitorCard
+            key={`monitor-${index}-${part.monitor_id}`}
+            monitorId={part.monitor_id}
+            deleted={part.deleted}
+          />
+        )
+      }
 
       const textContent = part.content
       const toolLoadingMatch = textContent.match(/\*(.*?)\.\.\.\*$/)
@@ -642,7 +652,7 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
     })
   }
 
-  if (messageParts.some(part => part.type === "tool_call")) {
+  if (messageParts.some(part => part.type === "tool_call" || part.type === "monitor_card")) {
     return <div className="space-y-2">{renderMessageParts()}</div>
   }
 

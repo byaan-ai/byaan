@@ -57,6 +57,16 @@ RUN_FINDINGS: dict[str, dict[str, Any]] = {}
 # with trigger='manual' instead of 'scheduled'. Consumed once per run.
 MANUAL_RUN_PENDING: set[str] = set()
 
+# Signal to Slack post-processing that an interactive monitor card should be
+# posted into the thread. Keyed by thread_ts (or channel_id when no thread).
+# Each value is the monitor_id to render. Consumed once per agent turn.
+CARD_POST_PENDING: dict[str, str] = {}
+
+# Signal to Slack post-processing that a Block Kit list card should be posted
+# after a list_monitors tool call. Keyed by thread_ts (or channel_id when no
+# thread). Each value is the tenant_id so the drainer can scope the query.
+LIST_CARD_PENDING: dict[str, str] = {}
+
 
 def _ok(data: dict[str, Any]) -> str:
     return json.dumps({"ok": True, **data}, default=str)
@@ -115,8 +125,7 @@ async def create_monitor(
     timezone: str | None = None,
     notify_policy: str = "always",
     slack_channel_id: str | None = None,
-    slack_thread_ts: str | None = None,
-    broadcast_to_channel: bool = False,
+    delivery: str = "thread",
     notebook_id: str | None = None,
 ) -> str:
     """
@@ -127,14 +136,23 @@ async def create_monitor(
     Args:
         name: Human-readable name.
         cron_expression: Standard 5-field cron. Minimum interval: 1 hour.
-        instruction: Free-form description of what to run, what to look at, and
-            when to alert. The agent decides each run how to query based on the
-            evolving data; do NOT bind to specific saved queries.
-        timezone: IANA timezone. Defaults to the Slack user's tz or UTC.
+        instruction: Short, intent-focused description (1-3 sentences). Describe
+            WHAT to monitor and WHEN to alert. Do NOT include SQL, table names,
+            column names, join plans, or dataset UUIDs — the scheduled agent
+            re-reads schema each run and chooses queries itself so monitors
+            survive table / column changes.
+        timezone: IANA timezone (e.g. "Asia/Karachi"). **Omit this field unless
+            the user explicitly named a timezone.** When omitted, the tool
+            resolves the correct timezone itself: Slack user's profile tz when
+            invoked from Slack, else the browser timezone the web client sent
+            with the request, else UTC. Passing "UTC" yourself defeats the
+            browser-tz fallback and almost always produces the wrong default.
         notify_policy: always | on_alert | on_change (on_change is Phase 3).
-        slack_channel_id / slack_thread_ts: Delivery target. Default to current
-            Slack channel/thread when invoked from Slack.
-        broadcast_to_channel: When posting to a thread, also broadcast to channel.
+        slack_channel_id: Target Slack channel. Defaults to current channel when
+            invoked from Slack.
+        delivery: ``"thread"`` (reply in the current Slack thread, default),
+            ``"channel"`` (post to the channel root), or ``"broadcast"`` (reply
+            in the thread AND broadcast to the channel).
         notebook_id: Home notebook. Omit to auto-create one.
     """
     if err := _feature_check():
@@ -148,16 +166,32 @@ async def create_monitor(
 
     if notify_policy not in NOTIFY_POLICIES:
         return _err(f"notify_policy must be one of {sorted(NOTIFY_POLICIES)}.", code="invalid_notify_policy")
+    if delivery not in {"thread", "channel", "broadcast"}:
+        return _err("delivery must be one of thread, channel, broadcast.", code="invalid_delivery")
 
     slack_ctx = get_slack_context()
     if slack_channel_id is None and slack_ctx:
         slack_channel_id = slack_ctx.channel_id
-    if slack_thread_ts is None and slack_ctx:
-        slack_thread_ts = slack_ctx.thread_ts
-    elif slack_thread_ts == "":
+
+    if delivery == "channel":
         slack_thread_ts = None
-    if not timezone:
-        timezone = slack_ctx.user_timezone if slack_ctx else "UTC"
+        broadcast_to_channel = False
+    elif delivery == "broadcast":
+        slack_thread_ts = slack_ctx.thread_ts if slack_ctx else None
+        broadcast_to_channel = True
+    else:  # thread
+        slack_thread_ts = slack_ctx.thread_ts if slack_ctx else None
+        broadcast_to_channel = False
+
+    # Treat an explicit "UTC" the same as omitted — models love to pass UTC
+    # defensively, which overrides the user's real timezone. The tool is the
+    # source of truth for the resolved tz.
+    if not timezone or timezone == "UTC":
+        if slack_ctx and slack_ctx.user_timezone and slack_ctx.user_timezone != "UTC":
+            timezone = slack_ctx.user_timezone
+        else:
+            browser_tz = ctx.context.get("browser_timezone") if ctx and ctx.context else None
+            timezone = browser_tz or timezone or "UTC"
 
     ok, msg = _validate_cron(cron_expression)
     if not ok:
@@ -182,13 +216,17 @@ async def create_monitor(
                     code="quota_exceeded",
                 )
 
-        resolved_notebook_id: UUID
-        if notebook_id:
+        resolved_notebook_id: UUID | None = None
+        candidate = notebook_id or (ctx.context.get("notebook_id") if ctx and ctx.context else None)
+        if candidate:
             try:
-                resolved_notebook_id = UUID(notebook_id)
+                resolved_notebook_id = UUID(str(candidate))
             except ValueError:
-                return _err("Invalid notebook_id.", code="invalid_notebook_id")
-        else:
+                if notebook_id:
+                    return _err("Invalid notebook_id.", code="invalid_notebook_id")
+                # Context-provided id was garbled — fall through to auto-create.
+                resolved_notebook_id = None
+        if resolved_notebook_id is None:
             resolved_notebook_id = await ScheduleService.auto_create_notebook_for_cron(session, tenant_id, name)
 
         pinned_conn = ctx.context.get("llm_connection_id") if ctx and ctx.context else None
@@ -220,6 +258,11 @@ async def create_monitor(
         }
         schedule = await repo.create(schedule_data)
         logger.info(f"Monitor drafted id={schedule.id} tenant={tenant_id} origin={origin}")
+
+        if slack_ctx:
+            key = slack_ctx.thread_ts or slack_ctx.channel_id
+            if key:
+                CARD_POST_PENDING[key] = str(schedule.id)
 
         return _ok(
             {
@@ -309,6 +352,10 @@ async def set_monitor_status(
                 return _err("Monitor not found after update.", code="not_found")
 
         refreshed = await repo.get_with_notebook(monitor_id)
+        if slack_ctx:
+            key = slack_ctx.thread_ts or slack_ctx.channel_id
+            if key:
+                CARD_POST_PENDING[key] = str(refreshed.id)
         return _ok(
             {
                 "monitor": {
@@ -332,10 +379,16 @@ async def update_monitor(
     instruction: str | None = None,
     notify_policy: str | None = None,
     slack_channel_id: str | None = None,
-    slack_thread_ts: str | None = None,
-    broadcast_to_channel: bool | None = None,
+    delivery: str | None = None,
+    notebook_id: str | None = None,
 ) -> str:
-    """Patch an existing monitor's fields. Only the fields you pass are changed."""
+    """Patch an existing monitor's fields. Only the fields you pass are changed.
+
+    ``delivery`` is the easy way to change where the monitor posts:
+      - ``"thread"``   → reply in the Slack thread this monitor was created in.
+      - ``"channel"``  → post to the Slack channel root (clears the thread pin).
+      - ``"broadcast"`` → reply in the thread AND broadcast to the channel.
+    """
     if err := _feature_check():
         return err
     if _is_scheduled_run(ctx):
@@ -361,6 +414,8 @@ async def update_monitor(
                 return _err(msg or "Invalid cron expression.", code="invalid_cron")
         if notify_policy and notify_policy not in NOTIFY_POLICIES:
             return _err(f"notify_policy must be one of {sorted(NOTIFY_POLICIES)}.", code="invalid_notify_policy")
+        if delivery and delivery not in {"thread", "channel", "broadcast"}:
+            return _err("delivery must be one of thread, channel, broadcast.", code="invalid_delivery")
 
         patch_raw = {
             "name": name,
@@ -369,13 +424,25 @@ async def update_monitor(
             "instruction": instruction,
             "notify_policy": notify_policy,
             "slack_channel_id": slack_channel_id,
-            "broadcast_to_channel": broadcast_to_channel,
         }
         patch: dict[str, Any] = {k: v for k, v in patch_raw.items() if v is not None}
-        if slack_thread_ts == "":
+        if notebook_id:
+            try:
+                patch["notebook_id"] = UUID(notebook_id)
+            except ValueError:
+                return _err("Invalid notebook_id.", code="invalid_notebook_id")
+        if delivery == "thread":
+            patch["broadcast_to_channel"] = False
+            # Keep existing slack_thread_ts; if unset, inherit from Slack context.
+            if not schedule.slack_thread_ts and slack_ctx:
+                patch["slack_thread_ts"] = slack_ctx.thread_ts
+        elif delivery == "channel":
             patch["slack_thread_ts"] = None
-        elif slack_thread_ts is not None:
-            patch["slack_thread_ts"] = slack_thread_ts
+            patch["broadcast_to_channel"] = False
+        elif delivery == "broadcast":
+            patch["broadcast_to_channel"] = True
+            if not schedule.slack_thread_ts and slack_ctx:
+                patch["slack_thread_ts"] = slack_ctx.thread_ts
 
         if cron_expression or timezone:
             new_cron = cron_expression or schedule.cron_expression
@@ -383,6 +450,10 @@ async def update_monitor(
             patch["next_run_at"] = ScheduleService.calculate_next_run(new_cron, new_tz)
 
         updated = await repo.update(monitor_id, patch)
+        if slack_ctx:
+            key = slack_ctx.thread_ts or slack_ctx.channel_id
+            if key:
+                CARD_POST_PENDING[key] = str(updated.id)
         return _ok(
             {
                 "monitor": {
@@ -478,6 +549,11 @@ async def list_monitors(
             schedules = [s for s in schedules if str(s.notebook_id) == str(notebook_id_ctx)]
         if status:
             schedules = [s for s in schedules if s.status == status]
+
+        if slack_ctx:
+            key = slack_ctx.thread_ts or slack_ctx.channel_id
+            if key:
+                LIST_CARD_PENDING[key] = str(tenant_id)
 
         return _ok(
             {

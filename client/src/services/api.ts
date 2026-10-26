@@ -30,6 +30,7 @@ export interface AgentRequest {
   create_notebook?: boolean
   is_preview?: boolean
   plan_mode?: boolean
+  browser_timezone?: string
 }
 
 export interface HtmlEditDetectedEvent {
@@ -303,6 +304,13 @@ export interface ScheduleUpdate {
   is_enabled?: boolean
   webhook_url?: string | null
   slack_channel_id?: string | null
+  slack_thread_ts?: string | null
+  broadcast_to_channel?: boolean
+  status?: MonitorStatus
+  notify_policy?: NotifyPolicy
+  paused_until?: string | null
+  llm_connection_id?: string | null
+  model?: string | null
   instruction?: string | null
 }
 
@@ -2495,6 +2503,7 @@ export class ApiService {
       onPlanStepUpdate?: (event: PlanStepUpdateEvent) => void
       onPlanStatus?: (event: PlanStatusEvent) => void
       onSessionCorrupted?: (event: SessionCorruptedEvent) => void
+      onMonitorUpdated?: (event: { monitor_id: string; tool_name: string; deleted?: boolean }) => void
       signal?: AbortSignal
     }
   ): Promise<void> {
@@ -2518,6 +2527,7 @@ export class ApiService {
       onPlanStepUpdate,
       onPlanStatus,
       onSessionCorrupted,
+      onMonitorUpdated,
       signal
     } = options
 
@@ -2601,6 +2611,12 @@ export class ApiService {
                 onPlanStatus(event as PlanStatusEvent)
               } else if (event.type === 'session_corrupted' && onSessionCorrupted) {
                 onSessionCorrupted(event as SessionCorruptedEvent)
+              } else if (event.type === 'monitor_updated' && onMonitorUpdated) {
+                onMonitorUpdated({
+                  monitor_id: event.monitor_id,
+                  tool_name: event.tool_name,
+                  deleted: event.deleted,
+                })
               } else if (event.type === 'error' && onError) {
                 onError(event.text)
               } else if (event.type === 'done' && onDone) {

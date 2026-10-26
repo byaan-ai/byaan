@@ -1814,6 +1814,16 @@ Please modify this element to: `
     }
   }
 
+  // Reload notebook messages when a monitor "Run a test now" completes, so the
+  // agent's response surfaces without the user manually refreshing.
+  useEffect(() => {
+    const handler = () => {
+      loadNotebookMessages()
+    }
+    window.addEventListener('byaan:monitor-test-complete', handler)
+    return () => window.removeEventListener('byaan:monitor-test-complete', handler)
+  }, [notebookId])
+
   // Load notebook connection
   const loadNotebookConnection = useCallback(async (explicitNotebookId?: string) => {
     const targetNotebookId = explicitNotebookId || notebookId || createdNotebookIdRef.current
@@ -2486,6 +2496,13 @@ Please modify this element to: `
         create_notebook: shouldCreateNotebook,
         datasource_ids: shouldCreateNotebook ? pendingDatasourceIdsRef.current : undefined,
         plan_mode: planMode,
+        browser_timezone: (() => {
+          try {
+            return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+          } catch {
+            return undefined
+          }
+        })(),
       }
 
       await ApiService.streamAgent(request, {
@@ -2615,6 +2632,15 @@ Please modify this element to: `
             await handleDatasourceSelect(event.datasource_id, targetNotebookId)
           }
           setAgentSelectedDatasourceId(event.datasource_id)
+        },
+        onMonitorUpdated: (event) => {
+          if (event.deleted) {
+            accumulatedContent += `\n\n[[MONITOR_DELETED:${event.monitor_id}]]\n\n`
+          } else {
+            accumulatedContent += `\n\n[[MONITOR_CARD:${event.monitor_id}]]\n\n`
+          }
+          updateMessage(assistantMessageId, accumulatedContent)
+          queryClient.invalidateQueries({ queryKey: ['schedules'] })
         },
         onQuerySaved: handleQuerySaved,
         onInstructionUpdated: () => {

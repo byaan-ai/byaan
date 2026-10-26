@@ -19,3 +19,4 @@ class AgentRequest(BaseModel):
     plan_mode: bool = False
     scheduled_run: bool = False
     scheduled_run_schedule_id: str | UUID | None = None
+    browser_timezone: str | None = None

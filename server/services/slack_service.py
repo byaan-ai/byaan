@@ -13,6 +13,31 @@ logger = get_logger(__name__)
 _USER_TZ_CACHE: dict[str, tuple[str, float]] = {}
 _USER_TZ_TTL_SECONDS = 3600
 
+# Short-lived cache so time-critical interactivity handlers (e.g. opening a
+# modal within Slack's 3-second trigger_id window) can skip the decrypt
+# round-trip. Keyed by workspace id, value = bot_token.
+_BOT_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+_BOT_TOKEN_TTL_SECONDS = 300
+
+
+def cached_bot_token(workspace_id: str) -> str | None:
+    import time as _time
+
+    entry = _BOT_TOKEN_CACHE.get(workspace_id)
+    if not entry:
+        return None
+    token, expires_at = entry
+    if expires_at < _time.monotonic():
+        _BOT_TOKEN_CACHE.pop(workspace_id, None)
+        return None
+    return token
+
+
+def cache_bot_token(workspace_id: str, token: str) -> None:
+    import time as _time
+
+    _BOT_TOKEN_CACHE[workspace_id] = (token, _time.monotonic() + _BOT_TOKEN_TTL_SECONDS)
+
 
 _MENTION_RE = re.compile(r"<@[A-Z0-9]+(?:\|[^>]+)?>")
 

@@ -69,6 +69,10 @@ class ScheduleRunnerService:
             if removed:
                 logger.info(f"Cleaned up {removed} stale draft monitors older than {DRAFT_TTL_DAYS} days")
 
+            resumed = await repo.auto_resume_expired_pauses(now)
+            if resumed:
+                logger.info(f"Auto-resumed {resumed} monitors whose paused_until has passed")
+
             from server.tools.monitors import MANUAL_RUN_PENDING
 
             due = await repo.get_due_schedules(now, include_ids=set(MANUAL_RUN_PENDING))

@@ -455,47 +455,111 @@ class SlackBlockBuilder:
         return block
 
     @staticmethod
-    def monitor_draft_card(
+    def monitor_card(
         monitor_id: str,
         name: str,
+        status: str,
         cron_expression: str,
         timezone: str,
-        channel_label: str,
-        thread_pinned: bool,
+        slack_thread_ts: str | None,
         broadcast_to_channel: bool,
-        next_fire_times: list[str],
+        next_run_at: str | None,
+        next_fire_times: list[str] | None,
         instruction_preview: str,
+        notify_policy: str = "always",
     ) -> list[dict[str, Any]]:
-        """Draft confirmation card. ``monitor_id`` is the status='draft' row id."""
+        """Static monitor card. Shows fields read-only + Turn-on/Cancel on draft or
+        Delete on active. All field edits go through chat: user asks the agent to
+        change time / days / delivery / instruction and the agent calls
+        ``update_monitor``. The card is re-posted whenever the row changes.
+        """
+        from server.utils.cron_builder import humanize_days, time_and_days_from_cron
+
         b = SlackBlockBuilder
-        fires = "\n".join(f"• `{t}`" for t in next_fire_times) or "_(none)_"
-        pin_label = "thread" if thread_pinned else "channel root"
-        broadcast_label = " · broadcast to channel" if (thread_pinned and broadcast_to_channel) else ""
-        body = (
-            f"*{name}*\n"
-            f"`{cron_expression}` · {timezone}\n"
-            f"Posts to {channel_label} ({pin_label}){broadcast_label}\n\n"
-            f"*Next fires:*\n{fires}\n\n"
-            f"*What it will do:*\n{instruction_preview}"
-        )
-        return [
-            b.header("Monitor draft"),
-            b.section(body),
-            b.actions(
-                [
-                    b.button("Turn on", action_id="monitor_turn_on", value=monitor_id, style="primary"),
-                    b.button("Edit", action_id="monitor_edit", value=monitor_id),
-                    b.button("Cancel", action_id="monitor_cancel", value=monitor_id, style="danger"),
-                ]
-            ),
-            b.context(["Nothing runs until you turn it on."]),
+
+        header_text = {
+            "draft": "Monitor draft",
+            "active": "Monitor",
+            "paused": "Monitor (paused)",
+            "auto_paused": "Monitor (auto-paused)",
+        }.get(status, "Monitor")
+
+        status_label = {
+            "draft": ":pencil2: Draft",
+            "active": ":large_green_circle: Active",
+            "paused": ":large_yellow_circle: Paused",
+            "auto_paused": ":large_orange_circle: Auto-paused",
+        }.get(status, status.title())
+
+        parsed = time_and_days_from_cron(cron_expression)
+        if parsed is not None:
+            hour, minute, days = parsed
+            schedule_label = f"{humanize_days(days)} at {hour:02d}:{minute:02d}"
+        else:
+            schedule_label = f"`{cron_expression}`"
+
+        if slack_thread_ts and broadcast_to_channel:
+            delivery_label = "Reply in thread + broadcast to channel"
+        elif slack_thread_ts:
+            delivery_label = "Reply in this thread"
+        else:
+            delivery_label = "Post to channel"
+
+        notify_label = {
+            "always": "Every run",
+            "on_alert": "Only when something's wrong",
+            "on_change": "Only when results change",
+        }.get(notify_policy, notify_policy)
+
+        body_lines = [
+            f"*Status:* {status_label}",
+            f"*When:* {schedule_label} · {timezone}",
+            f"*Where to post:* {delivery_label}",
+            f"*Notify:* {notify_label}",
         ]
+        if next_run_at and status != "draft":
+            body_lines.append(f"*Next run:* `{next_run_at}`")
+        if status == "draft" and next_fire_times:
+            fires = ", ".join(next_fire_times[:3])
+            body_lines.append(f"*Would fire next:* {fires}")
+
+        blocks: list[dict[str, Any]] = [
+            b.header(f"{header_text}: {name[:120]}"),
+            b.section("\n".join(body_lines)),
+        ]
+
+        if instruction_preview:
+            blocks.append(b.section(f"*What it checks*\n{instruction_preview}"))
+
+        if status == "draft":
+            blocks.append(
+                b.actions(
+                    [
+                        b.button("Turn on", action_id="monitor_turn_on", value=monitor_id, style="primary"),
+                        b.button("Run a test now", action_id="monitor_run_now", value=monitor_id),
+                        b.button("Cancel", action_id="monitor_cancel", value=monitor_id, style="danger"),
+                    ]
+                )
+            )
+            blocks.append(b.context(["Nothing runs until you turn it on."]))
+        else:
+            blocks.append(
+                b.actions(
+                    [
+                        b.button("Run a test now", action_id="monitor_run_now", value=monitor_id),
+                        b.button("Delete", action_id="monitor_delete", value=monitor_id, style="danger"),
+                    ]
+                )
+            )
+            blocks.append(b.context(["Ask Byaan to change the time, days, timezone, delivery, or instruction."]))
+
+        return blocks
 
     @staticmethod
     def monitor_list_card(
         monitors: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """List existing monitors with per-row pause / delete controls."""
+        """Compact list of monitors with inline Open / Pause-Resume / Delete controls."""
         b = SlackBlockBuilder
         blocks: list[dict[str, Any]] = [b.header("Monitors")]
         if not monitors:
@@ -521,23 +585,3 @@ class SlackBlockBuilder:
             )
             blocks.append(b.divider())
         return blocks
-
-    @staticmethod
-    def schedule_success_card(
-        schedule_id: str,
-        name: str,
-        cron_expression: str,
-        timezone: str,
-        next_run_at: str | None,
-        manage_url: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Card shown after a monitor is turned on."""
-        b = SlackBlockBuilder
-        body = f"✅ *{name}* is active\n`{cron_expression}` · {timezone}\nNext fires at `{next_run_at or 'n/a'}`"
-        actions_elements = [
-            b.button("Pause", action_id="monitor_toggle", value=schedule_id),
-            b.button("Delete", action_id="monitor_delete", value=schedule_id, style="danger"),
-        ]
-        if manage_url:
-            actions_elements.append(b.button("Open in Byaan", action_id="monitor_open_byaan", url=manage_url))
-        return [b.section(body), b.actions(actions_elements)]

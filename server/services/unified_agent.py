@@ -1248,8 +1248,19 @@ async def stream_handoff_agent_response(
         session_notebook_id = str(request.notebook_id) if request.notebook_id else "default"
         agent_session = await create_agent_session(session_notebook_id)
 
-        # Save user message immediately (skip in preview mode)
-        if request.notebook_id and not request.is_preview:
+        # Save user message immediately (skip in preview mode and in scheduled
+        # monitor runs — the system-level prompt is not from a real user).
+        if request.notebook_id and not request.is_preview and getattr(request, "scheduled_run", False):
+            # Scheduled runs skip the user-message write but we still need a
+            # thread to exist so the assistant save at the end has somewhere
+            # to land. ``ensure_thread_for_notebook`` is a lightweight helper
+            # that creates the thread lazily and returns its id.
+            try:
+                thread_id = await MessageService.ensure_thread_for_notebook(session, request.notebook_id)
+            except Exception as thread_err:
+                logger.warning(f"Scheduled run could not ensure thread for notebook: {thread_err}")
+                thread_id = str(request.notebook_id)
+        elif request.notebook_id and not request.is_preview:
             try:
                 thread_id = await MessageService.save_agent_user_message(
                     session,
@@ -1393,6 +1404,7 @@ async def stream_handoff_agent_response(
                     "plan_started": request.plan_mode and bool(request.notebook_id) and not is_first_message,
                     "scheduled_run": bool(getattr(request, "scheduled_run", False)),
                     "schedule_id": getattr(request, "scheduled_run_schedule_id", None),
+                    "browser_timezone": getattr(request, "browser_timezone", None),
                 }
                 _add_skill_credentials_to_context(context, enabled_skills, custom_skills)
 
@@ -1696,6 +1708,7 @@ async def stream_handoff_agent_response(
             "plan_started": request.plan_mode and bool(request.notebook_id) and not is_first_message,
             "scheduled_run": bool(getattr(request, "scheduled_run", False)),
             "schedule_id": getattr(request, "scheduled_run_schedule_id", None),
+            "browser_timezone": getattr(request, "browser_timezone", None),
         }
         _add_skill_credentials_to_context(context, enabled_skills, custom_skills)
 
@@ -2266,6 +2279,49 @@ async def stream_handoff_agent_response(
                             # Reset flag to allow subsequent edits to trigger the event
                             html_edit_completed = False
                             html_edit_session_id = None
+
+                        # Emit monitor_updated event so the chat UI can inject an
+                        # inline MonitorCard after a monitor-management tool runs.
+                        if last_tool_name in {
+                            "create_monitor",
+                            "set_monitor_status",
+                            "update_monitor",
+                            "delete_monitor",
+                            "run_monitor_now",
+                        }:
+                            try:
+                                raw_item = getattr(item, "raw_item", None)
+                                if isinstance(raw_item, dict):
+                                    tool_result_raw = raw_item.get("output")
+                                else:
+                                    tool_result_raw = getattr(raw_item, "output", None)
+                                if tool_result_raw:
+                                    result_data = json.loads(tool_result_raw)
+                                    monitor_payload = (result_data or {}).get("monitor") or {}
+                                    monitor_id = (
+                                        monitor_payload.get("id")
+                                        or (result_data or {}).get("schedule_id")
+                                        or (result_data or {}).get("id")
+                                    )
+                                    if monitor_id:
+                                        monitor_event = json.dumps(
+                                            {
+                                                "type": "monitor_updated",
+                                                "tool_name": last_tool_name,
+                                                "monitor_id": str(monitor_id),
+                                                "deleted": bool((result_data or {}).get("deleted")),
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                        yield f"data: {monitor_event}\n\n"
+                                        marker = (
+                                            f"\n\n[[MONITOR_DELETED:{monitor_id}]]\n\n"
+                                            if (result_data or {}).get("deleted")
+                                            else f"\n\n[[MONITOR_CARD:{monitor_id}]]\n\n"
+                                        )
+                                        assistant_response += marker
+                            except Exception as e:
+                                logger.warning(f"Failed to emit monitor_updated event: {e}")
 
                         # Check if the last tool was generate_dashboard_screenshot and emit dashboard_screenshot event
                         if last_tool_name == "generate_dashboard_screenshot" and last_tool_args:

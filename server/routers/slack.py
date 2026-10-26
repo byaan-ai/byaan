@@ -426,10 +426,11 @@ async def slack_interactivity(
 
             return JSONResponse(status_code=200, content={"ok": True})
 
-        elif action_id in ("monitor_turn_on", "monitor_cancel", "monitor_edit"):
+        elif action_id in ("monitor_turn_on", "monitor_cancel"):
             monitor_id = action.get("value") or ""
             response_url = payload.get("response_url")
             slack_user_id = payload.get("user", {}).get("id")
+            message = payload.get("message") or {}
             background_tasks.add_task(
                 _process_monitor_draft_action,
                 action_id=action_id,
@@ -437,6 +438,19 @@ async def slack_interactivity(
                 monitor_id=monitor_id,
                 response_url=response_url,
                 slack_user_id=slack_user_id,
+                message_channel=payload.get("channel", {}).get("id"),
+                message_ts=message.get("ts"),
+            )
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        elif action_id == "monitor_run_now":
+            monitor_id = action.get("value") or ""
+            response_url = payload.get("response_url")
+            background_tasks.add_task(
+                _process_monitor_run_now_button,
+                team_id=team_id,
+                monitor_id=monitor_id,
+                response_url=response_url,
             )
             return JSONResponse(status_code=200, content={"ok": True})
 
@@ -475,17 +489,81 @@ async def _post_response_url(response_url: str | None, text: str, replace_origin
         logger.warning(f"Failed to notify response_url: {e}")
 
 
+async def _refresh_monitor_card(
+    workspace,
+    schedule,
+    channel: str | None,
+    message_ts: str | None,
+    session,
+) -> None:
+    """Replace or post the interactive monitor card for the given schedule.
+
+    When ``message_ts`` is provided we edit the existing card via ``chat.update``;
+    otherwise we post a fresh card into the thread so the user sees current state.
+    """
+    from server.services.schedule_service import ScheduleService as _ScheduleService
+    from server.utils.slack_block_elements import SlackBlockBuilder
+
+    fires = []
+    if schedule.status == "draft":
+        try:
+            fires = [
+                dt.isoformat()
+                for dt in _ScheduleService.preview_fire_times(schedule.cron_expression, schedule.timezone, count=3)
+            ]
+        except Exception:
+            fires = []
+
+    blocks = SlackBlockBuilder.monitor_card(
+        monitor_id=str(schedule.id),
+        name=schedule.name,
+        status=schedule.status,
+        cron_expression=schedule.cron_expression,
+        timezone=schedule.timezone,
+        slack_thread_ts=schedule.slack_thread_ts,
+        broadcast_to_channel=schedule.broadcast_to_channel,
+        next_run_at=schedule.next_run_at.isoformat() if schedule.next_run_at else None,
+        next_fire_times=fires,
+        instruction_preview=(schedule.instruction or "")[:600],
+        notify_policy=schedule.notify_policy or "always",
+    )
+    text = f"Monitor: {schedule.name}"
+
+    bot_token = await SlackAgentService._get_bot_token(workspace, session)
+    slack_client = SlackService(bot_token)
+    target_channel = channel or schedule.slack_channel_id or ""
+    if message_ts and target_channel:
+        try:
+            await slack_client.client.chat_update(
+                channel=target_channel,
+                ts=message_ts,
+                text=text,
+                blocks=blocks,
+            )
+            return
+        except Exception as e:
+            logger.warning(f"chat.update failed for monitor {schedule.id}: {e}; posting fresh card")
+
+    await slack_client.post_message(
+        channel=target_channel,
+        text=text,
+        thread_ts=schedule.slack_thread_ts,
+        blocks=blocks,
+    )
+
+
 async def _process_monitor_draft_action(
     action_id: str,
     team_id: str,
     monitor_id: str,
     response_url: str | None,
     slack_user_id: str | None,
+    message_channel: str | None,
+    message_ts: str | None,
 ) -> None:
-    """Turn on / cancel / edit a draft monitor from a Slack button click."""
+    """Turn on / cancel a draft monitor from a Slack button click."""
     from server.repositories.schedules import ScheduleRepository
     from server.services.schedule_service import ScheduleService as _ScheduleService
-    from server.utils.slack_block_elements import SlackBlockBuilder
 
     try:
         async with AsyncSessionFactory() as session:
@@ -511,14 +589,6 @@ async def _process_monitor_draft_action(
                 await _post_response_url(response_url, "Cancelled.", replace_original=True)
                 return
 
-            if action_id == "monitor_edit":
-                hint = (
-                    "Tell Byaan what to change (name, cron, timezone, channel, instruction) in this thread "
-                    "and it will update the draft."
-                )
-                await _post_response_url(response_url, hint, replace_original=False)
-                return
-
             if schedule.status != "draft":
                 await _post_response_url(response_url, "This monitor is already active.", replace_original=True)
                 return
@@ -535,22 +605,7 @@ async def _process_monitor_draft_action(
                 },
             )
             refreshed = await sched_repo.get_with_notebook(str(schedule.id))
-
-            blocks = SlackBlockBuilder.schedule_success_card(
-                schedule_id=str(refreshed.id),
-                name=refreshed.name,
-                cron_expression=refreshed.cron_expression,
-                timezone=refreshed.timezone,
-                next_run_at=refreshed.next_run_at.isoformat() if refreshed.next_run_at else None,
-            )
-            bot_token = await SlackAgentService._get_bot_token(workspace, session)
-            slack_client = SlackService(bot_token)
-            await slack_client.post_message(
-                channel=refreshed.slack_channel_id or "",
-                text=f"Monitor active: {refreshed.name}",
-                thread_ts=refreshed.slack_thread_ts,
-                blocks=blocks,
-            )
+            await _refresh_monitor_card(workspace, refreshed, message_channel, message_ts, session)
             logger.info(f"[SLACK] monitor turned on id={refreshed.id} by user={slack_user_id}")
     except Exception as e:
         logger.error(f"Error in monitor draft action: {e}", exc_info=True)
@@ -605,6 +660,45 @@ async def _process_monitor_row_action(
             await _post_response_url(response_url, f"{label} monitor *{schedule.name}*.", replace_original=False)
     except Exception as e:
         logger.error(f"Error in monitor row action: {e}", exc_info=True)
+
+
+async def _process_monitor_run_now_button(
+    team_id: str,
+    monitor_id: str,
+    response_url: str | None,
+) -> None:
+    """Queue a one-off manual run from the ``Run a test now`` button."""
+    from datetime import UTC, datetime
+
+    from server.repositories.schedules import ScheduleRepository
+    from server.tools.monitors import MANUAL_RUN_PENDING
+
+    try:
+        async with AsyncSessionFactory() as session:
+            workspace = await SlackWorkspaceRepository(session).get_by_team_id(team_id)
+            if not workspace:
+                return
+            sched_repo = ScheduleRepository(session)
+            schedule = await sched_repo.get_with_notebook(monitor_id)
+            if not schedule or schedule.tenant_id != workspace.tenant_id:
+                await _post_response_url(response_url, "Monitor not found.", replace_original=False)
+                return
+            if schedule.slack_workspace_id and schedule.slack_workspace_id != workspace.id:
+                await _post_response_url(
+                    response_url, "Monitor belongs to a different workspace.", replace_original=False
+                )
+                return
+
+            due_at = datetime.now(UTC).replace(tzinfo=None)
+            await sched_repo.update(str(schedule.id), {"next_run_at": due_at})
+            MANUAL_RUN_PENDING.add(str(schedule.id))
+            await _post_response_url(
+                response_url,
+                f"Queued a test run of *{schedule.name}* — results will post in a few seconds.",
+                replace_original=False,
+            )
+    except Exception as e:
+        logger.error(f"Error queueing manual run from button: {e}", exc_info=True)
 
 
 def _next_run_safe(schedule):

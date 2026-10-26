@@ -219,6 +219,14 @@ class SlackAgentService:
                 session=session,
             )
 
+            await SlackAgentService._maybe_post_monitor_card(
+                workspace=workspace,
+                slack_client=slack_client,
+                channel_id=channel_id,
+                thread_ts=thread_ts or event_ts,
+                session=session,
+            )
+
             conversation.bot_owned = True
             await session.commit()
 
@@ -250,9 +258,17 @@ class SlackAgentService:
 
     @staticmethod
     async def _get_bot_token(workspace: SlackWorkspace, session: AsyncSession) -> str:
-        """Decrypt and return the bot token."""
+        """Decrypt and return the bot token, using a short-lived memory cache."""
+        from server.services.slack_service import cache_bot_token, cached_bot_token
+
+        workspace_id = str(workspace.id)
+        cached = cached_bot_token(workspace_id)
+        if cached:
+            return cached
         decrypted = await CryptoService.decrypt_config(workspace.bot_token_encrypted, session)
-        return decrypted.get("bot_token", decrypted) if isinstance(decrypted, dict) else decrypted
+        token = decrypted.get("bot_token", decrypted) if isinstance(decrypted, dict) else decrypted
+        cache_bot_token(workspace_id, token)
+        return token
 
     @staticmethod
     async def _get_signing_secret(workspace: SlackWorkspace, session: AsyncSession) -> str:
@@ -539,6 +555,7 @@ SCHEDULED REPORTS ("CRONS"):
 You can create, update, pause/resume, remove, list, run and inspect recurring reports ("monitors") via the create_monitor, set_monitor_status, update_monitor, delete_monitor, list_monitors, run_monitor_now, and get_monitor_runs tools. Rules:
 - If the user asks to monitor, schedule, or run something recurring, and the thread has no prior analysis for it, run the analysis once first so they see what each fire will look like.
 - Always call create_monitor first. It saves the monitor as a draft and nothing runs until the user confirms. Then call set_monitor_status(id, status="active") after the user says yes.
+- Keep the `instruction` short and intent-focused — 1-3 sentences. Describe WHAT to monitor and WHEN to alert, not HOW to query. Do NOT include table names, column names, SQL expressions, join plans, or dataset UUIDs. The agent re-reads the schema on every run so it can adapt when tables change.
 - For "alert if X" / "only ping if X" requests, encode the condition in the instruction field and tell the user the cron will stay quiet when the condition is false.
 - Default the timezone to the user's Slack timezone. Default the channel and thread to the current ones.
 """
@@ -556,6 +573,107 @@ When processing this request:
 
 User's question:
 {question}"""
+
+    @staticmethod
+    async def _maybe_post_monitor_card(
+        workspace: SlackWorkspace,
+        slack_client: SlackService,
+        channel_id: str,
+        thread_ts: str | None,
+        session: AsyncSession,
+    ) -> None:
+        """Post the interactive monitor card (single mutation) and/or the list
+        card after mutation / list_monitors tool calls that ran in this thread.
+        """
+        from server.repositories.schedules import ScheduleRepository
+        from server.services.schedule_service import ScheduleService as _ScheduleService
+        from server.tools.monitors import CARD_POST_PENDING, LIST_CARD_PENDING
+        from server.utils.slack_block_elements import SlackBlockBuilder
+
+        key = thread_ts or channel_id
+
+        monitor_id = CARD_POST_PENDING.pop(key, None)
+        if monitor_id:
+            schedule = await ScheduleRepository(session).get_with_notebook(monitor_id)
+            if schedule and schedule.tenant_id == workspace.tenant_id:
+                fires: list[str] = []
+                if schedule.status == "draft":
+                    try:
+                        fires = [
+                            dt.isoformat()
+                            for dt in _ScheduleService.preview_fire_times(
+                                schedule.cron_expression, schedule.timezone, count=3
+                            )
+                        ]
+                    except Exception:
+                        fires = []
+                blocks = SlackBlockBuilder.monitor_card(
+                    monitor_id=str(schedule.id),
+                    name=schedule.name,
+                    status=schedule.status,
+                    cron_expression=schedule.cron_expression,
+                    timezone=schedule.timezone,
+                    slack_thread_ts=schedule.slack_thread_ts,
+                    broadcast_to_channel=schedule.broadcast_to_channel,
+                    next_run_at=schedule.next_run_at.isoformat() if schedule.next_run_at else None,
+                    next_fire_times=fires,
+                    instruction_preview=(schedule.instruction or "")[:600],
+                    notify_policy=schedule.notify_policy or "always",
+                )
+                try:
+                    await slack_client.post_message(
+                        channel=channel_id,
+                        text=f"Monitor: {schedule.name}",
+                        thread_ts=thread_ts,
+                        blocks=blocks,
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to post monitor card for {schedule.id}: {e}", exc_info=True)
+
+        tenant_id_str = LIST_CARD_PENDING.pop(key, None)
+        if tenant_id_str:
+            await SlackAgentService._post_monitor_list_card(
+                workspace=workspace,
+                slack_client=slack_client,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                session=session,
+            )
+
+    @staticmethod
+    async def _post_monitor_list_card(
+        workspace: SlackWorkspace,
+        slack_client: SlackService,
+        channel_id: str,
+        thread_ts: str | None,
+        session: AsyncSession,
+    ) -> None:
+        from server.repositories.schedules import ScheduleRepository
+        from server.utils.slack_block_elements import SlackBlockBuilder
+
+        schedules = await ScheduleRepository(session).get_all_for_tenant(workspace.tenant_id)
+        rows = [
+            {
+                "id": str(s.id),
+                "name": s.name,
+                "status": s.status,
+                "cron_expression": s.cron_expression,
+                "timezone": s.timezone,
+                "is_enabled": s.is_enabled,
+                "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
+            }
+            for s in schedules
+        ]
+        blocks = SlackBlockBuilder.monitor_list_card(rows)
+        try:
+            await slack_client.post_message(
+                channel=channel_id,
+                text="Monitors",
+                thread_ts=thread_ts,
+                blocks=blocks,
+            )
+        except Exception as e:
+            logger.error(f"Failed to post monitor list card: {e}", exc_info=True)
 
     @staticmethod
     async def _upload_dashboard_screenshot(
@@ -984,6 +1102,14 @@ User's question:
                     llm_connection_id=llm_connection_id,
                     resolved_model=resolved_model,
                     append_mention_hint=True,
+                    session=session,
+                )
+
+                await SlackAgentService._maybe_post_monitor_card(
+                    workspace=workspace,
+                    slack_client=slack_client,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
                     session=session,
                 )
 

@@ -100,6 +100,20 @@ class ScheduleRepository(AsyncCRUDRepository[Schedule]):
         await self._session.commit()
         return (result.rowcount or 0) > 0
 
+    async def auto_resume_expired_pauses(self, now: datetime) -> int:
+        """Flip paused monitors whose paused_until has passed back to active."""
+        result = await self._session.execute(
+            update(Schedule)
+            .where(
+                Schedule.status == "paused",
+                Schedule.paused_until.is_not(None),
+                Schedule.paused_until <= now,
+            )
+            .values(status="active", is_enabled=True, paused_until=None)
+        )
+        await self._session.commit()
+        return result.rowcount or 0
+
     async def reclaim_stale_leases(self, cutoff: datetime) -> int:
         """Release leases whose running_since is older than cutoff (crash recovery)."""
         result = await self._session.execute(
