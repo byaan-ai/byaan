@@ -12,6 +12,26 @@ class SlackTableParser:
     """Parser for converting markdown tables to Slack Table blocks."""
 
     @staticmethod
+    def _normalize_table_boundaries(text: str) -> str:
+        """Insert newlines between consecutive table rows that got glued together.
+
+        LLM / outbound skill output sometimes collapses the newlines between
+        rows so the whole table ends up on one line (``| a | b | |---|---| | 1 | 2 |``).
+        We only touch cases where a closing ``|`` is followed by optional
+        whitespace and then an opening ``|``; that pattern is exclusive to
+        row-to-row junctions, never within a row.
+        """
+        text = re.sub(r"\|[ \t]+\|", "|\n|", text)
+        # Prose + header-row glued case: non-pipe/non-space + optional ws + a full
+        # pipe-delimited header row + newline + separator row (---).
+        text = re.sub(
+            r"([^\s|])\s*(\|(?:[^\n|]*\|){2,}[ \t]*\n\|[-:\s|]+\|)",
+            r"\1\n\n\2",
+            text,
+        )
+        return text
+
+    @staticmethod
     def has_markdown_table(text: str) -> bool:
         """
         Check if text contains a markdown table.
@@ -22,6 +42,7 @@ class SlackTableParser:
         Returns:
             True if markdown table is found
         """
+        text = SlackTableParser._normalize_table_boundaries(text)
         # Require at least 2 cells per line and at least 2 rows for robust detection
         table_pattern = r"\|[^|\n]+\|[^|\n]+\|[\r\n]+\|[^|\n]+\|[^|\n]+\|"
         return bool(re.search(table_pattern, text))
@@ -37,6 +58,7 @@ class SlackTableParser:
         Returns:
             Tuple of (blocks list, remaining text without tables)
         """
+        text = SlackTableParser._normalize_table_boundaries(text)
         blocks: list[dict[str, Any]] = []
         remaining_text = text
 

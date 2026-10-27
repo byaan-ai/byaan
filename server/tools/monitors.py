@@ -53,9 +53,8 @@ _MAX_ACTIVE_PER_WORKSPACE = 20
 # back after the stream completes. Not used in interactive runs.
 RUN_FINDINGS: dict[str, dict[str, Any]] = {}
 
-# Schedule ids queued by run_monitor_now so the executor records the next run
-# with trigger='manual' instead of 'scheduled'. Consumed once per run.
-MANUAL_RUN_PENDING: set[str] = set()
+# Manual-trigger coordination moved to DB (schedules.manual_trigger_pending +
+# manual_slack_target) so it survives multi-worker deployments.
 
 # Signal to Slack post-processing that an interactive monitor card should be
 # posted into the thread. Keyed by thread_ts (or channel_id when no thread).
@@ -522,6 +521,11 @@ async def list_monitors(
         scope: 'all' (workspace-wide, default), 'thread' (only this Slack thread),
             or 'notebook' (only the current notebook/thread's notebook).
         status: optional filter — draft | active | paused | auto_paused.
+
+    Output includes ``viewer_timezone`` (the viewer's IANA tz) and each monitor
+    has both ``next_run_at_utc`` and ``next_run_at_viewer_tz``. When presenting
+    the table to the user, use ``next_run_at_viewer_tz`` and label the column
+    with the viewer timezone (e.g. "Next Run (Asia/Karachi)"), NOT UTC.
     """
     if err := _feature_check():
         return err
@@ -555,8 +559,31 @@ async def list_monitors(
             if key:
                 LIST_CARD_PENDING[key] = str(tenant_id)
 
+        viewer_tz = "UTC"
+        if slack_ctx and slack_ctx.user_timezone and slack_ctx.user_timezone != "UTC":
+            viewer_tz = slack_ctx.user_timezone
+        elif ctx and ctx.context:
+            viewer_tz = ctx.context.get("browser_timezone") or viewer_tz
+
+        import pytz as _pytz
+
+        try:
+            viewer_tz_obj = _pytz.timezone(viewer_tz)
+        except Exception:
+            viewer_tz_obj = _pytz.UTC
+
+        def _next_run_local(dt, tz=viewer_tz_obj):
+            if not dt:
+                return None
+            try:
+                aware = dt.replace(tzinfo=_pytz.UTC) if dt.tzinfo is None else dt
+                return aware.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                return dt.isoformat()
+
         return _ok(
             {
+                "viewer_timezone": viewer_tz,
                 "monitors": [
                     {
                         "id": str(s.id),
@@ -568,11 +595,12 @@ async def list_monitors(
                         "slack_channel_id": s.slack_channel_id,
                         "slack_thread_ts": s.slack_thread_ts,
                         "origin": s.origin,
-                        "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
+                        "next_run_at_utc": s.next_run_at.isoformat() if s.next_run_at else None,
+                        "next_run_at_viewer_tz": _next_run_local(s.next_run_at),
                         "instruction_preview": (s.instruction or "")[:200],
                     }
                     for s in schedules
-                ]
+                ],
             }
         )
     return _err("Could not open a database session.", code="session_error")
@@ -601,8 +629,18 @@ async def run_monitor_now(ctx: RunContextWrapper[Any], monitor_id: str) -> str:
             return _err("Monitor belongs to a different workspace.", code="workspace_mismatch")
 
         due_at = datetime.now(UTC).replace(tzinfo=None)
-        await repo.update(monitor_id, {"next_run_at": due_at})
-        MANUAL_RUN_PENDING.add(monitor_id)
+        patch: dict[str, Any] = {
+            "next_run_at": due_at,
+            "manual_trigger_pending": True,
+            "manual_slack_target": None,
+        }
+        if slack_ctx and slack_ctx.channel_id:
+            patch["manual_slack_target"] = {
+                "channel_id": slack_ctx.channel_id,
+                "thread_ts": slack_ctx.thread_ts,
+                "team_id": slack_ctx.team_id,
+            }
+        await repo.update(monitor_id, patch)
         logger.info(f"Manual run queued for monitor {monitor_id}")
         return _ok({"id": monitor_id, "queued_for": due_at.isoformat(), "trigger": "manual"})
     return _err("Could not open a database session.", code="session_error")

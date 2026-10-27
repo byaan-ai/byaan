@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { useMemo } from "react"
 import { ApiService, type ScheduleRead } from "../../services/api"
-import { useTestSchedule, useUpdateSchedule } from "../../hooks/useSchedules"
+import { useTestSchedule, useUpdateSchedule, useMonitorRunningState, useRunningStage } from "../../hooks/useSchedules"
 import { Button } from "../ui/button"
 import { Card } from "../ui/card"
 import { Loader2, Play, Power } from "lucide-react"
@@ -25,6 +25,9 @@ export function ChatMonitorCard({ monitorId, deleted }: ChatMonitorCardProps) {
     () => schedules?.find((s) => s.id === monitorId),
     [schedules, monitorId]
   )
+  const running = useMonitorRunningState(monitorId)
+  const showRunning = running || testSchedule.isPending
+  const stage = useRunningStage(showRunning ? monitorId : null)
 
   if (deleted) {
     return (
@@ -55,6 +58,16 @@ export function ChatMonitorCard({ monitorId, deleted }: ChatMonitorCardProps) {
   return (
     <div className="my-3 space-y-2">
       <MonitorCard monitor={monitor} onChanged={onChanged} />
+      {showRunning && (
+        <Card className="p-3 bg-amber-900/20 border-amber-700/40 text-sm text-amber-100 flex items-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span>
+            Running a test for <b>{monitor.name}</b>
+            {stage ? <> — {stage}</> : null}
+            . Result will post below shortly.
+          </span>
+        </Card>
+      )}
       <div className="flex gap-2">
         {monitor.status === 'draft' && (
           <Button
@@ -77,10 +90,18 @@ export function ChatMonitorCard({ monitorId, deleted }: ChatMonitorCardProps) {
           size="sm"
           variant={monitor.status === 'draft' ? 'ghost' : 'default'}
           onClick={() => testSchedule.mutate(monitor.id)}
-          disabled={testSchedule.isPending}
+          disabled={showRunning}
         >
-          <Play className="w-4 h-4 mr-1" />
-          Run a test now
+          {showRunning ? (
+            <>
+              <Loader2 className="w-4 h-4 mr-1 animate-spin" /> Running test…
+            </>
+          ) : (
+            <>
+              <Play className="w-4 h-4 mr-1" />
+              Run a test now
+            </>
+          )}
         </Button>
       </div>
     </div>

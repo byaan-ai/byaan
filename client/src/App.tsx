@@ -4,6 +4,7 @@ import { ToastContainer } from 'react-toastify'
 import Layout from './components/Layout'
 import ChatPreview from './pages/ChatPreview'
 import LLMConnectionsPage from './pages/LLMConnections'
+import MonitorsPage from './pages/Monitors'
 import DatabasesPage from './pages/Databases'
 import TeamMembersPage from './pages/TeamMembers'
 import NotebooksPage from './pages/NotebooksPage'
@@ -23,6 +24,7 @@ import { WaitlistGate } from './components/WaitlistGate'
 import { isTauriApp } from './lib/tauri-api'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useAppConfig } from './hooks/useAppConfig'
+import { useMonitorRunWatcher } from './hooks/useSchedules'
 import { useStore } from './stores/useStore'
 import './App.css'
 import 'react-toastify/dist/ReactToastify.css'
@@ -36,6 +38,8 @@ function App() {
   const { isLoading: isConfigLoading, features, isLocal, config } = useAppConfig()
 
   const isEnterprise = features.enterprise_licensed
+
+  useMonitorRunWatcher()
 
   useEffect(() => {
     const switchingFlag = localStorage.getItem('byaan_switching_tenant')
@@ -197,6 +201,18 @@ function App() {
             }
           />
           <Route
+            path="/monitors"
+            element={
+              <AuthGuard>
+                <ViewerRedirect>
+                  <Layout>
+                    <MonitorsPage />
+                  </Layout>
+                </ViewerRedirect>
+              </AuthGuard>
+            }
+          />
+          <Route
             path="/databases"
             element={
               <AuthGuard>
@@ -298,6 +314,7 @@ function App() {
             <Route path="/notebooks" element={<NotebooksPage />} />
             <Route path="/skill-review" element={<SkillReviewPage />} />
             <Route path="/llm-connections" element={<LLMConnectionsPage />} />
+            <Route path="/monitors" element={<MonitorsPage />} />
             <Route path="/databases" element={<DatabasesPage />} />
             <Route path="/github" element={<GitHubIntegrations />} />
             <Route path="/folders" element={<FoldersPage />} />
@@ -338,6 +355,7 @@ function App() {
             <Route path="/notebooks" element={<NotebooksPage />} />
             <Route path="/skill-review" element={<SkillReviewPage />} />
             <Route path="/llm-connections" element={<LLMConnectionsPage />} />
+            <Route path="/monitors" element={<MonitorsPage />} />
             <Route path="/databases" element={<DatabasesPage />} />
             <Route path="/github" element={<GitHubIntegrations />} />
             <Route path="/folders" element={<FoldersPage />} />

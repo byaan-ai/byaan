@@ -46,7 +46,9 @@ function formatTime(hour: string, minute: string): string {
 
 function formatNextRun(dateStr: string | null | undefined): string {
   if (!dateStr) return 'Not scheduled'
-  const date = new Date(dateStr)
+  const normalized = /[zZ]|[+-]\d\d:?\d\d$/.test(dateStr) ? dateStr : `${dateStr}Z`
+  const date = new Date(normalized)
+  if (Number.isNaN(date.getTime())) return dateStr
   const now = new Date()
   const diffMs = date.getTime() - now.getTime()
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))

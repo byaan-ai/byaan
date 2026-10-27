@@ -17,7 +17,15 @@ export interface MonitorCardPart {
   deleted: boolean
 }
 
-export type MessagePart = TextPart | ToolCallPart | MonitorCardPart
+export interface MonitorRunHeaderPart {
+  type: "monitor_run_header"
+  monitor_id: string
+  monitor_name: string
+  when: string
+  trigger_phrase: string
+}
+
+export type MessagePart = TextPart | ToolCallPart | MonitorCardPart | MonitorRunHeaderPart
 
 // Tools that should be hidden from chat (handled by separate UI)
 const HIDDEN_TOOLS = ['emit_plan_status']
@@ -25,16 +33,42 @@ const HIDDEN_TOOLS = ['emit_plan_status']
 export function parseMessage(text: string): MessagePart[] {
   // Extract monitor-card markers first so they survive the tool-call regex.
   const monitorMarkerRegex = /\[\[MONITOR_(CARD|DELETED):([a-f0-9-]+)\]\]/gi
-  const monitorIntervals: Array<{ start: number; end: number; monitor_id: string; deleted: boolean }> = []
+  const monitorIntervals: Array<{
+    start: number
+    end: number
+    kind: "card" | "header"
+    monitor_id: string
+    deleted: boolean
+    monitor_name?: string
+    when?: string
+    trigger_phrase?: string
+  }> = []
   let mm: RegExpExecArray | null
   while ((mm = monitorMarkerRegex.exec(text)) !== null) {
     monitorIntervals.push({
       start: mm.index,
       end: mm.index + mm[0].length,
+      kind: "card",
       monitor_id: mm[2],
       deleted: mm[1].toUpperCase() === "DELETED",
     })
   }
+
+  const headerRegex = /\[\[MONITOR_RUN_HEADER:([a-f0-9-]+)\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]\]/gi
+  let hm: RegExpExecArray | null
+  while ((hm = headerRegex.exec(text)) !== null) {
+    monitorIntervals.push({
+      start: hm.index,
+      end: hm.index + hm[0].length,
+      kind: "header",
+      monitor_id: hm[1],
+      monitor_name: hm[2],
+      when: hm[3],
+      trigger_phrase: hm[4],
+      deleted: false,
+    })
+  }
+  monitorIntervals.sort((a, b) => a.start - b.start)
 
   const regex = /\[\[TOOL_CALL:(.*?):(.*?)\|(.*?)\|(.*?)\]\](?=\[\[TOOL_CALL|[^[\]]|$)/g
   const parts: MessagePart[] = []
@@ -43,8 +77,8 @@ export function parseMessage(text: string): MessagePart[] {
   let hasMatches = false
 
   const pushRangeAsText = (from: number, to: number) => {
-    const slice = text.slice(from, to)
-    // Interleave any monitor markers that live inside this range.
+    // Walk the range and interleave any monitor markers; emits the final tail
+    // text once (never duplicated). Also covers the no-markers case naturally.
     let cursor = from
     for (const iv of monitorIntervals) {
       if (iv.start < from || iv.end > to) continue
@@ -53,20 +87,23 @@ export function parseMessage(text: string): MessagePart[] {
         const trimmed = chunk.trim()
         if (trimmed && trimmed !== "{}") parts.push({ type: "text", content: chunk })
       }
-      parts.push({ type: "monitor_card", monitor_id: iv.monitor_id, deleted: iv.deleted })
+      if (iv.kind === "header") {
+        parts.push({
+          type: "monitor_run_header",
+          monitor_id: iv.monitor_id,
+          monitor_name: iv.monitor_name || "",
+          when: iv.when || "",
+          trigger_phrase: iv.trigger_phrase || "",
+        })
+      } else {
+        parts.push({ type: "monitor_card", monitor_id: iv.monitor_id, deleted: iv.deleted })
+      }
       cursor = iv.end
     }
     if (cursor < to) {
       const tail = text.slice(cursor, to)
-      const trimmedTail = tail.trim()
-      if (trimmedTail && trimmedTail !== "{}") parts.push({ type: "text", content: tail })
-    }
-    if (!monitorIntervals.some((iv) => iv.start >= from && iv.end <= to)) {
-      // Fast path: no markers in this range — restore original behaviour.
-      const trimmed = slice.trim()
-      if (trimmed && trimmed !== "{}" && parts[parts.length - 1]?.type !== "text") {
-        parts.push({ type: "text", content: slice })
-      }
+      const trimmed = tail.trim()
+      if (trimmed && trimmed !== "{}") parts.push({ type: "text", content: tail })
     }
   }
 

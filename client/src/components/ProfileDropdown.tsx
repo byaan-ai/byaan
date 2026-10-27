@@ -12,7 +12,6 @@ import { isTauriApp } from '@/lib/tauri-api'
 import { isAnalyticsOptedOut, setAnalyticsOptedOut } from '@/lib/analyticsPreference'
 import { Switch } from './ui/switch'
 import { SlackIntegrationModal } from './slack/SlackIntegrationModal'
-import { SchedulesPanel } from './schedules/SchedulesPanel'
 import { MCPKeysModal } from './MCPKeysModal'
 
 interface ProfileDropdownProps {
@@ -38,12 +37,11 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
   const navigate = useNavigate()
   const [isOpen, setIsOpen] = useState(false)
   const [slackModalOpen, setSlackModalOpen] = useState(false)
-  const [schedulesPanelOpen, setSchedulesPanelOpen] = useState(false)
   const [mcpKeysModalOpen, setMcpKeysModalOpen] = useState(false)
   const isDesktop = isTauriApp()
   const [analyticsEnabled, setAnalyticsEnabled] = useState(() => !isAnalyticsOptedOut())
   const dropdownRef = useRef<HTMLDivElement>(null)
-  const activeScheduleCount = schedules.filter(s => s.is_enabled).length
+  const activeMonitorCount = schedules.filter(s => (s.status ? s.status === 'active' : s.is_enabled)).length
 
   const handleAnalyticsToggle = (next: boolean) => {
     setAnalyticsEnabled(next)
@@ -124,9 +122,9 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
     setIsOpen(false)
   }
 
-  const handleSchedulesClick = () => {
-    setSchedulesPanelOpen(true)
+  const handleMonitorsClick = () => {
     setIsOpen(false)
+    navigate('/monitors')
   }
 
   const handleMCPKeysClick = () => {
@@ -251,14 +249,14 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
             )}
             {!isViewer && (
               <button
-                onClick={handleSchedulesClick}
+                onClick={handleMonitorsClick}
                 className="w-full px-3 py-2.5 flex items-center gap-3 hover:bg-[#333333] transition-colors text-white"
               >
                 <Clock className="w-4 h-4" />
-                <span className="text-sm flex-1 text-left">Schedules</span>
-                {activeScheduleCount > 0 && (
+                <span className="text-sm flex-1 text-left">Monitors</span>
+                {activeMonitorCount > 0 && (
                   <span className="text-xs bg-brand-orange/20 text-brand-orange px-1.5 py-0.5 rounded-full">
-                    {activeScheduleCount}
+                    {activeMonitorCount}
                   </span>
                 )}
               </button>
@@ -351,11 +349,6 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
           onClose={() => setSlackModalOpen(false)}
         />
       )}
-
-      <SchedulesPanel
-        open={schedulesPanelOpen}
-        onClose={() => setSchedulesPanelOpen(false)}
-      />
 
       <MCPKeysModal
         open={mcpKeysModalOpen}

@@ -66,6 +66,9 @@ class Schedule(Base):
     next_run_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=False), nullable=True, index=True)
     is_running: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    manual_trigger_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    manual_slack_target: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=False), server_default=func.current_timestamp())
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=False), server_default=func.current_timestamp(), onupdate=func.current_timestamp()

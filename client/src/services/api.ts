@@ -5200,6 +5200,16 @@ export class ApiService {
     return json.data
   }
 
+  static async getScheduleRuns(scheduleId: string, limit = 20): Promise<ScheduleRunRead[]> {
+    const response = await apiFetch(`${API_BASE_URL}/schedules/${scheduleId}/runs?limit=${limit}`)
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to fetch schedule runs')
+    }
+    const json = await response.json()
+    return json.data as ScheduleRunRead[]
+  }
+
   static async previewSchedule(notebookId: string): Promise<ScheduleTestResult> {
     const response = await apiFetch(`${API_BASE_URL}/notebooks/${notebookId}/schedules/preview`, {
       method: 'POST',

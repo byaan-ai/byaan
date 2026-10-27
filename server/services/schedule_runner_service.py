@@ -73,9 +73,7 @@ class ScheduleRunnerService:
             if resumed:
                 logger.info(f"Auto-resumed {resumed} monitors whose paused_until has passed")
 
-            from server.tools.monitors import MANUAL_RUN_PENDING
-
-            due = await repo.get_due_schedules(now, include_ids=set(MANUAL_RUN_PENDING))
+            due = await repo.get_due_schedules(now)
             for schedule in due:
                 asyncio.create_task(self._execute_with_controls(str(schedule.id)))
 

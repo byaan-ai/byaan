@@ -55,12 +55,18 @@ class ScheduleRepository(AsyncCRUDRepository[Schedule]):
         return result.scalar_one_or_none()
 
     async def get_due_schedules(self, now: datetime, include_ids: set[str] | None = None) -> list[Schedule]:
-        """Active + due schedules, plus any ids in ``include_ids`` (for manual test-run
-        on drafts). Manual runs still require ``next_run_at <= now`` and no active lease."""
+        """Active + due schedules, plus any row flagged ``manual_trigger_pending``
+        (which covers draft / paused monitors that a user asked to run once).
+
+        ``include_ids`` is kept for backward compatibility but no longer required:
+        manual-run coordination now lives on the schedule row so it survives
+        multi-worker deployments.
+        """
         from sqlalchemy import or_
 
         base_predicate = or_(
             Schedule.status == "active",
+            Schedule.manual_trigger_pending.is_(True),
             Schedule.id.in_(list(include_ids)) if include_ids else False,
         )
         query = (

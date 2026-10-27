@@ -594,6 +594,46 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
           />
         )
       }
+      if (part.type === "monitor_run_header") {
+        // Backend sends "YYYY-MM-DD HH:MM UTC". Convert to local tz for display.
+        const whenLocal = (() => {
+          const raw = part.when || ""
+          const match = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})(?::(\d{2}))?\s*UTC$/)
+          if (!match) return raw
+          const iso = `${match[1]}T${match[2]}:${match[3] || "00"}Z`
+          const d = new Date(iso)
+          if (Number.isNaN(d.getTime())) return raw
+          try {
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+            return d.toLocaleString(undefined, {
+              year: "numeric",
+              month: "short",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              timeZoneName: "short",
+            }) + ` · ${tz}`
+          } catch {
+            return d.toLocaleString()
+          }
+        })()
+        return (
+          <div
+            key={`monitor-header-${index}-${part.monitor_id}`}
+            className="my-6 rounded-lg border border-amber-700/50 bg-amber-900/15 px-4 py-3"
+          >
+            <div className="text-[10px] uppercase tracking-widest text-amber-400 font-semibold mb-1">
+              Monitor run
+            </div>
+            <div className="text-sm text-amber-100 font-semibold">
+              {part.monitor_name}
+            </div>
+            <div className="text-xs text-amber-200/80 mt-0.5">
+              {whenLocal} · {part.trigger_phrase}
+            </div>
+          </div>
+        )
+      }
 
       const textContent = part.content
       const toolLoadingMatch = textContent.match(/\*(.*?)\.\.\.\*$/)
@@ -652,7 +692,7 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
     })
   }
 
-  if (messageParts.some(part => part.type === "tool_call" || part.type === "monitor_card")) {
+  if (messageParts.some(part => part.type === "tool_call" || part.type === "monitor_card" || part.type === "monitor_run_header")) {
     return <div className="space-y-2">{renderMessageParts()}</div>
   }
 

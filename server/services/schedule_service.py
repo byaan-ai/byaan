@@ -48,6 +48,18 @@ def _clean_tool_markers(text: str) -> str:
     return text.strip()
 
 
+def _text_summary_to_blocks(text: str) -> tuple[list[dict], str]:
+    """Build Slack blocks from a monitor summary, extracting markdown tables into
+    native Slack table blocks instead of leaving them as mrkdwn section pipes.
+    """
+    if SlackTableParser.has_markdown_table(text):
+        table_blocks, remaining_text = SlackTableParser.extract_and_convert_tables(text)
+        text_blocks, fallback = markdown_to_slack_blocks(remaining_text)
+        return text_blocks + table_blocks, fallback
+    blocks, fallback = markdown_to_slack_blocks(text)
+    return blocks, fallback
+
+
 class ScheduleService:
     @staticmethod
     def calculate_next_run(cron_expression: str, tz: str) -> datetime:
@@ -194,12 +206,27 @@ in the final text.
             scheduled_run_schedule_id=str(schedule.id),
         )
 
-        from server.tools.monitors import MANUAL_RUN_PENDING, RUN_FINDINGS
+        from server.repositories.schedules import ScheduleRepository
+        from server.tools.monitors import RUN_FINDINGS
 
         schedule_key = str(schedule.id)
         RUN_FINDINGS.pop(schedule_key, None)
-        trigger_label = "manual" if schedule_key in MANUAL_RUN_PENDING else "scheduled"
-        MANUAL_RUN_PENDING.discard(schedule_key)
+        # Manual-trigger coordination persisted on the schedule row — survives
+        # across uvicorn workers (--workers 4 in production).
+        trigger_label = "manual" if schedule.manual_trigger_pending else "scheduled"
+        manual_slack_target = schedule.manual_slack_target if schedule.manual_trigger_pending else None
+        if schedule.manual_trigger_pending:
+            await ScheduleRepository(session).update(
+                str(schedule.id),
+                {"manual_trigger_pending": False, "manual_slack_target": None},
+            )
+
+        # Mark the start of this scheduled run with a visible divider so the
+        # notebook thread doesn't blend the run output into the previous turn.
+        try:
+            await ScheduleService._write_run_header(session, schedule, trigger_label, start_time)
+        except Exception as hdr_err:
+            logger.warning(f"Could not write run header for schedule {schedule.id}: {hdr_err}")
 
         response_parts: list[str] = []
         try:
@@ -234,19 +261,71 @@ in the final text.
         headline = (monitor_findings or {}).get("headline") or ""
         findings = (monitor_findings or {}).get("findings") or []
 
-        # The agent already saved its own assistant message via the stream; no
-        # extra wrapper is written here. ``schedule_runs.message_id`` stays null
-        # (it was legacy-only and no downstream code reads it).
+        # If the agent produced no readable prose (common when the model calls
+        # tools and record_findings then stops), synthesize a short summary from
+        # the findings so the notebook isn't left with just tool-call cards.
+        if not agent_response.strip() and (headline or findings):
+            try:
+                parts = []
+                if headline:
+                    parts.append(f"**{headline}**")
+                for f in findings[:5]:
+                    label = f.get("label") or f.get("name") or ""
+                    value = f.get("value") or f.get("summary") or ""
+                    if label and value:
+                        parts.append(f"- {label}: {value}")
+                    elif value:
+                        parts.append(f"- {value}")
+                synthesized = "\n\n".join(parts).strip()
+                if synthesized:
+                    await ScheduleService._write_run_summary(session, schedule, synthesized)
+                    agent_response = synthesized
+            except Exception as syn_err:
+                logger.warning(f"Could not synthesize summary for schedule {schedule.id}: {syn_err}")
+        elif not agent_response.strip():
+            # No prose, no findings — write a placeholder so the notebook has
+            # something terminal to show instead of only tool cards. For manual
+            # triggers also surface it to the triggering channel so the user
+            # who pressed the button sees acknowledgement.
+            placeholder = "_Monitor run completed. No narrative output was produced._"
+            try:
+                await ScheduleService._write_run_summary(session, schedule, placeholder)
+            except Exception as syn_err:
+                logger.warning(f"Could not write placeholder for schedule {schedule.id}: {syn_err}")
+            if trigger_label == "manual":
+                agent_response = placeholder
 
         deliveries: list[dict[str, Any]] = []
 
-        should_notify = ScheduleService._should_notify(schedule.notify_policy, outcome, agent_response)
+        # Manual test runs always deliver — the user explicitly asked to see
+        # output right now. notify_policy only gates scheduled/catchup runs.
+        if trigger_label == "manual":
+            should_notify = bool(agent_response.strip())
+        else:
+            should_notify = ScheduleService._should_notify(schedule.notify_policy, outcome, agent_response)
 
         slack_error = None
-        if should_notify and schedule.slack_channel_id and agent_response.strip():
+        # Only use the button's channel/thread when the monitor itself has no
+        # configured Slack destination. If the user set "Where to post" on the
+        # monitor, a test run should mimic a scheduled run and respect that
+        # setting rather than being hijacked by whichever thread they clicked
+        # the button in.
+        if manual_slack_target and not schedule.slack_channel_id:
+            slack_target_channel = manual_slack_target.get("channel_id")
+            slack_target_thread = manual_slack_target.get("thread_ts")
+        else:
+            slack_target_channel = None
+            slack_target_thread = None
+        has_slack_destination = bool(slack_target_channel or schedule.slack_channel_id)
+        if should_notify and has_slack_destination and agent_response.strip():
             override_broadcast = outcome == "alert"
             _, slack_error = await ScheduleService._send_to_slack(
-                session, schedule, agent_response, force_broadcast=override_broadcast
+                session,
+                schedule,
+                agent_response,
+                force_broadcast=override_broadcast,
+                override_channel_id=slack_target_channel,
+                override_thread_ts=slack_target_thread,
             )
             deliveries.append({"target": "slack", "ok": slack_error is None, "error": slack_error})
 
@@ -332,7 +411,15 @@ in the final text.
                                 },
                             )
                 if connections:
-                    return connections[0].id, model
+                    # No connection explicitly supports the stored model — fall back
+                    # to the first connection but let LiteLLM pick a default rather
+                    # than forcing an unsupported model that would just fail-loop
+                    # the monitor into auto_paused.
+                    logger.info(
+                        f"No LLM connection supports pinned model {model!r} for schedule "
+                        f"{schedule.id}; falling back to connection default."
+                    )
+                    return connections[0].id, None
 
         if not llm_connection_id:
             conn_result = await session.execute(
@@ -343,6 +430,74 @@ in the final text.
                 return connection.id, None
 
         return llm_connection_id, None
+
+    @staticmethod
+    async def _write_run_header(
+        session: AsyncSession,
+        schedule: Schedule,
+        trigger_label: str,
+        start_time: datetime,
+    ) -> None:
+        """Write a short divider assistant message so each run is visually boxed.
+
+        Avoids run output stacking on top of the previous conversation turn.
+        """
+        from server.repositories.messages import MessageRepository
+
+        when = start_time.strftime("%Y-%m-%d %H:%M UTC")
+        trigger_phrase = {
+            "manual": "triggered manually",
+            "catchup": "ran as a catch-up after Byaan was reopened",
+        }.get(trigger_label, "fired on its scheduled cron")
+        header = f"[[MONITOR_RUN_HEADER:{schedule.id}|{schedule.name}|{when}|{trigger_phrase}]]"
+
+        thread_id = await ScheduleService._ensure_thread_id(session, schedule.notebook_id)
+
+        message_repo = MessageRepository(session)
+        await message_repo.create(
+            {
+                "thread_id": thread_id,
+                "role": "assistant",
+                "content": header,
+                "metadata_": {"source": "monitor_run_header", "trigger": trigger_label},
+            }
+        )
+
+    @staticmethod
+    async def _ensure_thread_id(session: AsyncSession, notebook_id) -> Any:
+        """Return the thread id for ``notebook_id``, creating a thread row if none exists.
+
+        Prevents FK violations when writing assistant messages for monitors whose
+        notebook has never seen a chat turn.
+        """
+        from server.repositories.threads import ThreadRepository
+
+        thread_repo = ThreadRepository(session)
+        thread = await thread_repo.get(notebook_id)
+        if thread:
+            return notebook_id
+        existing = await thread_repo.list(filters={"notebook_id": notebook_id})
+        if existing:
+            return existing[0].id
+        await thread_repo.create({"id": notebook_id, "notebook_id": notebook_id, "thread_title": None})
+        return notebook_id
+
+    @staticmethod
+    async def _write_run_summary(session: AsyncSession, schedule: Schedule, content: str) -> None:
+        """Write a synthesized assistant message when the agent produced no prose."""
+        from server.repositories.messages import MessageRepository
+
+        thread_id = await ScheduleService._ensure_thread_id(session, schedule.notebook_id)
+
+        message_repo = MessageRepository(session)
+        await message_repo.create(
+            {
+                "thread_id": thread_id,
+                "role": "assistant",
+                "content": content,
+                "metadata_": {"source": "monitor_run_summary"},
+            }
+        )
 
     @staticmethod
     async def _format_last_findings(session: AsyncSession, schedule: Schedule) -> str:
@@ -399,11 +554,16 @@ in the final text.
             from datetime import UTC, datetime
 
             from server.repositories.schedules import ScheduleRepository
-            from server.tools.monitors import MANUAL_RUN_PENDING
 
             due_at = datetime.now(UTC).replace(tzinfo=None)
-            await ScheduleRepository(session).update(str(schedule.id), {"next_run_at": due_at})
-            MANUAL_RUN_PENDING.add(str(schedule.id))
+            await ScheduleRepository(session).update(
+                str(schedule.id),
+                {
+                    "next_run_at": due_at,
+                    "manual_trigger_pending": True,
+                    "manual_slack_target": None,
+                },
+            )
             return {
                 "success": True,
                 "summary": "Queued a manual run — results will appear in this notebook within ~60 seconds.",
@@ -635,11 +795,16 @@ Focus on what the data shows, not technical details about queries."""
         schedule: Schedule,
         summary: str,
         force_broadcast: bool = False,
+        override_channel_id: str | None = None,
+        override_thread_ts: str | None = None,
     ) -> tuple[bool, str | None]:
         """Post schedule output to Slack with outbound skill transformation and optional screenshot.
 
         ``force_broadcast=True`` enables ``reply_broadcast`` for alert outcomes
         even when the schedule normally posts quietly in-thread.
+        ``override_channel_id``/``override_thread_ts`` route a single run to a
+        channel/thread other than the monitor's pinned ones (used by manual
+        Slack-button triggers).
         """
         result = await session.execute(
             select(SlackWorkspace)
@@ -665,11 +830,12 @@ Focus on what the data shows, not technical details about queries."""
         decrypted = await CryptoService.decrypt_config(workspace.bot_token_encrypted, session)
         bot_token = decrypted.get("bot_token", decrypted) if isinstance(decrypted, dict) else decrypted
 
-        if not schedule.slack_channel_id:
+        effective_channel_id = override_channel_id or schedule.slack_channel_id
+        if not effective_channel_id:
             return False, "No Slack channel ID configured"
 
         slack_client = SlackService(bot_token)
-        thread_ts = schedule.slack_thread_ts
+        thread_ts = override_thread_ts if override_channel_id else schedule.slack_thread_ts
         reply_broadcast = (schedule.broadcast_to_channel or force_broadcast) if thread_ts else False
         try:
             has_dashboard = False
@@ -679,7 +845,7 @@ Focus on what the data shows, not technical details about queries."""
             if has_dashboard and schedule.notebook_id:
                 await ScheduleService._upload_dashboard_screenshot_to_slack(
                     slack_client=slack_client,
-                    channel_id=schedule.slack_channel_id,
+                    channel_id=effective_channel_id,
                     notebook_id=schedule.notebook_id,
                     text_summary=final_message,
                     session=session,
@@ -687,8 +853,14 @@ Focus on what the data shows, not technical details about queries."""
                     reply_broadcast=reply_broadcast,
                 )
             else:
-                if SlackTableParser.has_markdown_table(final_message):
+                has_table = SlackTableParser.has_markdown_table(final_message)
+                logger.info(
+                    f"[MONITOR SLACK] Schedule {schedule.id}: has_markdown_table={has_table}, "
+                    f"preview={final_message[:300]!r}"
+                )
+                if has_table:
                     table_blocks, remaining_text = SlackTableParser.extract_and_convert_tables(final_message)
+                    logger.info(f"[MONITOR SLACK] Schedule {schedule.id}: extracted {len(table_blocks)} table block(s)")
                     text_blocks, fallback = markdown_to_slack_blocks(remaining_text)
 
                     all_blocks = text_blocks + table_blocks
@@ -706,6 +878,7 @@ Focus on what the data shows, not technical details about queries."""
                     blocks=all_blocks,
                     thread_ts=thread_ts,
                     reply_broadcast=reply_broadcast,
+                    channel_id=effective_channel_id,
                 )
             return True, None
         except Exception as e:
@@ -741,15 +914,17 @@ Focus on what the data shows, not technical details about queries."""
         blocks: list,
         thread_ts: str | None,
         reply_broadcast: bool,
+        channel_id: str | None = None,
     ) -> None:
         """Post to thread; on thread_not_found fall back to channel root and clear the stored thread."""
         from slack_sdk.errors import SlackApiError
 
         from server.repositories.schedules import ScheduleRepository
 
+        target_channel = channel_id or schedule.slack_channel_id
         try:
             await slack_client.post_message(
-                channel=schedule.slack_channel_id,
+                channel=target_channel,
                 text=text,
                 blocks=blocks,
                 thread_ts=thread_ts,
@@ -759,9 +934,10 @@ Focus on what the data shows, not technical details about queries."""
             err = (e.response or {}).get("error", "")
             if thread_ts and err in {"thread_not_found", "not_in_channel", "channel_not_found"}:
                 logger.warning(f"Thread post failed for schedule {schedule.id} ({err}); falling back to channel root")
-                await ScheduleRepository(session).clear_lost_thread(schedule.id)
+                if target_channel == schedule.slack_channel_id:
+                    await ScheduleRepository(session).clear_lost_thread(schedule.id)
                 await slack_client.post_message(
-                    channel=schedule.slack_channel_id,
+                    channel=target_channel,
                     text=text,
                     blocks=blocks,
                 )
@@ -855,7 +1031,7 @@ TRANSFORMED TEXT:"""
                 f"Skipping scheduled report screenshot for notebook {notebook_id}: worker features disabled. "
                 "Posting text summary only."
             )
-            blocks, fallback = markdown_to_slack_blocks(text_summary)
+            blocks, fallback = _text_summary_to_blocks(text_summary)
             await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
@@ -880,12 +1056,7 @@ TRANSFORMED TEXT:"""
                 thread_ts=thread_ts,
             )
 
-            if SlackTableParser.has_markdown_table(text_summary):
-                table_blocks, remaining_text = SlackTableParser.extract_and_convert_tables(text_summary)
-                text_blocks, fallback = markdown_to_slack_blocks(remaining_text)
-                all_blocks = text_blocks + table_blocks
-            else:
-                all_blocks, fallback = markdown_to_slack_blocks(text_summary)
+            all_blocks, fallback = _text_summary_to_blocks(text_summary)
 
             await slack_client.post_message(
                 channel=channel_id,
@@ -900,7 +1071,7 @@ TRANSFORMED TEXT:"""
 
         except ScreenshotServiceError as e:
             logger.warning(f"Failed to generate dashboard screenshot: {e}. Will post text summary only.")
-            blocks, fallback = markdown_to_slack_blocks(text_summary)
+            blocks, fallback = _text_summary_to_blocks(text_summary)
             await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
@@ -911,7 +1082,7 @@ TRANSFORMED TEXT:"""
 
         except Exception as e:
             logger.error(f"Unexpected error uploading dashboard screenshot: {e}. Will post text summary only.")
-            blocks, fallback = markdown_to_slack_blocks(text_summary)
+            blocks, fallback = _text_summary_to_blocks(text_summary)
             await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,

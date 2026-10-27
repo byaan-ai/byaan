@@ -1,8 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Loader2, Trash2 } from 'lucide-react'
 import { Card } from '../ui/card'
 import { Button } from '../ui/button'
-import { useDeleteSchedule, useUpdateSchedule, type ScheduleRead } from '../../hooks/useSchedules'
+import { useDeleteSchedule, useUpdateSchedule, type ScheduleRead, type ScheduleUpdate } from '../../hooks/useSchedules'
+import { ApiService } from '../../services/api'
+import { useSlackConfig } from '../../hooks/useSlackConfig'
+import { useAppConfig } from '../../hooks/useAppConfig'
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 
@@ -71,7 +74,10 @@ function statusTone(status: ScheduleRead['status']) {
 function formatNext(dateStr?: string | null) {
   if (!dateStr) return 'n/a'
   try {
-    return new Date(dateStr).toLocaleString(undefined, {
+    const normalized = /[zZ]|[+-]\d\d:?\d\d$/.test(dateStr) ? dateStr : `${dateStr}Z`
+    const d = new Date(normalized)
+    if (Number.isNaN(d.getTime())) return dateStr
+    return d.toLocaleString(undefined, {
       weekday: 'short',
       month: 'short',
       day: 'numeric',
@@ -99,15 +105,32 @@ export function MonitorCard({ monitor, onChanged }: MonitorCardProps) {
     }
   }, [])
 
+  const { isSelfHosted } = useAppConfig()
+  const { isConnected: isSlackConnected } = useSlackConfig(isSelfHosted)
+  const [slackChannels, setSlackChannels] = useState<Array<{ id: string; name: string }>>([])
+
+  useEffect(() => {
+    if (!isSlackConnected) return
+    let cancelled = false
+    ApiService.getSlackChannels()
+      .then((channels) => {
+        if (!cancelled) setSlackChannels(channels)
+      })
+      .catch((err) => console.error('Failed to load Slack channels:', err))
+    return () => {
+      cancelled = true
+    }
+  }, [isSlackConnected])
+
   const delivery: 'thread' | 'channel' | 'broadcast' = !monitor.slack_thread_ts
     ? 'channel'
     : monitor.broadcast_to_channel
     ? 'broadcast'
     : 'thread'
 
-  const pushPatch = (patch: Partial<ScheduleRead>) => {
+  const pushPatch = (patch: ScheduleUpdate) => {
     update.mutate(
-      { scheduleId: monitor.id, data: patch as any },
+      { scheduleId: monitor.id, data: patch },
       { onSuccess: () => onChanged?.() }
     )
   }
@@ -142,7 +165,7 @@ export function MonitorCard({ monitor, onChanged }: MonitorCardProps) {
 
   const onStatusChange = (value: ScheduleRead['status']) => {
     if (value === monitor.status) return
-    pushPatch({ status: value, is_enabled: value === 'active' } as any)
+    pushPatch({ status: value, is_enabled: value === 'active' })
   }
 
   const onSaveInstruction = () => {
@@ -271,9 +294,48 @@ export function MonitorCard({ monitor, onChanged }: MonitorCardProps) {
           <div className="text-[11px] text-gray-500 mt-1">Ask Byaan in chat to change the timezone.</div>
         </div>
 
+        <div>
+          <label className="block text-[10px] uppercase tracking-wide text-gray-500 mb-1">Delivery</label>
+          <select
+            className="w-full bg-[#1f1f1f] border border-gray-700 rounded px-2 py-1.5 text-sm text-white disabled:opacity-60"
+            value={monitor.slack_channel_id || '_notebook'}
+            onChange={(e) => {
+              const v = e.target.value
+              if (v === '_notebook') {
+                pushPatch({
+                  slack_channel_id: null,
+                  slack_thread_ts: null,
+                  broadcast_to_channel: false,
+                })
+              } else {
+                pushPatch({ slack_channel_id: v })
+              }
+            }}
+            disabled={update.isPending || (!isSlackConnected && !monitor.slack_channel_id)}
+          >
+            <option value="_notebook">Notebook only</option>
+            {slackChannels
+              .filter((c) => c.id?.trim())
+              .map((c) => (
+                <option key={c.id} value={c.id}>
+                  #{c.name}
+                </option>
+              ))}
+            {monitor.slack_channel_id &&
+              !slackChannels.some((c) => c.id === monitor.slack_channel_id) && (
+                <option value={monitor.slack_channel_id}>
+                  current channel
+                </option>
+              )}
+          </select>
+          {!isSlackConnected && !monitor.slack_channel_id && (
+            <div className="text-[11px] text-gray-500 mt-1">Connect Slack to post monitor results to a channel.</div>
+          )}
+        </div>
+
         {monitor.slack_channel_id && (
           <div>
-            <label className="block text-[10px] uppercase tracking-wide text-gray-500 mb-1">Where to post</label>
+            <label className="block text-[10px] uppercase tracking-wide text-gray-500 mb-1">Post as</label>
             <select
               className="w-full bg-[#1f1f1f] border border-gray-700 rounded px-2 py-1.5 text-sm text-white"
               value={delivery}

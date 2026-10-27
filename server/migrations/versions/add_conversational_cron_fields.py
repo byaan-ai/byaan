@@ -17,6 +17,9 @@ schedules:
 - consecutive_failures: counter for auto-pause after 3 failures.
 - running_since: lease timestamp replacing the stuck is_running flag.
 - llm_connection_id, model: pinned model so runs stay consistent.
+- manual_trigger_pending, manual_slack_target: cross-worker signaling for
+  "Run a test now" clicks. Replaces in-process globals that broke under
+  multi-worker uvicorn deployments.
 
 schedule_runs:
 - outcome: ok | alert | no_change.
@@ -58,6 +61,10 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column("running_since", sa.TIMESTAMP(timezone=False), nullable=True))
         batch_op.add_column(sa.Column("llm_connection_id", GUID(), nullable=True))
         batch_op.add_column(sa.Column("model", sa.String(length=255), nullable=True))
+        batch_op.add_column(
+            sa.Column("manual_trigger_pending", sa.Boolean(), nullable=False, server_default=sa.false())
+        )
+        batch_op.add_column(sa.Column("manual_slack_target", sa.JSON(), nullable=True))
         batch_op.create_foreign_key(
             "fk_schedules_slack_workspace",
             "slack_workspaces",
@@ -114,6 +121,8 @@ def downgrade() -> None:
     with op.batch_alter_table("schedules") as batch_op:
         batch_op.drop_constraint("fk_schedules_llm_connection", type_="foreignkey")
         batch_op.drop_constraint("fk_schedules_slack_workspace", type_="foreignkey")
+        batch_op.drop_column("manual_slack_target")
+        batch_op.drop_column("manual_trigger_pending")
         batch_op.drop_column("model")
         batch_op.drop_column("llm_connection_id")
         batch_op.drop_column("running_since")

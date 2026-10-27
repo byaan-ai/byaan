@@ -567,7 +567,6 @@ class SlackBlockBuilder:
             return blocks
         for m in monitors:
             status = m.get("status") or ("active" if m.get("is_enabled") else "paused")
-            toggle_label = "Pause" if status == "active" else "Resume"
             value_payload = m["id"]
             body = (
                 f"*{m.get('name', 'Untitled')}*\n"
@@ -575,13 +574,19 @@ class SlackBlockBuilder:
                 f"Next: `{m.get('next_run_at') or 'n/a'}`"
             )
             blocks.append(b.section(body))
-            blocks.append(
-                b.actions(
-                    [
-                        b.button(toggle_label, action_id="monitor_toggle", value=value_payload),
-                        b.button("Delete", action_id="monitor_delete", value=value_payload, style="danger"),
-                    ]
-                )
-            )
+
+            if status == "draft":
+                buttons = [
+                    b.button("Turn on", action_id="monitor_turn_on", value=value_payload, style="primary"),
+                    b.button("Run a test now", action_id="monitor_run_now", value=value_payload),
+                    b.button("Delete", action_id="monitor_delete", value=value_payload, style="danger"),
+                ]
+            else:
+                toggle_label = "Pause" if status == "active" else "Resume"
+                buttons = [
+                    b.button(toggle_label, action_id="monitor_toggle", value=value_payload),
+                    b.button("Delete", action_id="monitor_delete", value=value_payload, style="danger"),
+                ]
+            blocks.append(b.actions(buttons))
             blocks.append(b.divider())
         return blocks

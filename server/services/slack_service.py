@@ -122,6 +122,7 @@ class SlackService:
             response = await self.client.users_info(user=user_id)
             user = response.get("user", {}) or {}
             tz = user.get("tz") or "UTC"
+            logger.info(f"[SLACK TZ] user_id={user_id} resolved_tz={tz} tz_label={user.get('tz_label')}")
         except SlackApiError as e:
             logger.warning(f"Slack API error fetching user tz: {e.response.get('error', 'unknown')}")
             tz = "UTC"
