@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections.abc import AsyncGenerator
 from time import perf_counter
@@ -2147,7 +2148,8 @@ async def stream_handoff_agent_response(
                             args_json = json.dumps(arguments) if arguments else "{}"
 
                         clean_description = skill_description_override or tool_friendly_description
-                        tool_marker = f"[[TOOL_CALL:{tool_call_id}:{tool_name}|{clean_description}|{args_json}]]"
+                        args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
+                        tool_marker = f"[[TOOL_CALL:{tool_call_id}:{tool_name}|{clean_description}|b64:{args_b64}]]"
 
                         assistant_response += tool_marker
                         yield f"data: {json.dumps({'type': 'content', 'text': tool_marker, 'tool_friendly_description': tool_friendly_description}, ensure_ascii=False)}\n\n"

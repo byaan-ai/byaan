@@ -6,6 +6,7 @@ Converts OpenAI Agents SDK tools to Claude MCP format.
 """
 
 import asyncio
+import base64
 import json
 import os
 import signal
@@ -578,7 +579,8 @@ async def stream_claude_with_mcp_tools(
                                 args_json = json.dumps(tool_input) if tool_input else "{}"
 
                             final_desc = skill_description_override or friendly_desc
-                            tool_marker = f"[[TOOL_CALL:{tool_id}:{display_name}|{final_desc}|{args_json}]]"
+                            args_b64 = base64.b64encode(args_json.encode("utf-8")).decode("ascii")
+                            tool_marker = f"[[TOOL_CALL:{tool_id}:{display_name}|{final_desc}|b64:{args_b64}]]"
 
                             full_response += tool_marker
 
