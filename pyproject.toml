@@ -21,7 +21,8 @@ dependencies = [
   "aiosqlite>=0.20.0",
   "cryptography>=48.0.1",
   "python-dateutil>=2.8.2",
-  "litellm>=1.84.0",
+  # 1.100.4 fixes gpt-5.4+/gpt-6 tools+reasoning routing; cap <1.101 is deliberate.
+  "litellm>=1.100.4,<1.101.0",
   "Mako>=1.3.12",
   "authlib>=1.6.12",
   "urllib3>=2.7.0",
@@ -114,7 +115,9 @@ skip-magic-trailing-comma = false
 line-ending = "auto"
 
 [tool.uv]
-exclude-newer = "2026-08-05T00:00:00Z"
+# Supply-chain cooldown: ignore releases published in the last 7 days when (re)locking.
+exclude-newer = "7 days"
+# Per-package overrides; delete each once the global window has passed its cutoff.
 exclude-newer-package = { claude-agent-sdk = "2026-09-30T00:00:00Z" }
 constraint-dependencies = [
   "aiohttp>=3.14.2",
