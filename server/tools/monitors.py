@@ -45,6 +45,9 @@ from server.utils.deployment import is_feature_enabled
 
 logger = get_logger(__name__)
 
+# Fallback tz when Slack users:read scope and browser context are both unavailable.
+DEFAULT_FALLBACK_TIMEZONE = "America/New_York"
+
 _MIN_INTERVAL_SECONDS = 3600  # hourly cap per spec
 _MAX_ACTIVE_PER_WORKSPACE = 20
 
@@ -190,7 +193,7 @@ async def create_monitor(
             timezone = slack_ctx.user_timezone
         else:
             browser_tz = ctx.context.get("browser_timezone") if ctx and ctx.context else None
-            timezone = browser_tz or timezone or "UTC"
+            timezone = browser_tz or DEFAULT_FALLBACK_TIMEZONE
 
     ok, msg = _validate_cron(cron_expression)
     if not ok:
@@ -559,7 +562,7 @@ async def list_monitors(
             if key:
                 LIST_CARD_PENDING[key] = str(tenant_id)
 
-        viewer_tz = "UTC"
+        viewer_tz = DEFAULT_FALLBACK_TIMEZONE
         if slack_ctx and slack_ctx.user_timezone and slack_ctx.user_timezone != "UTC":
             viewer_tz = slack_ctx.user_timezone
         elif ctx and ctx.context:

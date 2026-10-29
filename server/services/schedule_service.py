@@ -851,6 +851,7 @@ Focus on what the data shows, not technical details about queries."""
                     session=session,
                     thread_ts=thread_ts,
                     reply_broadcast=reply_broadcast,
+                    schedule=schedule,
                 )
             else:
                 has_table = SlackTableParser.has_markdown_table(final_message)
@@ -1010,6 +1011,7 @@ TRANSFORMED TEXT:"""
         session: AsyncSession,
         thread_ts: str | None = None,
         reply_broadcast: bool = False,
+        schedule: Schedule | None = None,
     ) -> None:
         """
         Generate and upload a dashboard screenshot to Slack for scheduled reports.
@@ -1032,6 +1034,8 @@ TRANSFORMED TEXT:"""
                 "Posting text summary only."
             )
             blocks, fallback = _text_summary_to_blocks(text_summary)
+            if schedule:
+                blocks = blocks + ScheduleService._monitor_run_action_blocks(schedule)
             await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
@@ -1057,6 +1061,8 @@ TRANSFORMED TEXT:"""
             )
 
             all_blocks, fallback = _text_summary_to_blocks(text_summary)
+            if schedule:
+                all_blocks = all_blocks + ScheduleService._monitor_run_action_blocks(schedule)
 
             await slack_client.post_message(
                 channel=channel_id,
@@ -1072,6 +1078,8 @@ TRANSFORMED TEXT:"""
         except ScreenshotServiceError as e:
             logger.warning(f"Failed to generate dashboard screenshot: {e}. Will post text summary only.")
             blocks, fallback = _text_summary_to_blocks(text_summary)
+            if schedule:
+                blocks = blocks + ScheduleService._monitor_run_action_blocks(schedule)
             await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
@@ -1083,6 +1091,8 @@ TRANSFORMED TEXT:"""
         except Exception as e:
             logger.error(f"Unexpected error uploading dashboard screenshot: {e}. Will post text summary only.")
             blocks, fallback = _text_summary_to_blocks(text_summary)
+            if schedule:
+                blocks = blocks + ScheduleService._monitor_run_action_blocks(schedule)
             await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
