@@ -482,6 +482,7 @@ async def slack_interactivity(
                 monitor_id=monitor_id,
                 response_url=response_url,
                 from_list_card=from_list_card,
+                message_blocks=msg_blocks,
             )
             return JSONResponse(status_code=200, content={"ok": True})
 
@@ -515,6 +516,27 @@ async def _post_response_url(
             await client.post(response_url, json=payload)
     except Exception as e:
         logger.warning(f"Failed to notify response_url: {e}")
+
+
+def _swap_monitor_toggle_label(
+    blocks: list,
+    monitor_id: str,
+    new_label: str,
+) -> list:
+    """Return a copy of ``blocks`` with the Pause/Resume button for
+    ``monitor_id`` relabeled. Leaves the rest of the message intact."""
+    import copy
+
+    updated = copy.deepcopy(blocks)
+    for block in updated:
+        if block.get("type") != "actions":
+            continue
+        for element in block.get("elements", []):
+            if element.get("action_id") == "monitor_toggle" and element.get("value") == monitor_id:
+                element.setdefault("text", {})["text"] = new_label
+                element["text"]["type"] = "plain_text"
+                element["text"]["emoji"] = True
+    return updated
 
 
 async def _refresh_monitor_list_card(
@@ -690,6 +712,7 @@ async def _process_monitor_row_action(
     monitor_id: str,
     response_url: str | None,
     from_list_card: bool = False,
+    message_blocks: list | None = None,
 ) -> None:
     """Toggle (pause/resume) or delete an existing monitor.
 
@@ -730,6 +753,7 @@ async def _process_monitor_row_action(
             if schedule.status == "active":
                 await sched_repo.set_status(schedule.id, "paused")
                 label = "Paused"
+                new_toggle_label = "Resume"
             else:
                 next_run_at = _next_run_safe(schedule)
                 await sched_repo.update(
@@ -742,8 +766,20 @@ async def _process_monitor_row_action(
                     },
                 )
                 label = "Resumed"
+                new_toggle_label = "Pause"
+
             if from_list_card:
                 await _refresh_monitor_list_card(workspace.tenant_id, response_url, session)
+            elif message_blocks:
+                # Swap the Pause/Resume button label on the clicked result message
+                # so the card reflects the new state without losing the body.
+                updated_blocks = _swap_monitor_toggle_label(message_blocks, monitor_id, new_toggle_label)
+                await _post_response_url(
+                    response_url,
+                    text=f"{label} monitor *{schedule.name}*.",
+                    replace_original=True,
+                    blocks=updated_blocks,
+                )
             else:
                 await _post_response_url(response_url, f"{label} monitor *{schedule.name}*.", replace_original=False)
     except Exception as e:
