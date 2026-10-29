@@ -426,7 +426,388 @@ async def slack_interactivity(
 
             return JSONResponse(status_code=200, content={"ok": True})
 
+        elif action_id in ("monitor_turn_on", "monitor_cancel"):
+            monitor_id = action.get("value") or ""
+            response_url = payload.get("response_url")
+            slack_user_id = payload.get("user", {}).get("id")
+            message = payload.get("message") or {}
+            # Detect whether the click came from the multi-monitor list card
+            # (header block titled "Monitors") versus a standalone draft card.
+            msg_blocks = message.get("blocks") or []
+            first_block = msg_blocks[0] if msg_blocks else {}
+            first_text = (first_block.get("text") or {}).get("text", "")
+            from_list_card = first_block.get("type") == "header" and first_text == "Monitors"
+            background_tasks.add_task(
+                _process_monitor_draft_action,
+                action_id=action_id,
+                team_id=team_id,
+                monitor_id=monitor_id,
+                response_url=response_url,
+                slack_user_id=slack_user_id,
+                message_channel=payload.get("channel", {}).get("id"),
+                message_ts=message.get("ts"),
+                from_list_card=from_list_card,
+            )
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        elif action_id == "monitor_run_now":
+            monitor_id = action.get("value") or ""
+            response_url = payload.get("response_url")
+            msg_container = payload.get("container", {}) or {}
+            msg_block = payload.get("message", {}) or {}
+            btn_channel_id = payload.get("channel", {}).get("id") or msg_container.get("channel_id")
+            btn_thread_ts = msg_block.get("thread_ts") or msg_container.get("thread_ts") or msg_block.get("ts")
+            background_tasks.add_task(
+                _process_monitor_run_now_button,
+                team_id=team_id,
+                monitor_id=monitor_id,
+                response_url=response_url,
+                btn_channel_id=btn_channel_id,
+                btn_thread_ts=btn_thread_ts,
+            )
+            return JSONResponse(status_code=200, content={"ok": True})
+
+        elif action_id in ("monitor_toggle", "monitor_delete"):
+            monitor_id = action.get("value") or ""
+            response_url = payload.get("response_url")
+            message = payload.get("message") or {}
+            msg_blocks = message.get("blocks") or []
+            first_block = msg_blocks[0] if msg_blocks else {}
+            first_text = (first_block.get("text") or {}).get("text", "")
+            from_list_card = first_block.get("type") == "header" and first_text == "Monitors"
+            background_tasks.add_task(
+                _process_monitor_row_action,
+                action_id=action_id,
+                team_id=team_id,
+                monitor_id=monitor_id,
+                response_url=response_url,
+                from_list_card=from_list_card,
+            )
+            return JSONResponse(status_code=200, content={"ok": True})
+
     return JSONResponse(status_code=200, content={"ok": True})
+
+
+async def _post_response_url(
+    response_url: str | None,
+    text: str,
+    replace_original: bool = False,
+    blocks: list[dict] | None = None,
+    response_type: str = "ephemeral",
+) -> None:
+    """Best-effort update via Slack response_url. Supports replacing the clicked
+    message with new blocks (e.g. a refreshed Monitors list) when the caller
+    wants interactive buttons to reflect the new state."""
+    if not response_url:
+        return
+    import httpx
+
+    payload: dict = {
+        "response_type": response_type,
+        "replace_original": replace_original,
+        "text": text,
+    }
+    if blocks is not None:
+        payload["blocks"] = blocks
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(response_url, json=payload)
+    except Exception as e:
+        logger.warning(f"Failed to notify response_url: {e}")
+
+
+async def _refresh_monitor_list_card(
+    tenant_id,
+    response_url: str | None,
+    session,
+) -> None:
+    """Rebuild and replace the original Monitors list card so buttons reflect
+    the just-changed status. Called after Pause/Resume/Turn-on/Delete clicks."""
+    if not response_url:
+        return
+    from server.repositories.schedules import ScheduleRepository
+    from server.utils.slack_block_elements import SlackBlockBuilder
+
+    try:
+        all_schedules = await ScheduleRepository(session).get_all_for_tenant(tenant_id)
+        monitors_payload = [
+            {
+                "id": str(s.id),
+                "name": s.name,
+                "status": s.status,
+                "is_enabled": s.is_enabled,
+                "cron_expression": s.cron_expression,
+                "timezone": s.timezone,
+                "next_run_at": s.next_run_at.isoformat() if s.next_run_at else None,
+            }
+            for s in all_schedules
+        ]
+        blocks = SlackBlockBuilder.monitor_list_card(monitors_payload)
+        await _post_response_url(
+            response_url,
+            text="Monitors",
+            replace_original=True,
+            blocks=blocks,
+            response_type="in_channel",
+        )
+    except Exception as e:
+        logger.warning(f"Failed to refresh monitor list card: {e}")
+
+
+async def _refresh_monitor_card(
+    workspace,
+    schedule,
+    channel: str | None,
+    message_ts: str | None,
+    session,
+) -> None:
+    """Replace or post the interactive monitor card for the given schedule.
+
+    When ``message_ts`` is provided we edit the existing card via ``chat.update``;
+    otherwise we post a fresh card into the thread so the user sees current state.
+    """
+    from server.services.schedule_service import ScheduleService as _ScheduleService
+    from server.utils.slack_block_elements import SlackBlockBuilder
+
+    fires = []
+    if schedule.status == "draft":
+        try:
+            fires = [
+                dt.isoformat()
+                for dt in _ScheduleService.preview_fire_times(schedule.cron_expression, schedule.timezone, count=3)
+            ]
+        except Exception:
+            fires = []
+
+    blocks = SlackBlockBuilder.monitor_card(
+        monitor_id=str(schedule.id),
+        name=schedule.name,
+        status=schedule.status,
+        cron_expression=schedule.cron_expression,
+        timezone=schedule.timezone,
+        slack_thread_ts=schedule.slack_thread_ts,
+        broadcast_to_channel=schedule.broadcast_to_channel,
+        next_run_at=schedule.next_run_at.isoformat() if schedule.next_run_at else None,
+        next_fire_times=fires,
+        instruction_preview=(schedule.instruction or "")[:600],
+        notify_policy=schedule.notify_policy or "always",
+    )
+    text = f"Monitor: {schedule.name}"
+
+    bot_token = await SlackAgentService._get_bot_token(workspace, session)
+    slack_client = SlackService(bot_token)
+    target_channel = channel or schedule.slack_channel_id or ""
+    if message_ts and target_channel:
+        try:
+            await slack_client.client.chat_update(
+                channel=target_channel,
+                ts=message_ts,
+                text=text,
+                blocks=blocks,
+            )
+            return
+        except Exception as e:
+            logger.warning(f"chat.update failed for monitor {schedule.id}: {e}; posting fresh card")
+
+    await slack_client.post_message(
+        channel=target_channel,
+        text=text,
+        thread_ts=schedule.slack_thread_ts,
+        blocks=blocks,
+    )
+
+
+async def _process_monitor_draft_action(
+    action_id: str,
+    team_id: str,
+    monitor_id: str,
+    response_url: str | None,
+    slack_user_id: str | None,
+    message_channel: str | None,
+    message_ts: str | None,
+    from_list_card: bool = False,
+) -> None:
+    """Turn on / cancel a draft monitor from a Slack button click."""
+    from server.repositories.schedules import ScheduleRepository
+    from server.services.schedule_service import ScheduleService as _ScheduleService
+
+    try:
+        async with AsyncSessionFactory() as session:
+            repo = SlackWorkspaceRepository(session)
+            workspace = await repo.get_by_team_id(team_id)
+            if not workspace:
+                return
+
+            sched_repo = ScheduleRepository(session)
+            schedule = await sched_repo.get_with_notebook(monitor_id)
+            if not schedule or schedule.tenant_id != workspace.tenant_id:
+                await _post_response_url(response_url, "This monitor is no longer available.", replace_original=True)
+                return
+            if schedule.slack_workspace_id and schedule.slack_workspace_id != workspace.id:
+                await _post_response_url(
+                    response_url, "This monitor belongs to a different workspace.", replace_original=True
+                )
+                return
+
+            if action_id == "monitor_cancel":
+                if schedule.status == "draft":
+                    await sched_repo.delete(str(schedule.id))
+                if from_list_card:
+                    await _refresh_monitor_list_card(workspace.tenant_id, response_url, session)
+                else:
+                    await _post_response_url(response_url, "Cancelled.", replace_original=True)
+                return
+
+            if schedule.status != "draft":
+                await _post_response_url(response_url, "This monitor is already active.", replace_original=True)
+                return
+
+            next_run_at = _ScheduleService.calculate_next_run(schedule.cron_expression, schedule.timezone)
+            await sched_repo.update(
+                str(schedule.id),
+                {
+                    "status": "active",
+                    "is_enabled": True,
+                    "paused_until": None,
+                    "consecutive_failures": 0,
+                    "next_run_at": next_run_at,
+                },
+            )
+            refreshed = await sched_repo.get_with_notebook(str(schedule.id))
+            if from_list_card:
+                await _refresh_monitor_list_card(workspace.tenant_id, response_url, session)
+            else:
+                await _refresh_monitor_card(workspace, refreshed, message_channel, message_ts, session)
+            logger.info(f"[SLACK] monitor turned on id={refreshed.id} by user={slack_user_id}")
+    except Exception as e:
+        logger.error(f"Error in monitor draft action: {e}", exc_info=True)
+
+
+async def _process_monitor_row_action(
+    action_id: str,
+    team_id: str,
+    monitor_id: str,
+    response_url: str | None,
+    from_list_card: bool = False,
+) -> None:
+    """Toggle (pause/resume) or delete an existing monitor.
+
+    ``from_list_card=True`` → click came from the Monitors list; refresh the
+    list in-place. Otherwise the buttons were under a monitor-run result
+    message, and replacing it with a list would wipe the output the user is
+    looking at — in that case we post a short ephemeral confirmation instead.
+    """
+    from server.repositories.schedules import ScheduleRepository
+
+    try:
+        async with AsyncSessionFactory() as session:
+            repo = SlackWorkspaceRepository(session)
+            workspace = await repo.get_by_team_id(team_id)
+            if not workspace:
+                return
+            sched_repo = ScheduleRepository(session)
+            schedule = await sched_repo.get_with_notebook(monitor_id)
+            if not schedule or schedule.tenant_id != workspace.tenant_id:
+                await _post_response_url(response_url, "Monitor not found.", replace_original=False)
+                return
+            if schedule.slack_workspace_id and schedule.slack_workspace_id != workspace.id:
+                await _post_response_url(
+                    response_url, "Monitor belongs to a different workspace.", replace_original=False
+                )
+                return
+
+            if action_id == "monitor_delete":
+                await sched_repo.delete(str(schedule.id))
+                if from_list_card:
+                    await _refresh_monitor_list_card(workspace.tenant_id, response_url, session)
+                else:
+                    await _post_response_url(
+                        response_url, f"Deleted monitor *{schedule.name}*.", replace_original=False
+                    )
+                return
+
+            if schedule.status == "active":
+                await sched_repo.set_status(schedule.id, "paused")
+                label = "Paused"
+            else:
+                next_run_at = _next_run_safe(schedule)
+                await sched_repo.update(
+                    str(schedule.id),
+                    {
+                        "status": "active",
+                        "is_enabled": True,
+                        "paused_until": None,
+                        "next_run_at": next_run_at,
+                    },
+                )
+                label = "Resumed"
+            if from_list_card:
+                await _refresh_monitor_list_card(workspace.tenant_id, response_url, session)
+            else:
+                await _post_response_url(response_url, f"{label} monitor *{schedule.name}*.", replace_original=False)
+    except Exception as e:
+        logger.error(f"Error in monitor row action: {e}", exc_info=True)
+
+
+async def _process_monitor_run_now_button(
+    team_id: str,
+    monitor_id: str,
+    response_url: str | None,
+    btn_channel_id: str | None = None,
+    btn_thread_ts: str | None = None,
+) -> None:
+    """Queue a one-off manual run from the ``Run a test now`` button."""
+    from datetime import UTC, datetime
+
+    from server.repositories.schedules import ScheduleRepository
+
+    try:
+        async with AsyncSessionFactory() as session:
+            workspace = await SlackWorkspaceRepository(session).get_by_team_id(team_id)
+            if not workspace:
+                return
+            sched_repo = ScheduleRepository(session)
+            schedule = await sched_repo.get_with_notebook(monitor_id)
+            if not schedule or schedule.tenant_id != workspace.tenant_id:
+                await _post_response_url(response_url, "Monitor not found.", replace_original=False)
+                return
+            if schedule.slack_workspace_id and schedule.slack_workspace_id != workspace.id:
+                await _post_response_url(
+                    response_url, "Monitor belongs to a different workspace.", replace_original=False
+                )
+                return
+
+            due_at = datetime.now(UTC).replace(tzinfo=None)
+            patch: dict = {"next_run_at": due_at, "manual_trigger_pending": True}
+            if btn_channel_id:
+                patch["manual_slack_target"] = {
+                    "channel_id": btn_channel_id,
+                    "thread_ts": btn_thread_ts,
+                    "team_id": team_id,
+                }
+            else:
+                patch["manual_slack_target"] = None
+            await sched_repo.update(str(schedule.id), patch)
+            await _post_response_url(
+                response_url,
+                f"Queued a test run of *{schedule.name}* — results will post in a few seconds.",
+                replace_original=False,
+            )
+    except Exception as e:
+        logger.error(f"Error queueing manual run from button: {e}", exc_info=True)
+
+
+def _next_run_safe(schedule):
+    """Return next_run_at; fall back to now when the stored cron is invalid."""
+    from datetime import datetime as _dt
+
+    from server.services.schedule_service import ScheduleService
+
+    try:
+        return ScheduleService.calculate_next_run(schedule.cron_expression, schedule.timezone)
+    except Exception:
+        return _dt.utcnow()
 
 
 async def _process_generate_dashboard_button(

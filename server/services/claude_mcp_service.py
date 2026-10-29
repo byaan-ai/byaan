@@ -380,6 +380,7 @@ async def stream_claude_with_mcp_tools(
         pending_query_saved_events: dict[str, str] = {}
         pending_memory_updated_events: set[str] = set()
         pending_screenshot_events: dict[str, str] = {}
+        pending_monitor_events: dict[str, str] = {}
 
         async for message in client.receive_messages():
             message_count += 1
@@ -532,6 +533,15 @@ async def stream_claude_with_mcp_tools(
 
                             if display_name == "generate_dashboard_screenshot":
                                 pending_screenshot_events[tool_id] = json.dumps(tool_input) if tool_input else "{}"
+
+                            if display_name in {
+                                "create_monitor",
+                                "set_monitor_status",
+                                "update_monitor",
+                                "delete_monitor",
+                                "run_monitor_now",
+                            }:
+                                pending_monitor_events[tool_id] = display_name
 
                             skill_description_override = None
                             if display_name in [
@@ -698,6 +708,33 @@ async def stream_claude_with_mcp_tools(
                                         }
                                 except Exception as e:
                                     logger.warning(f"[CLAUDE MCP] Failed to emit dashboard_screenshot event: {e}")
+
+                            if tool_id in pending_monitor_events:
+                                monitor_tool_name = pending_monitor_events.pop(tool_id)
+                                try:
+                                    if isinstance(content, str):
+                                        monitor_result = json.loads(content)
+                                    elif isinstance(content, list) and len(content) > 0:
+                                        first_item = content[0]
+                                        monitor_text = getattr(first_item, "text", None)
+                                        monitor_result = json.loads(monitor_text) if monitor_text else {}
+                                    else:
+                                        monitor_result = {}
+                                    monitor_payload = (monitor_result or {}).get("monitor") or {}
+                                    monitor_id = (
+                                        monitor_payload.get("id")
+                                        or (monitor_result or {}).get("schedule_id")
+                                        or (monitor_result or {}).get("id")
+                                    )
+                                    if monitor_id:
+                                        yield {
+                                            "type": "monitor_updated",
+                                            "tool_name": monitor_tool_name,
+                                            "monitor_id": str(monitor_id),
+                                            "deleted": bool((monitor_result or {}).get("deleted")),
+                                        }
+                                except Exception as e:
+                                    logger.warning(f"[CLAUDE MCP] Failed to emit monitor_updated event: {e}")
 
                             if tool_id in pending_plan_tool_ids:
                                 pending_plan_tool_ids.discard(tool_id)

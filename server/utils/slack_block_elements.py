@@ -453,3 +453,140 @@ class SlackBlockBuilder:
         if block_id:
             block["block_id"] = block_id
         return block
+
+    @staticmethod
+    def monitor_card(
+        monitor_id: str,
+        name: str,
+        status: str,
+        cron_expression: str,
+        timezone: str,
+        slack_thread_ts: str | None,
+        broadcast_to_channel: bool,
+        next_run_at: str | None,
+        next_fire_times: list[str] | None,
+        instruction_preview: str,
+        notify_policy: str = "always",
+    ) -> list[dict[str, Any]]:
+        """Static monitor card. Shows fields read-only + Turn-on/Cancel on draft or
+        Delete on active. All field edits go through chat: user asks the agent to
+        change time / days / delivery / instruction and the agent calls
+        ``update_monitor``. The card is re-posted whenever the row changes.
+        """
+        from server.utils.cron_builder import humanize_days, time_and_days_from_cron
+
+        b = SlackBlockBuilder
+
+        header_text = {
+            "draft": "Monitor draft",
+            "active": "Monitor",
+            "paused": "Monitor (paused)",
+            "auto_paused": "Monitor (auto-paused)",
+        }.get(status, "Monitor")
+
+        status_label = {
+            "draft": ":pencil2: Draft",
+            "active": ":large_green_circle: Active",
+            "paused": ":large_yellow_circle: Paused",
+            "auto_paused": ":large_orange_circle: Auto-paused",
+        }.get(status, status.title())
+
+        parsed = time_and_days_from_cron(cron_expression)
+        if parsed is not None:
+            hour, minute, days = parsed
+            schedule_label = f"{humanize_days(days)} at {hour:02d}:{minute:02d}"
+        else:
+            schedule_label = f"`{cron_expression}`"
+
+        if slack_thread_ts and broadcast_to_channel:
+            delivery_label = "Reply in thread + broadcast to channel"
+        elif slack_thread_ts:
+            delivery_label = "Reply in this thread"
+        else:
+            delivery_label = "Post to channel"
+
+        notify_label = {
+            "always": "Every run",
+            "on_alert": "Only when something's wrong",
+            "on_change": "Only when results change",
+        }.get(notify_policy, notify_policy)
+
+        body_lines = [
+            f"*Status:* {status_label}",
+            f"*When:* {schedule_label} · {timezone}",
+            f"*Where to post:* {delivery_label}",
+            f"*Notify:* {notify_label}",
+        ]
+        if next_run_at and status != "draft":
+            body_lines.append(f"*Next run:* `{next_run_at}`")
+        if status == "draft" and next_fire_times:
+            fires = ", ".join(next_fire_times[:3])
+            body_lines.append(f"*Would fire next:* {fires}")
+
+        blocks: list[dict[str, Any]] = [
+            b.header(f"{header_text}: {name[:120]}"),
+            b.section("\n".join(body_lines)),
+        ]
+
+        if instruction_preview:
+            blocks.append(b.section(f"*What it checks*\n{instruction_preview}"))
+
+        if status == "draft":
+            blocks.append(
+                b.actions(
+                    [
+                        b.button("Turn on", action_id="monitor_turn_on", value=monitor_id, style="primary"),
+                        b.button("Run a test now", action_id="monitor_run_now", value=monitor_id),
+                        b.button("Cancel", action_id="monitor_cancel", value=monitor_id, style="danger"),
+                    ]
+                )
+            )
+            blocks.append(b.context(["Nothing runs until you turn it on."]))
+        else:
+            blocks.append(
+                b.actions(
+                    [
+                        b.button("Run a test now", action_id="monitor_run_now", value=monitor_id),
+                        b.button("Delete", action_id="monitor_delete", value=monitor_id, style="danger"),
+                    ]
+                )
+            )
+            blocks.append(b.context(["Ask Byaan to change the time, days, timezone, delivery, or instruction."]))
+
+        return blocks
+
+    @staticmethod
+    def monitor_list_card(
+        monitors: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Compact list of monitors with inline Open / Pause-Resume / Delete controls."""
+        b = SlackBlockBuilder
+        blocks: list[dict[str, Any]] = [b.header("Monitors")]
+        if not monitors:
+            blocks.append(b.section("_No monitors yet._"))
+            return blocks
+        for m in monitors:
+            status = m.get("status") or ("active" if m.get("is_enabled") else "paused")
+            value_payload = m["id"]
+            body = (
+                f"*{m.get('name', 'Untitled')}*\n"
+                f"`{m.get('cron_expression', '?')}` · {m.get('timezone', 'UTC')} · {status}\n"
+                f"Next: `{m.get('next_run_at') or 'n/a'}`"
+            )
+            blocks.append(b.section(body))
+
+            if status == "draft":
+                buttons = [
+                    b.button("Turn on", action_id="monitor_turn_on", value=value_payload, style="primary"),
+                    b.button("Run a test now", action_id="monitor_run_now", value=value_payload),
+                    b.button("Delete", action_id="monitor_delete", value=value_payload, style="danger"),
+                ]
+            else:
+                toggle_label = "Pause" if status == "active" else "Resume"
+                buttons = [
+                    b.button(toggle_label, action_id="monitor_toggle", value=value_payload),
+                    b.button("Delete", action_id="monitor_delete", value=value_payload, style="danger"),
+                ]
+            blocks.append(b.actions(buttons))
+            blocks.append(b.divider())
+        return blocks

@@ -4,6 +4,15 @@ import { Card } from '../ui/card'
 import { X, Clock, Loader2 } from 'lucide-react'
 import { useSchedules, useDeleteSchedule, useUpdateSchedule, type ScheduleRead } from '../../hooks/useSchedules'
 import { ScheduleCard } from './ScheduleCard'
+import { MonitorCard } from '../monitors/MonitorCard'
+
+function isMonitor(schedule: ScheduleRead): boolean {
+  if (schedule.origin && schedule.origin !== 'ui') return true
+  if (schedule.status && schedule.status !== 'active') return true
+  if (schedule.notify_policy && schedule.notify_policy !== 'always') return true
+  if (schedule.slack_thread_ts) return true
+  return false
+}
 
 interface SchedulesPanelProps {
   open: boolean
@@ -89,17 +98,21 @@ export function SchedulesPanel({ open, onClose }: SchedulesPanelProps) {
                 </p>
               </Card>
             ) : (
-              schedules.map((schedule) => (
-                <ScheduleCard
-                  key={schedule.id}
-                  schedule={schedule}
-                  onEdit={handleEdit}
-                  onDelete={handleDelete}
-                  onToggle={handleToggle}
-                  onNavigateToNotebook={handleNavigateToNotebook}
-                  showNotebookName
-                />
-              ))
+              schedules.map((schedule) =>
+                isMonitor(schedule) ? (
+                  <MonitorCard key={schedule.id} monitor={schedule} />
+                ) : (
+                  <ScheduleCard
+                    key={schedule.id}
+                    schedule={schedule}
+                    onEdit={handleEdit}
+                    onDelete={handleDelete}
+                    onToggle={handleToggle}
+                    onNavigateToNotebook={handleNavigateToNotebook}
+                    showNotebookName
+                  />
+                )
+              )
             )}
           </div>
         </div>

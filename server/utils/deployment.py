@@ -39,6 +39,7 @@ def get_feature_flags() -> dict[str, bool]:
         "google_oauth_enabled": self_hosted and google_configured,
         "team_sharing_enabled": self_hosted,
         "enterprise_licensed": self_hosted,
+        "conversational_schedules_enabled": True,
     }
 
 

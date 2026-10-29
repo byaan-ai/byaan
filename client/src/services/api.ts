@@ -30,6 +30,7 @@ export interface AgentRequest {
   create_notebook?: boolean
   is_preview?: boolean
   plan_mode?: boolean
+  browser_timezone?: string
 }
 
 export interface HtmlEditDetectedEvent {
@@ -303,8 +304,21 @@ export interface ScheduleUpdate {
   is_enabled?: boolean
   webhook_url?: string | null
   slack_channel_id?: string | null
+  slack_thread_ts?: string | null
+  broadcast_to_channel?: boolean
+  status?: MonitorStatus
+  notify_policy?: NotifyPolicy
+  paused_until?: string | null
+  llm_connection_id?: string | null
+  model?: string | null
   instruction?: string | null
 }
+
+export type MonitorStatus = 'draft' | 'active' | 'paused' | 'auto_paused'
+export type NotifyPolicy = 'always' | 'on_alert' | 'on_change'
+export type MonitorOrigin = 'ui' | 'notebook_chat' | 'slack'
+export type RunOutcome = 'ok' | 'alert' | 'no_change'
+export type RunTrigger = 'scheduled' | 'manual' | 'catchup'
 
 export interface ScheduleRead {
   id: string
@@ -316,12 +330,40 @@ export interface ScheduleRead {
   is_enabled: boolean
   webhook_url?: string | null
   slack_channel_id?: string | null
+  slack_thread_ts?: string | null
+  broadcast_to_channel?: boolean
+  origin?: MonitorOrigin
+  status?: MonitorStatus
+  notify_policy?: NotifyPolicy
+  paused_until?: string | null
+  consecutive_failures?: number
+  llm_connection_id?: string | null
+  model?: string | null
   instruction?: string | null
   next_run_at?: string | null
   is_running: boolean
   created_by?: string | null
   created_at: string
   updated_at: string
+}
+
+export interface ScheduleRunRead {
+  id: string
+  schedule_id: string
+  status: string
+  started_at: string
+  completed_at?: string | null
+  duration_ms?: number | null
+  queries_total?: number | null
+  queries_succeeded?: number | null
+  queries_failed?: number | null
+  error_message?: string | null
+  message_id?: string | null
+  outcome?: RunOutcome | null
+  headline?: string | null
+  findings?: Array<Record<string, unknown>> | null
+  deliveries?: Array<Record<string, unknown>> | null
+  trigger?: RunTrigger
 }
 
 export interface ScheduleTestResult {
@@ -2461,6 +2503,7 @@ export class ApiService {
       onPlanStepUpdate?: (event: PlanStepUpdateEvent) => void
       onPlanStatus?: (event: PlanStatusEvent) => void
       onSessionCorrupted?: (event: SessionCorruptedEvent) => void
+      onMonitorUpdated?: (event: { monitor_id: string; tool_name: string; deleted?: boolean }) => void
       signal?: AbortSignal
     }
   ): Promise<void> {
@@ -2484,6 +2527,7 @@ export class ApiService {
       onPlanStepUpdate,
       onPlanStatus,
       onSessionCorrupted,
+      onMonitorUpdated,
       signal
     } = options
 
@@ -2567,6 +2611,12 @@ export class ApiService {
                 onPlanStatus(event as PlanStatusEvent)
               } else if (event.type === 'session_corrupted' && onSessionCorrupted) {
                 onSessionCorrupted(event as SessionCorruptedEvent)
+              } else if (event.type === 'monitor_updated' && onMonitorUpdated) {
+                onMonitorUpdated({
+                  monitor_id: event.monitor_id,
+                  tool_name: event.tool_name,
+                  deleted: event.deleted,
+                })
               } else if (event.type === 'error' && onError) {
                 onError(event.text)
               } else if (event.type === 'done' && onDone) {
@@ -5148,6 +5198,16 @@ export class ApiService {
     }
     const json = await response.json()
     return json.data
+  }
+
+  static async getScheduleRuns(scheduleId: string, limit = 20): Promise<ScheduleRunRead[]> {
+    const response = await apiFetch(`${API_BASE_URL}/schedules/${scheduleId}/runs?limit=${limit}`)
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to fetch schedule runs')
+    }
+    const json = await response.json()
+    return json.data as ScheduleRunRead[]
   }
 
   static async previewSchedule(notebookId: string): Promise<ScheduleTestResult> {

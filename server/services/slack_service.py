@@ -1,6 +1,7 @@
 """Slack API service for posting messages."""
 
 import re
+import time
 
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
@@ -8,6 +9,34 @@ from slack_sdk.web.async_client import AsyncWebClient
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
+
+_USER_TZ_CACHE: dict[str, tuple[str, float]] = {}
+_USER_TZ_TTL_SECONDS = 3600
+
+# Short-lived cache so time-critical interactivity handlers (e.g. opening a
+# modal within Slack's 3-second trigger_id window) can skip the decrypt
+# round-trip. Keyed by workspace id, value = bot_token.
+_BOT_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+_BOT_TOKEN_TTL_SECONDS = 300
+
+
+def cached_bot_token(workspace_id: str) -> str | None:
+    import time as _time
+
+    entry = _BOT_TOKEN_CACHE.get(workspace_id)
+    if not entry:
+        return None
+    token, expires_at = entry
+    if expires_at < _time.monotonic():
+        _BOT_TOKEN_CACHE.pop(workspace_id, None)
+        return None
+    return token
+
+
+def cache_bot_token(workspace_id: str, token: str) -> None:
+    import time as _time
+
+    _BOT_TOKEN_CACHE[workspace_id] = (token, _time.monotonic() + _BOT_TOKEN_TTL_SECONDS)
 
 
 _MENTION_RE = re.compile(r"<@[A-Z0-9]+(?:\|[^>]+)?>")
@@ -33,15 +62,14 @@ class SlackService:
         text: str,
         thread_ts: str | None = None,
         blocks: list | None = None,
+        reply_broadcast: bool = False,
     ) -> dict:
         """Post a message to a Slack channel."""
         try:
-            response = await self.client.chat_postMessage(
-                channel=channel,
-                text=text,
-                thread_ts=thread_ts,
-                blocks=blocks,
-            )
+            kwargs = {"channel": channel, "text": text, "thread_ts": thread_ts, "blocks": blocks}
+            if thread_ts and reply_broadcast:
+                kwargs["reply_broadcast"] = True
+            response = await self.client.chat_postMessage(**kwargs)
             logger.info(f"Slack API response: {response.data}")
             if "warning" in response.data:
                 logger.warning(f"Slack API warning: {response.data['warning']}")
@@ -79,6 +107,27 @@ class SlackService:
         except SlackApiError as e:
             logger.warning(f"Slack API error fetching user info: {e.response.get('error', 'unknown')}")
             return None
+
+    async def get_user_timezone(self, user_id: str, workspace_id: str | None = None) -> str:
+        """Return the user's IANA timezone from Slack, cached per workspace+user for 1h.
+
+        Falls back to UTC on any API failure or missing field.
+        """
+        cache_key = f"{workspace_id or 'default'}:{user_id}"
+        now = time.monotonic()
+        cached = _USER_TZ_CACHE.get(cache_key)
+        if cached and cached[1] > now:
+            return cached[0]
+        try:
+            response = await self.client.users_info(user=user_id)
+            user = response.get("user", {}) or {}
+            tz = user.get("tz") or "UTC"
+            logger.info(f"[SLACK TZ] user_id={user_id} resolved_tz={tz} tz_label={user.get('tz_label')}")
+        except SlackApiError as e:
+            logger.warning(f"Slack API error fetching user tz: {e.response.get('error', 'unknown')}")
+            tz = "UTC"
+        _USER_TZ_CACHE[cache_key] = (tz, now + _USER_TZ_TTL_SECONDS)
+        return tz
 
     async def list_channels(self, limit: int = 200) -> list[dict]:
         """List public channels the bot has access to."""

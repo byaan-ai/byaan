@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from server.auth.tenant_context import set_tenant_id
 from server.db.session import AsyncSessionFactory
@@ -14,6 +14,8 @@ logger = get_logger(__name__)
 MAX_CONCURRENT = 3
 EXECUTION_TIMEOUT = 300
 CHECK_INTERVAL = 60
+LEASE_STALE_SECONDS = EXECUTION_TIMEOUT * 2
+DRAFT_TTL_DAYS = 7
 
 
 class ScheduleRunnerService:
@@ -56,8 +58,22 @@ class ScheduleRunnerService:
         async with AsyncSessionFactory() as session:
             repo = ScheduleRepository(session)
             now = datetime.now(UTC).replace(tzinfo=None)
-            due = await repo.get_due_schedules(now)
 
+            stale_cutoff = now - timedelta(seconds=LEASE_STALE_SECONDS)
+            reclaimed = await repo.reclaim_stale_leases(stale_cutoff)
+            if reclaimed:
+                logger.warning(f"Reclaimed {reclaimed} stale schedule leases older than {LEASE_STALE_SECONDS}s")
+
+            draft_cutoff = now - timedelta(days=DRAFT_TTL_DAYS)
+            removed = await repo.cleanup_old_drafts(draft_cutoff)
+            if removed:
+                logger.info(f"Cleaned up {removed} stale draft monitors older than {DRAFT_TTL_DAYS} days")
+
+            resumed = await repo.auto_resume_expired_pauses(now)
+            if resumed:
+                logger.info(f"Auto-resumed {resumed} monitors whose paused_until has passed")
+
+            due = await repo.get_due_schedules(now)
             for schedule in due:
                 asyncio.create_task(self._execute_with_controls(str(schedule.id)))
 
@@ -65,8 +81,11 @@ class ScheduleRunnerService:
         async with self._semaphore:
             async with AsyncSessionFactory() as session:
                 repo = ScheduleRepository(session)
+                now = datetime.now(UTC).replace(tzinfo=None)
 
-                if not await repo.claim_schedule(schedule_id):
+                from uuid import UUID as _UUID
+
+                if not await repo.claim_with_lease(_UUID(schedule_id), now):
                     logger.debug(f"Schedule {schedule_id} already running, skipping")
                     return
 
@@ -86,13 +105,18 @@ class ScheduleRunnerService:
                 except TimeoutError:
                     logger.error(f"Schedule {schedule.name} timed out after {EXECUTION_TIMEOUT}s")
                     await self._record_failure(session, schedule, "timeout", f"Timed out after {EXECUTION_TIMEOUT}s")
+                    await ScheduleService._handle_run_failure(session, schedule, "timeout")
 
                 except Exception as e:
                     logger.error(f"Schedule {schedule.name} failed: {e}", exc_info=True)
                     await self._record_failure(session, schedule, "failed", str(e))
+                    await ScheduleService._handle_run_failure(session, schedule, str(e))
 
                 finally:
-                    next_run = ScheduleService.calculate_next_run(schedule.cron_expression, schedule.timezone)
+                    try:
+                        next_run = ScheduleService.calculate_next_run(schedule.cron_expression, schedule.timezone)
+                    except Exception:
+                        next_run = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
                     await repo.release_schedule(str(schedule.id), next_run)
 
     async def _record_failure(self, session, schedule, status: str, error: str):

@@ -46,7 +46,9 @@ function formatTime(hour: string, minute: string): string {
 
 function formatNextRun(dateStr: string | null | undefined): string {
   if (!dateStr) return 'Not scheduled'
-  const date = new Date(dateStr)
+  const normalized = /[zZ]|[+-]\d\d:?\d\d$/.test(dateStr) ? dateStr : `${dateStr}Z`
+  const date = new Date(normalized)
+  if (Number.isNaN(date.getTime())) return dateStr
   const now = new Date()
   const diffMs = date.getTime() - now.getTime()
   const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
@@ -94,8 +96,34 @@ export function ScheduleCard({
     <Card className="p-4 bg-[#2a2a2a] border-gray-800">
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <h4 className="text-white font-medium truncate">{schedule.name}</h4>
+            {schedule.status && schedule.status !== 'active' && (
+              <span
+                className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                  schedule.status === 'draft'
+                    ? 'bg-gray-800 text-gray-300'
+                    : schedule.status === 'paused'
+                    ? 'bg-amber-900/40 text-amber-300'
+                    : 'bg-red-900/40 text-red-300'
+                }`}
+                title={`Monitor status: ${schedule.status}`}
+              >
+                {schedule.status.replace('_', ' ')}
+              </span>
+            )}
+            {schedule.origin && schedule.origin !== 'ui' && (
+              <span
+                className={`text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded ${
+                  schedule.origin === 'slack'
+                    ? 'bg-purple-900/40 text-purple-300'
+                    : 'bg-blue-900/40 text-blue-300'
+                }`}
+                title={`Created from ${schedule.origin}`}
+              >
+                {schedule.origin === 'notebook_chat' ? 'chat' : schedule.origin}
+              </span>
+            )}
             {schedule.is_running && (
               <span className="text-xs text-brand-orange flex items-center gap-1">
                 <Loader2 className="w-3 h-3 animate-spin" />

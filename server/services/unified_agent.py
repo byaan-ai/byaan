@@ -626,12 +626,17 @@ def _build_agent_tools(
     plan_mode: bool = False,
     has_github_repos: bool = False,
     has_local_repos: bool = False,
+    scheduled_run: bool = False,
 ) -> list:
     """
     Build the unified tool list for the agent.
 
     This is the SINGLE SOURCE OF TRUTH for tool configuration.
     Used by both OpenAI Agents SDK and Claude SDK paths.
+
+    When ``scheduled_run=True`` the tool set is read-only: query/schema access
+    plus learnings plus ``record_monitor_findings``. No dashboard edits, no
+    skill or monitor management, no filter mutations.
     """
     tools = []
 
@@ -659,6 +664,32 @@ def _build_agent_tools(
         [
             save_query,
             get_database_schema,
+        ]
+    )
+
+    tools.extend(
+        [
+            search_datasets,
+            get_dataset_schema_by_id,
+            saved_query_schema,
+        ]
+    )
+
+    from server.tools.learnings import get_learning_tools
+
+    tools.extend(get_learning_tools())
+
+    from server.utils.deployment import is_feature_enabled
+
+    if scheduled_run:
+        if is_feature_enabled("conversational_schedules_enabled"):
+            from server.tools.monitors import get_monitor_tools
+
+            tools.extend(get_monitor_tools(scheduled_run=True))
+        return tools
+
+    tools.extend(
+        [
             get_chart_styling,
         ]
     )
@@ -669,7 +700,6 @@ def _build_agent_tools(
             get_existing_html,
             apply_html_patch,
             dashboard_search_replace,
-            saved_query_schema,
             generate_dashboard_screenshot,
         ]
     )
@@ -692,17 +722,11 @@ def _build_agent_tools(
 
     tools.extend(
         [
-            search_datasets,
-            get_dataset_schema_by_id,
             save_skill_query,
         ]
     )
 
     tools.extend(get_instruction_tools())
-
-    from server.tools.learnings import get_learning_tools
-
-    tools.extend(get_learning_tools())
 
     from server.tools.skill_executor import get_skill_management_tools
 
@@ -721,6 +745,11 @@ def _build_agent_tools(
 
         tools.extend(get_local_repo_tools())
 
+    if is_feature_enabled("conversational_schedules_enabled"):
+        from server.tools.monitors import get_monitor_tools
+
+        tools.extend(get_monitor_tools(scheduled_run=False))
+
     return tools
 
 
@@ -736,6 +765,7 @@ async def create_unified_agent(
     instructions: str | None = None,
     memory: str | None = None,
     learnings: list[dict] | None = None,
+    scheduled_run: bool = False,
 ) -> tuple[Agent, dict[str, dict], list[str], dict[str, dict]]:
     """
     Create a unified agent with all tools - no handoffs.
@@ -778,6 +808,7 @@ async def create_unified_agent(
             plan_mode=plan_mode,
             has_github_repos=bool(github_repos),
             has_local_repos=bool(local_repos),
+            scheduled_run=scheduled_run,
         )
 
         if database_schemas:
@@ -1218,8 +1249,19 @@ async def stream_handoff_agent_response(
         session_notebook_id = str(request.notebook_id) if request.notebook_id else "default"
         agent_session = await create_agent_session(session_notebook_id)
 
-        # Save user message immediately (skip in preview mode)
-        if request.notebook_id and not request.is_preview:
+        # Save user message immediately (skip in preview mode and in scheduled
+        # monitor runs — the system-level prompt is not from a real user).
+        if request.notebook_id and not request.is_preview and getattr(request, "scheduled_run", False):
+            # Scheduled runs skip the user-message write but we still need a
+            # thread to exist so the assistant save at the end has somewhere
+            # to land. ``ensure_thread_for_notebook`` is a lightweight helper
+            # that creates the thread lazily and returns its id.
+            try:
+                thread_id = await MessageService.ensure_thread_for_notebook(session, request.notebook_id)
+            except Exception as thread_err:
+                logger.warning(f"Scheduled run could not ensure thread for notebook: {thread_err}")
+                thread_id = str(request.notebook_id)
+        elif request.notebook_id and not request.is_preview:
             try:
                 thread_id = await MessageService.save_agent_user_message(
                     session,
@@ -1335,6 +1377,7 @@ async def stream_handoff_agent_response(
                     plan_mode=request.plan_mode,
                     has_github_repos=bool(github_repos),
                     has_local_repos=bool(local_repos),
+                    scheduled_run=bool(getattr(request, "scheduled_run", False)),
                 )
 
                 instructions, enabled_skills, enabled_skill_names, custom_skills = await _load_skills_for_agent(
@@ -1360,6 +1403,9 @@ async def stream_handoff_agent_response(
                     "redaction_rules": redaction_rules,
                     "plan_mode": request.plan_mode,
                     "plan_started": request.plan_mode and bool(request.notebook_id) and not is_first_message,
+                    "scheduled_run": bool(getattr(request, "scheduled_run", False)),
+                    "schedule_id": getattr(request, "scheduled_run_schedule_id", None),
+                    "browser_timezone": getattr(request, "browser_timezone", None),
                 }
                 _add_skill_credentials_to_context(context, enabled_skills, custom_skills)
 
@@ -1624,6 +1670,7 @@ async def stream_handoff_agent_response(
                 plan_mode=request.plan_mode,
                 memory=notebook_memory,
                 learnings=relevant_learnings,
+                scheduled_run=bool(getattr(request, "scheduled_run", False)),
             )
         except Exception as agent_error:
             error_msg = f"Failed to create unified agent: {agent_error}"
@@ -1660,6 +1707,9 @@ async def stream_handoff_agent_response(
             "redaction_rules": redaction_rules,
             "plan_mode": request.plan_mode,
             "plan_started": request.plan_mode and bool(request.notebook_id) and not is_first_message,
+            "scheduled_run": bool(getattr(request, "scheduled_run", False)),
+            "schedule_id": getattr(request, "scheduled_run_schedule_id", None),
+            "browser_timezone": getattr(request, "browser_timezone", None),
         }
         _add_skill_credentials_to_context(context, enabled_skills, custom_skills)
 
@@ -2231,6 +2281,49 @@ async def stream_handoff_agent_response(
                             # Reset flag to allow subsequent edits to trigger the event
                             html_edit_completed = False
                             html_edit_session_id = None
+
+                        # Emit monitor_updated event so the chat UI can inject an
+                        # inline MonitorCard after a monitor-management tool runs.
+                        if last_tool_name in {
+                            "create_monitor",
+                            "set_monitor_status",
+                            "update_monitor",
+                            "delete_monitor",
+                            "run_monitor_now",
+                        }:
+                            try:
+                                raw_item = getattr(item, "raw_item", None)
+                                if isinstance(raw_item, dict):
+                                    tool_result_raw = raw_item.get("output")
+                                else:
+                                    tool_result_raw = getattr(raw_item, "output", None)
+                                if tool_result_raw:
+                                    result_data = json.loads(tool_result_raw)
+                                    monitor_payload = (result_data or {}).get("monitor") or {}
+                                    monitor_id = (
+                                        monitor_payload.get("id")
+                                        or (result_data or {}).get("schedule_id")
+                                        or (result_data or {}).get("id")
+                                    )
+                                    if monitor_id:
+                                        monitor_event = json.dumps(
+                                            {
+                                                "type": "monitor_updated",
+                                                "tool_name": last_tool_name,
+                                                "monitor_id": str(monitor_id),
+                                                "deleted": bool((result_data or {}).get("deleted")),
+                                            },
+                                            ensure_ascii=False,
+                                        )
+                                        yield f"data: {monitor_event}\n\n"
+                                        marker = (
+                                            f"\n\n[[MONITOR_DELETED:{monitor_id}]]\n\n"
+                                            if (result_data or {}).get("deleted")
+                                            else f"\n\n[[MONITOR_CARD:{monitor_id}]]\n\n"
+                                        )
+                                        assistant_response += marker
+                            except Exception as e:
+                                logger.warning(f"Failed to emit monitor_updated event: {e}")
 
                         # Check if the last tool was generate_dashboard_screenshot and emit dashboard_screenshot event
                         if last_tool_name == "generate_dashboard_screenshot" and last_tool_args:

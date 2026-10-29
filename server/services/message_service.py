@@ -112,6 +112,30 @@ class MessageService:
             return []
 
     @staticmethod
+    async def ensure_thread_for_notebook(session: AsyncSession, notebook_id: str) -> str:
+        """Guarantee a thread exists for the notebook and return its id.
+
+        Used by scheduled monitor runs that need somewhere for the assistant
+        response to land, but shouldn't persist a user-message row (the system
+        prompt isn't from a real user).
+        """
+        thread_repo = ThreadRepository(session)
+        thread = await thread_repo.get(notebook_id)
+        if thread:
+            return str(notebook_id)
+        existing = await thread_repo.list(filters={"notebook_id": notebook_id})
+        if existing:
+            return str(existing[0].id)
+        await thread_repo.create(
+            {
+                "id": notebook_id,
+                "notebook_id": notebook_id,
+                "thread_title": None,
+            }
+        )
+        return str(notebook_id)
+
+    @staticmethod
     async def save_agent_user_message(
         session: AsyncSession,
         notebook_id: str,

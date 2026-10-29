@@ -97,6 +97,10 @@ function SetupStepsAccordion({ webhookUrl }: { webhookUrl: string }) {
               <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">groups:history</code>
               <span className="text-gray-500 text-xs">— To follow up in private channel threads without re-mention</span>
             </div>
+            <div className="flex items-center gap-2">
+              <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">users:read</code>
+              <span className="text-gray-500 text-xs">— To read the triggering user's timezone so monitors schedule in their local time</span>
+            </div>
           </li>
         </ul>
       ),

@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import { useParams, useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
-import { Eye, Check, Trash2, ArrowLeft, ArrowUp, Sparkles, AtSign, Table, Pencil, X, ImagePlus, Clock, Calendar } from 'lucide-react'
+import { Eye, Check, Trash2, ArrowLeft, ArrowUp, Sparkles, AtSign, Table, Pencil, X, ImagePlus, Clock, Calendar, Loader2 } from 'lucide-react'
 import { toast } from 'react-toastify'
 import type { Message } from "../types/chat"
 import { useStore } from "../stores/useStore"
@@ -37,7 +37,7 @@ import { applyFindReplacePreview, applyHtmlPatchPreview, applySearchReplacePrevi
 import { DatasourceFooterSelector } from '../components/DatasourceFooterSelector'
 import { ScheduleBanner } from '../components/schedules/ScheduleBanner'
 import { ScheduleConfigPanel } from '../components/schedules/ScheduleConfigPanel'
-import { useSchedules, useCreateSchedule, useUpdateSchedule, useDeleteSchedule } from '../hooks/useSchedules'
+import { useSchedules, useCreateSchedule, useUpdateSchedule, useDeleteSchedule, useRunningMonitorIds, useRunningStage, clearMonitorRunning } from '../hooks/useSchedules'
 import type { ScheduleCreate, ScheduleUpdate } from '../services/api'
 import {
   buildPreflightQueriesWithFilters,
@@ -845,6 +845,11 @@ export default function ChatPreview() {
   const updateScheduleMutation = useUpdateSchedule()
   const deleteScheduleMutation = useDeleteSchedule()
   const existingSchedule = notebookSchedules.length > 0 ? notebookSchedules[0] : null
+
+  const runningMonitorIds = useRunningMonitorIds()
+  const runningMonitorsInNotebook = notebookSchedules.filter(s => runningMonitorIds.includes(s.id))
+  const singleRunningMonitorId = runningMonitorsInNotebook.length === 1 ? runningMonitorsInNotebook[0].id : null
+  const runningStage = useRunningStage(singleRunningMonitorId)
 
   // Schedule mode state
   const [isScheduleMode, setIsScheduleMode] = useState(false)
@@ -1814,6 +1819,21 @@ Please modify this element to: `
     }
   }
 
+  // Reload notebook messages when a monitor "Run a test now" fires, both while
+  // it's streaming (so the pre-stream header card appears right away) and when
+  // it completes (so the final response appears without a manual refresh).
+  useEffect(() => {
+    const handler = () => {
+      loadNotebookMessages()
+    }
+    window.addEventListener('byaan:monitor-test-complete', handler)
+    window.addEventListener('byaan:monitor-messages-refresh', handler)
+    return () => {
+      window.removeEventListener('byaan:monitor-test-complete', handler)
+      window.removeEventListener('byaan:monitor-messages-refresh', handler)
+    }
+  }, [notebookId])
+
   // Load notebook connection
   const loadNotebookConnection = useCallback(async (explicitNotebookId?: string) => {
     const targetNotebookId = explicitNotebookId || notebookId || createdNotebookIdRef.current
@@ -2486,6 +2506,13 @@ Please modify this element to: `
         create_notebook: shouldCreateNotebook,
         datasource_ids: shouldCreateNotebook ? pendingDatasourceIdsRef.current : undefined,
         plan_mode: planMode,
+        browser_timezone: (() => {
+          try {
+            return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined
+          } catch {
+            return undefined
+          }
+        })(),
       }
 
       await ApiService.streamAgent(request, {
@@ -2615,6 +2642,15 @@ Please modify this element to: `
             await handleDatasourceSelect(event.datasource_id, targetNotebookId)
           }
           setAgentSelectedDatasourceId(event.datasource_id)
+        },
+        onMonitorUpdated: (event) => {
+          if (event.deleted) {
+            accumulatedContent += `\n\n[[MONITOR_DELETED:${event.monitor_id}]]\n\n`
+          } else {
+            accumulatedContent += `\n\n[[MONITOR_CARD:${event.monitor_id}]]\n\n`
+          }
+          updateMessage(assistantMessageId, accumulatedContent)
+          queryClient.invalidateQueries({ queryKey: ['schedules'] })
         },
         onQuerySaved: handleQuerySaved,
         onInstructionUpdated: () => {
@@ -3952,6 +3988,33 @@ Can you help me fix this query?`
                     handleCodeInject={handleCodeInject}
                     currentActivity={currentActivity}
                   />
+
+                  {runningMonitorsInNotebook.length > 0 && (
+                    <div className="max-w-3xl min-[1440px]:max-w-4xl min-[2560px]:max-w-[1400px] mx-auto w-full px-4 sm:px-6 mb-2">
+                      <div className="rounded-2xl border border-amber-700/50 bg-amber-900/20 px-4 py-2 text-sm text-amber-100 flex items-center gap-2">
+                        <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                        <div className="flex-1">
+                          Running a test for{' '}
+                          {runningMonitorsInNotebook.map((m, i) => (
+                            <span key={m.id}>
+                              <b>{m.name}</b>
+                              {i < runningMonitorsInNotebook.length - 1 ? ', ' : ''}
+                            </span>
+                          ))}
+                          {runningStage ? <> — {runningStage}</> : null}
+                          . Result will post in this notebook shortly.
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => runningMonitorsInNotebook.forEach(m => clearMonitorRunning(m.id))}
+                          className="text-amber-200/70 hover:text-amber-100 text-xs px-2 py-1"
+                          title="Dismiss"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="max-w-3xl min-[1440px]:max-w-4xl min-[2560px]:max-w-[1400px] mx-auto w-full">
                     <ChatInput
