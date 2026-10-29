@@ -170,32 +170,30 @@ export function ModelSelector({
     return connections.find((c) => c.type === provider);
   };
 
-  const handleSelectionChange = (selectedModel: string) => {
-    if (!selectedModel) {
+  const handleSelectionChange = (value: string) => {
+    if (!value) {
       onSelectionChange(undefined);
       return;
     }
 
-    // Find the provider that has this model
-    const provider = Object.entries(availableModels).find(
-      ([_, models]) => models.includes(selectedModel)
-    )?.[0] as LLMProvider | undefined;
+    const sepIdx = value.indexOf("::");
+    if (sepIdx === -1) return;
+    const provider = value.slice(0, sepIdx) as LLMProvider;
+    const model = value.slice(sepIdx + 2);
 
-    if (provider) {
-      const connection = getConnectionForProvider(provider);
-      if (connection) {
-        onSelectionChange({
-          provider,
-          model: selectedModel,
-          connectionId: connection.id,
-        });
-      }
+    const connection = getConnectionForProvider(provider);
+    if (connection) {
+      onSelectionChange({
+        provider,
+        model,
+        connectionId: connection.id,
+      });
     }
   };
 
   const getCurrentValue = () => {
-    if (!selectedModel) return "";
-    return selectedModel;
+    if (!selectedProvider || !selectedModel) return "";
+    return `${selectedProvider}::${selectedModel}`;
   };
 
   // Get existing provider types to prevent duplicates
@@ -295,7 +293,7 @@ export function ModelSelector({
                   className="relative flex items-center"
                 >
                   <SelectItem
-                    value={model}
+                    value={`${provider}::${model}`}
                     className="text-white hover:bg-[#333333] cursor-pointer flex-1 pr-10 [&>span:first-child]:hidden"
                   >
                     <div className="flex items-center gap-2 min-w-0 w-full">
