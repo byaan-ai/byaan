@@ -121,7 +121,7 @@ class ScheduleService:
 
         slack_error = None
         if schedule.slack_channel_id:
-            _, slack_error = await ScheduleService._send_to_slack(session, schedule, summary)
+            _, slack_error, _, _ = await ScheduleService._send_to_slack(session, schedule, summary)
             if slack_error:
                 logger.warning(f"Slack delivery failed for schedule {schedule.id}: {slack_error}")
 
@@ -317,9 +317,16 @@ in the final text.
             slack_target_channel = None
             slack_target_thread = None
         has_slack_destination = bool(slack_target_channel or schedule.slack_channel_id)
+        posted_slack_channel: str | None = None
+        posted_slack_ts: str | None = None
         if should_notify and has_slack_destination and agent_response.strip():
             override_broadcast = outcome == "alert"
-            _, slack_error = await ScheduleService._send_to_slack(
+            (
+                _,
+                slack_error,
+                posted_slack_channel,
+                posted_slack_ts,
+            ) = await ScheduleService._send_to_slack(
                 session,
                 schedule,
                 agent_response,
@@ -359,6 +366,8 @@ in the final text.
                 "findings": findings,
                 "deliveries": deliveries,
                 "trigger": trigger_label,
+                "slack_channel_id": posted_slack_channel,
+                "slack_message_ts": posted_slack_ts,
             }
         )
 
@@ -797,7 +806,7 @@ Focus on what the data shows, not technical details about queries."""
         force_broadcast: bool = False,
         override_channel_id: str | None = None,
         override_thread_ts: str | None = None,
-    ) -> tuple[bool, str | None]:
+    ) -> tuple[bool, str | None, str | None, str | None]:
         """Post schedule output to Slack with outbound skill transformation and optional screenshot.
 
         ``force_broadcast=True`` enables ``reply_broadcast`` for alert outcomes
@@ -805,6 +814,10 @@ Focus on what the data shows, not technical details about queries."""
         ``override_channel_id``/``override_thread_ts`` route a single run to a
         channel/thread other than the monitor's pinned ones (used by manual
         Slack-button triggers).
+
+        Returns ``(ok, error, posted_channel_id, posted_message_ts)`` so callers
+        can store where the monitor's output landed; posted_* are None when the
+        post was skipped or failed early.
         """
         result = await session.execute(
             select(SlackWorkspace)
@@ -814,10 +827,10 @@ Focus on what the data shows, not technical details about queries."""
         workspace = result.scalar_one_or_none()
 
         if not workspace:
-            return False, "No active Slack workspace for tenant"
+            return False, "No active Slack workspace for tenant", None, None
 
         if not workspace.default_llm_connection_id:
-            return False, "No LLM connection configured for Slack"
+            return False, "No LLM connection configured for Slack", None, None
 
         outbound_skills = await CustomSkillRepository(session).get_by_type(schedule.tenant_id, "slack_outbound")
 
@@ -832,7 +845,7 @@ Focus on what the data shows, not technical details about queries."""
 
         effective_channel_id = override_channel_id or schedule.slack_channel_id
         if not effective_channel_id:
-            return False, "No Slack channel ID configured"
+            return False, "No Slack channel ID configured", None, None
 
         slack_client = SlackService(bot_token)
         thread_ts = override_thread_ts if override_channel_id else schedule.slack_thread_ts
@@ -842,8 +855,10 @@ Focus on what the data shows, not technical details about queries."""
             if schedule.notebook and hasattr(schedule.notebook, "dashboards"):
                 has_dashboard = len(schedule.notebook.dashboards) > 0
 
+            posted_channel: str | None = None
+            posted_ts: str | None = None
             if has_dashboard and schedule.notebook_id:
-                await ScheduleService._upload_dashboard_screenshot_to_slack(
+                posted_channel, posted_ts = await ScheduleService._upload_dashboard_screenshot_to_slack(
                     slack_client=slack_client,
                     channel_id=effective_channel_id,
                     notebook_id=schedule.notebook_id,
@@ -871,7 +886,7 @@ Focus on what the data shows, not technical details about queries."""
 
                 all_blocks = all_blocks + ScheduleService._monitor_run_action_blocks(schedule)
 
-                await ScheduleService._post_with_thread_fallback(
+                posted_channel, posted_ts = await ScheduleService._post_with_thread_fallback(
                     slack_client=slack_client,
                     schedule=schedule,
                     session=session,
@@ -881,10 +896,10 @@ Focus on what the data shows, not technical details about queries."""
                     reply_broadcast=reply_broadcast,
                     channel_id=effective_channel_id,
                 )
-            return True, None
+            return True, None, posted_channel, posted_ts
         except Exception as e:
             logger.error(f"Error posting to Slack: {e}", exc_info=True)
-            return False, f"Slack error: {str(e)}"
+            return False, f"Slack error: {str(e)}", None, None
 
     @staticmethod
     def _monitor_run_action_blocks(schedule: Schedule) -> list[dict]:
@@ -916,34 +931,40 @@ Focus on what the data shows, not technical details about queries."""
         thread_ts: str | None,
         reply_broadcast: bool,
         channel_id: str | None = None,
-    ) -> None:
-        """Post to thread; on thread_not_found fall back to channel root and clear the stored thread."""
+    ) -> tuple[str | None, str | None]:
+        """Post to thread; on thread_not_found fall back to channel root.
+
+        Returns ``(posted_channel_id, posted_message_ts)`` so callers can record
+        where the monitor's output actually landed. This lets us route Slack
+        follow-up threads back to the monitor's home notebook.
+        """
         from slack_sdk.errors import SlackApiError
 
         from server.repositories.schedules import ScheduleRepository
 
         target_channel = channel_id or schedule.slack_channel_id
         try:
-            await slack_client.post_message(
+            response = await slack_client.post_message(
                 channel=target_channel,
                 text=text,
                 blocks=blocks,
                 thread_ts=thread_ts,
                 reply_broadcast=reply_broadcast if thread_ts else False,
             )
+            return target_channel, response.get("ts") if isinstance(response, dict) else None
         except SlackApiError as e:
             err = (e.response or {}).get("error", "")
             if thread_ts and err in {"thread_not_found", "not_in_channel", "channel_not_found"}:
                 logger.warning(f"Thread post failed for schedule {schedule.id} ({err}); falling back to channel root")
                 if target_channel == schedule.slack_channel_id:
                     await ScheduleRepository(session).clear_lost_thread(schedule.id)
-                await slack_client.post_message(
+                response = await slack_client.post_message(
                     channel=target_channel,
                     text=text,
                     blocks=blocks,
                 )
-            else:
-                raise
+                return target_channel, response.get("ts") if isinstance(response, dict) else None
+            raise
 
     @staticmethod
     def preview_fire_times(cron_expression: str, tz: str, count: int = 3) -> list[datetime]:
@@ -1012,21 +1033,34 @@ TRANSFORMED TEXT:"""
         thread_ts: str | None = None,
         reply_broadcast: bool = False,
         schedule: Schedule | None = None,
-    ) -> None:
+    ) -> tuple[str | None, str | None]:
         """
         Generate and upload a dashboard screenshot to Slack for scheduled reports.
 
         This method implements graceful degradation - if screenshot generation fails,
-        it falls back to posting the text summary only.
-
-        Args:
-            slack_client: Slack API client
-            channel_id: Slack channel ID
-            notebook_id: Notebook/dashboard ID to screenshot
-            text_summary: Text summary to post as initial_comment
-            session: Database session
+        it falls back to posting the text summary only. Returns
+        ``(posted_channel_id, posted_message_ts)`` for the summary message so
+        callers can map Slack threads back to the monitor's home notebook.
         """
+        from server.services.export_service import CompiledHtmlExportService
         from server.utils.deployment import is_feature_enabled
+
+        # Always try to post the interactive HTML dashboard first — this matches
+        # the normal chat flow and works even without a screenshot worker. On
+        # failure we still fall through to the screenshot/text paths.
+        try:
+            compiled_html = await CompiledHtmlExportService.generate_compiled_html(
+                session=session, notebook_id=str(notebook_id), version=None, disable_animations=False
+            )
+            await slack_client.upload_file(
+                channel=channel_id,
+                file_bytes=compiled_html.encode("utf-8"),
+                filename=f"dashboard_{str(notebook_id)[:8]}.html",
+                thread_ts=thread_ts,
+                initial_comment="📊 Interactive Dashboard (download and open in browser)",
+            )
+        except Exception as html_err:
+            logger.warning(f"Failed to upload HTML dashboard for scheduled report (notebook {notebook_id}): {html_err}")
 
         if not is_feature_enabled("worker_features_enabled"):
             logger.info(
@@ -1036,14 +1070,14 @@ TRANSFORMED TEXT:"""
             blocks, fallback = _text_summary_to_blocks(text_summary)
             if schedule:
                 blocks = blocks + ScheduleService._monitor_run_action_blocks(schedule)
-            await slack_client.post_message(
+            response = await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
                 blocks=blocks,
                 thread_ts=thread_ts,
                 reply_broadcast=reply_broadcast if thread_ts else False,
             )
-            return
+            return channel_id, response.get("ts") if isinstance(response, dict) else None
 
         try:
             logger.info(f"Generating screenshot for scheduled report (notebook {notebook_id})")
@@ -1064,39 +1098,44 @@ TRANSFORMED TEXT:"""
             if schedule:
                 all_blocks = all_blocks + ScheduleService._monitor_run_action_blocks(schedule)
 
-            await slack_client.post_message(
+            response = await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
                 blocks=all_blocks,
+                thread_ts=thread_ts,
+                reply_broadcast=reply_broadcast if thread_ts else False,
             )
 
             logger.info(
                 f"Dashboard screenshot posted successfully for scheduled report to channel {channel_id}",
                 extra={"posthog_context": {"notebook_id": str(notebook_id)}},
             )
+            return channel_id, response.get("ts") if isinstance(response, dict) else None
 
         except ScreenshotServiceError as e:
             logger.warning(f"Failed to generate dashboard screenshot: {e}. Will post text summary only.")
             blocks, fallback = _text_summary_to_blocks(text_summary)
             if schedule:
                 blocks = blocks + ScheduleService._monitor_run_action_blocks(schedule)
-            await slack_client.post_message(
+            response = await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
                 blocks=blocks,
                 thread_ts=thread_ts,
                 reply_broadcast=reply_broadcast if thread_ts else False,
             )
+            return channel_id, response.get("ts") if isinstance(response, dict) else None
 
         except Exception as e:
             logger.error(f"Unexpected error uploading dashboard screenshot: {e}. Will post text summary only.")
             blocks, fallback = _text_summary_to_blocks(text_summary)
             if schedule:
                 blocks = blocks + ScheduleService._monitor_run_action_blocks(schedule)
-            await slack_client.post_message(
+            response = await slack_client.post_message(
                 channel=channel_id,
                 text=fallback,
                 blocks=blocks,
                 thread_ts=thread_ts,
                 reply_broadcast=reply_broadcast if thread_ts else False,
             )
+            return channel_id, response.get("ts") if isinstance(response, dict) else None
