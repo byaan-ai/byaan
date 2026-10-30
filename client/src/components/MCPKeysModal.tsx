@@ -6,6 +6,7 @@ import { Label } from './ui/label'
 
 import { Tabs, TabsList, TabsTrigger, TabsContent } from './ui/tabs'
 import { Loader2, Copy, Trash2, Key, Clock, CheckCircle2, Check } from 'lucide-react'
+import { ExternalMCPsTab } from './ExternalMCPsTab'
 import { useMCPKeys } from '@/hooks/useMCPKeys'
 
 import { ApiService } from '@/services/api'
@@ -161,16 +162,24 @@ export function MCPKeysModal({ open, onClose }: MCPKeysModalProps) {
               <div className="w-8 h-8 rounded-lg bg-brand-orange/20 flex items-center justify-center">
                 <Key className="w-5 h-5 text-brand-orange" />
               </div>
-              {isSelfHosted ? 'MCP API Keys' : 'MCP Setup'}
+              MCP
             </DialogTitle>
             <DialogDescription className="text-gray-400">
-              {isSelfHosted
-                ? 'Generate keys to connect Claude AI, Cursor, or other MCP clients to Byaan'
-                : 'Connect Claude AI, Cursor, or other MCP clients to Byaan'}
+              Connect Byaan with MCP clients (expose Byaan's tools), or connect Byaan to external MCP servers (consume their tools).
             </DialogDescription>
           </DialogHeader>
 
-        <div className="space-y-6 mt-4">
+        <Tabs defaultValue="clients" className="mt-4">
+          <TabsList className="bg-[#1a1a1a] border border-gray-800 w-full grid grid-cols-2">
+            <TabsTrigger value="clients" className="text-xs data-[state=active]:bg-brand-orange/10 data-[state=active]:text-brand-orange">
+              Byaan as MCP Server
+            </TabsTrigger>
+            <TabsTrigger value="external" className="text-xs data-[state=active]:bg-brand-orange/10 data-[state=active]:text-brand-orange">
+              External MCP Servers
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="clients" className="space-y-6 mt-4">
           {isSelfHosted && (
             <>
               {/* Create New Key Form */}
@@ -423,7 +432,12 @@ export function MCPKeysModal({ open, onClose }: MCPKeysModalProps) {
               </TabsContent>
             </Tabs>
           </div>
-        </div>
+          </TabsContent>
+
+          <TabsContent value="external" className="mt-4">
+            <ExternalMCPsTab />
+          </TabsContent>
+        </Tabs>
 
         <div className="flex justify-end gap-3 mt-6">
           <Button
