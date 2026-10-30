@@ -109,6 +109,21 @@ export interface InstructionUpdatedEvent {
   type: 'memory_updated'
 }
 
+export interface ExternalMCPToolCallStartEvent {
+  type: 'external_mcp_tool_call_start'
+  server: string
+  tool_name: string
+  tool_id: string
+  args?: Record<string, unknown>
+}
+
+export interface ExternalMCPToolCallEndEvent {
+  type: 'external_mcp_tool_call_end'
+  server: string
+  tool_name: string
+  tool_id: string
+}
+
 export interface Project {
   id: string
   name: string
@@ -2504,6 +2519,8 @@ export class ApiService {
       onPlanStatus?: (event: PlanStatusEvent) => void
       onSessionCorrupted?: (event: SessionCorruptedEvent) => void
       onMonitorUpdated?: (event: { monitor_id: string; tool_name: string; deleted?: boolean }) => void
+      onExternalMCPToolCallStart?: (event: ExternalMCPToolCallStartEvent) => void
+      onExternalMCPToolCallEnd?: (event: ExternalMCPToolCallEndEvent) => void
       signal?: AbortSignal
     }
   ): Promise<void> {
@@ -2528,6 +2545,8 @@ export class ApiService {
       onPlanStatus,
       onSessionCorrupted,
       onMonitorUpdated,
+      onExternalMCPToolCallStart,
+      onExternalMCPToolCallEnd,
       signal
     } = options
 
@@ -2617,6 +2636,10 @@ export class ApiService {
                   tool_name: event.tool_name,
                   deleted: event.deleted,
                 })
+              } else if (event.type === 'external_mcp_tool_call_start' && onExternalMCPToolCallStart) {
+                onExternalMCPToolCallStart(event as ExternalMCPToolCallStartEvent)
+              } else if (event.type === 'external_mcp_tool_call_end' && onExternalMCPToolCallEnd) {
+                onExternalMCPToolCallEnd(event as ExternalMCPToolCallEndEvent)
               } else if (event.type === 'error' && onError) {
                 onError(event.text)
               } else if (event.type === 'done' && onDone) {
@@ -5272,4 +5295,114 @@ export class ApiService {
     return response.json()
   }
 
+  // ----------------------------
+  // External MCP Servers API
+  // ----------------------------
+  static async listExternalMCPServers(): Promise<ExternalMCPServerListResponse> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers`)
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to list external MCP servers')
+    }
+    const data = await response.json()
+    return extractData<ExternalMCPServerListResponse>(data)
+  }
+
+  static async createExternalMCPServer(payload: ExternalMCPServerPayload): Promise<ExternalMCPServer> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to create external MCP server')
+    }
+    const data = await response.json()
+    return extractData<ExternalMCPServer>(data)
+  }
+
+  static async updateExternalMCPServer(id: string, payload: Partial<ExternalMCPServerPayload>): Promise<ExternalMCPServer> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to update external MCP server')
+    }
+    const data = await response.json()
+    return extractData<ExternalMCPServer>(data)
+  }
+
+  static async deleteExternalMCPServer(id: string): Promise<void> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers/${id}`, {
+      method: 'DELETE',
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to delete external MCP server')
+    }
+  }
+
+  static async testExternalMCPServer(id: string): Promise<ExternalMCPTestResponse> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers/${id}/test`, {
+      method: 'POST',
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to test external MCP server')
+    }
+    const data = await response.json()
+    return extractData<ExternalMCPTestResponse>(data)
+  }
+
+  static async testExternalMCPConfig(payload: { transport: ExternalMCPTransport; config: Record<string, unknown> }): Promise<ExternalMCPTestResponse> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers/test-config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to test MCP config')
+    }
+    const data = await response.json()
+    return extractData<ExternalMCPTestResponse>(data)
+  }
+
+}
+
+export type ExternalMCPTransport = 'stdio' | 'sse' | 'streamable_http'
+
+export interface ExternalMCPServer {
+  id: string
+  name: string
+  transport: ExternalMCPTransport
+  config: Record<string, unknown>
+  enabled: boolean
+  tool_filter: string[] | null
+  decrypt_error?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface ExternalMCPServerListResponse {
+  items: ExternalMCPServer[]
+  total: number
+}
+
+export interface ExternalMCPServerPayload {
+  name: string
+  transport: ExternalMCPTransport
+  config: Record<string, unknown>
+  enabled?: boolean
+  tool_filter?: string[] | null
+}
+
+export interface ExternalMCPTestResponse {
+  success: boolean
+  tools: string[]
+  error: string | null
 }
