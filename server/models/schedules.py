@@ -106,4 +106,7 @@ class ScheduleRun(Base):
     deliveries: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON, nullable=True)
     trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="scheduled")
 
+    slack_channel_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    slack_message_ts: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     schedule: Mapped[Schedule] = relationship("Schedule", back_populates="runs")

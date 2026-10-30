@@ -66,8 +66,10 @@ CARD_POST_PENDING: dict[str, str] = {}
 
 # Signal to Slack post-processing that a Block Kit list card should be posted
 # after a list_monitors tool call. Keyed by thread_ts (or channel_id when no
-# thread). Each value is the tenant_id so the drainer can scope the query.
-LIST_CARD_PENDING: dict[str, str] = {}
+# thread). Each value is ``{"tenant_id": str, "monitor_ids": list[str] | None}``:
+# tenant_id scopes the query; monitor_ids is None for "list all" and an explicit
+# subset when the agent filtered to specific monitors.
+LIST_CARD_PENDING: dict[str, dict[str, Any]] = {}
 
 
 def _ok(data: dict[str, Any]) -> str:
@@ -127,7 +129,7 @@ async def create_monitor(
     timezone: str | None = None,
     notify_policy: str = "always",
     slack_channel_id: str | None = None,
-    delivery: str = "thread",
+    delivery: str = "channel",
     notebook_id: str | None = None,
 ) -> str:
     """
@@ -152,9 +154,9 @@ async def create_monitor(
         notify_policy: always | on_alert | on_change (on_change is Phase 3).
         slack_channel_id: Target Slack channel. Defaults to current channel when
             invoked from Slack.
-        delivery: ``"thread"`` (reply in the current Slack thread, default),
-            ``"channel"`` (post to the channel root), or ``"broadcast"`` (reply
-            in the thread AND broadcast to the channel).
+        delivery: ``"channel"`` (post to the channel root, default — most
+            visible), ``"thread"`` (reply in the current Slack thread), or
+            ``"broadcast"`` (reply in the thread AND broadcast to the channel).
         notebook_id: Home notebook. Omit to auto-create one.
     """
     if err := _feature_check():
@@ -516,6 +518,7 @@ async def list_monitors(
     ctx: RunContextWrapper[Any],
     scope: str = "all",
     status: str | None = None,
+    monitor_ids: list[str] | None = None,
 ) -> str:
     """
     List monitors visible to this tenant.
@@ -524,6 +527,12 @@ async def list_monitors(
         scope: 'all' (workspace-wide, default), 'thread' (only this Slack thread),
             or 'notebook' (only the current notebook/thread's notebook).
         status: optional filter — draft | active | paused | auto_paused.
+        monitor_ids: optional explicit set of monitor ids to show. Use this when
+            the user asked for a specific monitor (by name, description, or
+            intent) and you already identified the right id(s) from an earlier
+            ``list_monitors`` call or from this conversation's context. The
+            Slack list card will render only these rows. Omit for a workspace
+            overview.
 
     Output includes ``viewer_timezone`` (the viewer's IANA tz) and each monitor
     has both ``next_run_at_utc`` and ``next_run_at_viewer_tz``. When presenting
@@ -556,11 +565,25 @@ async def list_monitors(
             schedules = [s for s in schedules if str(s.notebook_id) == str(notebook_id_ctx)]
         if status:
             schedules = [s for s in schedules if s.status == status]
+        unresolved_ids: list[str] = []
+        if monitor_ids:
+            allowed = {str(mid) for mid in monitor_ids}
+            schedules = [s for s in schedules if str(s.id) in allowed]
+            found_ids = {str(s.id) for s in schedules}
+            unresolved_ids = [mid for mid in allowed if mid not in found_ids]
 
         if slack_ctx:
             key = slack_ctx.thread_ts or slack_ctx.channel_id
             if key:
-                LIST_CARD_PENDING[key] = str(tenant_id)
+                # Pass the resolved subset to the drainer whenever any filter
+                # narrowed the result — scope, status, or monitor_ids. Only the
+                # pure "list everything" default should re-fetch the full tenant
+                # set when the card renders.
+                narrowed = bool(monitor_ids) or scope != "all" or status is not None
+                LIST_CARD_PENDING[key] = {
+                    "tenant_id": str(tenant_id),
+                    "monitor_ids": [str(s.id) for s in schedules] if narrowed else None,
+                }
 
         viewer_tz = DEFAULT_FALLBACK_TIMEZONE
         if slack_ctx and slack_ctx.user_timezone and slack_ctx.user_timezone != "UTC":
@@ -584,28 +607,29 @@ async def list_monitors(
             except Exception:
                 return dt.isoformat()
 
-        return _ok(
-            {
-                "viewer_timezone": viewer_tz,
-                "monitors": [
-                    {
-                        "id": str(s.id),
-                        "name": s.name,
-                        "status": s.status,
-                        "cron_expression": s.cron_expression,
-                        "timezone": s.timezone,
-                        "notify_policy": s.notify_policy,
-                        "slack_channel_id": s.slack_channel_id,
-                        "slack_thread_ts": s.slack_thread_ts,
-                        "origin": s.origin,
-                        "next_run_at_utc": s.next_run_at.isoformat() if s.next_run_at else None,
-                        "next_run_at_viewer_tz": _next_run_local(s.next_run_at),
-                        "instruction_preview": (s.instruction or "")[:200],
-                    }
-                    for s in schedules
-                ],
-            }
-        )
+        payload = {
+            "viewer_timezone": viewer_tz,
+            "monitors": [
+                {
+                    "id": str(s.id),
+                    "name": s.name,
+                    "status": s.status,
+                    "cron_expression": s.cron_expression,
+                    "timezone": s.timezone,
+                    "notify_policy": s.notify_policy,
+                    "slack_channel_id": s.slack_channel_id,
+                    "slack_thread_ts": s.slack_thread_ts,
+                    "origin": s.origin,
+                    "next_run_at_utc": s.next_run_at.isoformat() if s.next_run_at else None,
+                    "next_run_at_viewer_tz": _next_run_local(s.next_run_at),
+                    "instruction_preview": (s.instruction or "")[:200],
+                }
+                for s in schedules
+            ],
+        }
+        if unresolved_ids:
+            payload["unresolved_monitor_ids"] = unresolved_ids
+        return _ok(payload)
     return _err("Could not open a database session.", code="session_error")
 
 

@@ -362,12 +362,37 @@ class SlackAgentService:
         title = SlackAgentService._derive_thread_title(text)
 
         if not conversation:
+            # When a user starts a thread off a monitor's channel post (or a
+            # follow-up thread off one), inherit that monitor's home notebook so
+            # the agent sees the monitor's prior runs instead of starting from
+            # scratch.
+            inherited_notebook_id = None
+            if thread_ts:
+                try:
+                    from server.models.schedules import Schedule, ScheduleRun
+
+                    stmt = (
+                        select(Schedule.notebook_id)
+                        .join(ScheduleRun, ScheduleRun.schedule_id == Schedule.id)
+                        .where(ScheduleRun.slack_channel_id == channel_id)
+                        .where(ScheduleRun.slack_message_ts == thread_ts)
+                        .where(Schedule.tenant_id == workspace.tenant_id)
+                        .limit(1)
+                    )
+                    inherited_result = await session.execute(stmt)
+                    inherited_notebook_id = inherited_result.scalar_one_or_none()
+                except Exception as inherit_err:
+                    logger.warning(
+                        f"Could not look up monitor-run notebook for inherited conversation: {inherit_err}"
+                    )
+
             conversation = SlackConversation(
                 slack_workspace_id=workspace.id,
                 slack_channel_id=channel_id,
                 slack_thread_ts=thread_ts,
                 slack_user_id=user_id,
                 thread_title=title,
+                notebook_id=inherited_notebook_id,
             )
             session.add(conversation)
             await session.commit()
@@ -557,7 +582,9 @@ You can create, update, pause/resume, remove, list, run and inspect recurring re
 - Always call create_monitor first. It saves the monitor as a draft and nothing runs until the user confirms. Then call set_monitor_status(id, status="active") after the user says yes.
 - Keep the `instruction` short and intent-focused — 1-3 sentences. Describe WHAT to monitor and WHEN to alert, not HOW to query. Do NOT include table names, column names, SQL expressions, join plans, or dataset UUIDs. The agent re-reads the schema on every run so it can adapt when tables change.
 - For "alert if X" / "only ping if X" requests, encode the condition in the instruction field and tell the user the cron will stay quiet when the condition is false.
-- Default the timezone to the user's Slack timezone. Default the channel and thread to the current ones.
+- Default the timezone to the user's Slack timezone. Default the channel to the current one.
+- Default delivery to the channel root, not the thread. Only use delivery="thread" or "broadcast" when the user explicitly asks for the thread.
+- Call ``list_monitors`` ONLY when the user explicitly asks to see monitors (e.g. "show me my monitors", "list all monitors") or when you need to disambiguate between multiple monitors. When the user names a specific monitor or when you can identify the target from context (create/update/delete/pause/resume on a specific monitor), pass ``monitor_ids=[...]`` with just the relevant id(s); the Slack list card will then show only those rows. Never call ``list_monitors`` as a confirmation after a successful create/update/delete — the per-monitor card already covers that.
 """
 
         return f"""This message came from Slack.
@@ -630,14 +657,24 @@ User's question:
                 except Exception as e:
                     logger.error(f"Failed to post monitor card for {schedule.id}: {e}", exc_info=True)
 
-        tenant_id_str = LIST_CARD_PENDING.pop(key, None)
-        if tenant_id_str:
+        list_entry = LIST_CARD_PENDING.pop(key, None)
+        # Only suppress the list card when it would re-render the exact same
+        # monitor the single-card drainer just posted — otherwise users who ask
+        # for a list in the same turn as a mutation lose their list silently.
+        same_target = (
+            monitor_id is not None
+            and isinstance(list_entry, dict)
+            and list_entry.get("monitor_ids") == [monitor_id]
+        )
+        if list_entry and not same_target:
+            monitor_ids_filter = list_entry.get("monitor_ids") if isinstance(list_entry, dict) else None
             await SlackAgentService._post_monitor_list_card(
                 workspace=workspace,
                 slack_client=slack_client,
                 channel_id=channel_id,
                 thread_ts=thread_ts,
                 session=session,
+                monitor_ids=monitor_ids_filter,
             )
 
     @staticmethod
@@ -647,11 +684,15 @@ User's question:
         channel_id: str,
         thread_ts: str | None,
         session: AsyncSession,
+        monitor_ids: list[str] | None = None,
     ) -> None:
         from server.repositories.schedules import ScheduleRepository
         from server.utils.slack_block_elements import SlackBlockBuilder
 
         schedules = await ScheduleRepository(session).get_all_for_tenant(workspace.tenant_id)
+        if monitor_ids is not None:
+            allowed = set(monitor_ids)
+            schedules = [s for s in schedules if str(s.id) in allowed]
         rows = [
             {
                 "id": str(s.id),
