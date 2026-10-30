@@ -391,6 +391,7 @@ class SlackAgentService:
                 slack_user_id=user_id,
                 thread_title=title,
                 notebook_id=inherited_notebook_id,
+                bot_owned=inherited_notebook_id is not None,
             )
             session.add(conversation)
             await session.commit()
@@ -656,13 +657,12 @@ User's question:
                     logger.error(f"Failed to post monitor card for {schedule.id}: {e}", exc_info=True)
 
         list_entry = LIST_CARD_PENDING.pop(key, None)
-        # Only suppress the list card when it would re-render the exact same
-        # monitor the single-card drainer just posted — otherwise users who ask
-        # for a list in the same turn as a mutation lose their list silently.
-        same_target = (
-            monitor_id is not None and isinstance(list_entry, dict) and list_entry.get("monitor_ids") == [monitor_id]
-        )
-        if list_entry and not same_target:
+        # After a single-monitor card, suppress a list card if it targets the same monitor or is unfiltered.
+        list_monitor_ids = list_entry.get("monitor_ids") if isinstance(list_entry, dict) else None
+        if monitor_id is not None and list_entry and (list_monitor_ids is None or list_monitor_ids == [monitor_id]):
+            list_entry = None
+
+        if list_entry:
             monitor_ids_filter = list_entry.get("monitor_ids") if isinstance(list_entry, dict) else None
             await SlackAgentService._post_monitor_list_card(
                 workspace=workspace,
