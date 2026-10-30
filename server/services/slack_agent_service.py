@@ -382,9 +382,7 @@ class SlackAgentService:
                     inherited_result = await session.execute(stmt)
                     inherited_notebook_id = inherited_result.scalar_one_or_none()
                 except Exception as inherit_err:
-                    logger.warning(
-                        f"Could not look up monitor-run notebook for inherited conversation: {inherit_err}"
-                    )
+                    logger.warning(f"Could not look up monitor-run notebook for inherited conversation: {inherit_err}")
 
             conversation = SlackConversation(
                 slack_workspace_id=workspace.id,
@@ -662,9 +660,7 @@ User's question:
         # monitor the single-card drainer just posted — otherwise users who ask
         # for a list in the same turn as a mutation lose their list silently.
         same_target = (
-            monitor_id is not None
-            and isinstance(list_entry, dict)
-            and list_entry.get("monitor_ids") == [monitor_id]
+            monitor_id is not None and isinstance(list_entry, dict) and list_entry.get("monitor_ids") == [monitor_id]
         )
         if list_entry and not same_target:
             monitor_ids_filter = list_entry.get("monitor_ids") if isinstance(list_entry, dict) else None

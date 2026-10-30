@@ -1060,9 +1060,7 @@ TRANSFORMED TEXT:"""
                 initial_comment="📊 Interactive Dashboard (download and open in browser)",
             )
         except Exception as html_err:
-            logger.warning(
-                f"Failed to upload HTML dashboard for scheduled report (notebook {notebook_id}): {html_err}"
-            )
+            logger.warning(f"Failed to upload HTML dashboard for scheduled report (notebook {notebook_id}): {html_err}")
 
         if not is_feature_enabled("worker_features_enabled"):
             logger.info(
