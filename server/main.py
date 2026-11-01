@@ -58,6 +58,7 @@ from server.routers import (
     datasources as datasources_router,
 )  # Unified datasources (connections + datasets)
 from server.routers import exports as exports_router
+from server.routers import external_mcp_servers as external_mcp_servers_router
 from server.routers import (
     file_upload as file_upload_router,
 )  # File upload with DB storage
@@ -507,13 +508,23 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         },
     )
 
+    def _safe_errors() -> list[dict]:
+        safe: list[dict] = []
+        for err in exc.errors():
+            cleaned = dict(err)
+            ctx = cleaned.get("ctx")
+            if isinstance(ctx, dict):
+                cleaned["ctx"] = {k: (str(v) if isinstance(v, Exception) else v) for k, v in ctx.items()}
+            safe.append(cleaned)
+        return safe
+
     if request.url.path.startswith("/api/"):
         return JSONResponse(
             status_code=422,
-            content=error_response(message="Validation error", data={"errors": exc.errors()}),
+            content=error_response(message="Validation error", data={"errors": _safe_errors()}),
         )
 
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    return JSONResponse(status_code=422, content={"detail": _safe_errors()})
 
 
 @app.exception_handler(Exception)
@@ -598,6 +609,7 @@ app.include_router(slack_router.router, prefix="/api", tags=["slack"])
 
 app.include_router(mcp_keys_router.router, prefix="/api", tags=["mcp"])
 app.include_router(mcp_keys_router.mcp_router, prefix="/api", tags=["mcp"])
+app.include_router(external_mcp_servers_router.router, prefix="/api", tags=["external-mcp"])
 
 
 @app.api_route("/api/mcp", methods=["GET", "POST"], include_in_schema=False)

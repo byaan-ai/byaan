@@ -784,6 +784,7 @@ async def create_unified_agent(
     Returns:
         Tuple of (agent, enabled_skills dict, enabled_skill_names list, custom_skills dict)
     """
+    external_mcp_servers: list = []
     try:
         workspace_instructions = instructions if instructions is not None else memory
         instructions = get_unified_agent_prompt_compact(
@@ -857,6 +858,16 @@ async def create_unified_agent(
                 **codex_settings,
             )
 
+        if tenant_id and session:
+            try:
+                from server.services.external_mcp_service import ExternalMCPService
+
+                external_mcp_servers = await ExternalMCPService.build_openai_agents_servers(session)
+                if external_mcp_servers:
+                    logger.info(f"Attached {len(external_mcp_servers)} external MCP server(s) to agent")
+            except Exception as exc:
+                logger.warning(f"Failed to load external MCP servers: {exc}")
+
         agent = await ModelService.get_agent_with_dynamic_model(
             name="Byaan (Unified BI Agent)",
             instructions=instructions,
@@ -864,13 +875,26 @@ async def create_unified_agent(
             handoffs=[],
             llm_connection_id=llm_connection_id,
             model=model,
+            mcp_servers=external_mcp_servers,
             **model_settings_kwargs,
         )
+
+        try:
+            agent._byaan_external_mcp_servers = external_mcp_servers
+        except Exception:
+            pass
 
         logger.info("Unified agent created successfully")
         return agent, enabled_skills, enabled_skill_names, custom_skills
 
     except Exception as e:
+        try:
+            if external_mcp_servers:
+                from server.services.external_mcp_service import ExternalMCPService
+
+                await ExternalMCPService.cleanup_openai_agents_servers(external_mcp_servers)
+        except Exception:
+            pass
         logger.error(
             f"Error creating unified agent: {e}",
             posthog_context={
@@ -1434,6 +1458,7 @@ async def stream_handoff_agent_response(
                             agent_session=agent_session,
                             resume_session_id=resume_session_id,
                             attachments=request.attachments,
+                            db_session=session,
                         ):
                             await claude_queue.put(event)
                     except Exception as stream_error:
@@ -2539,6 +2564,15 @@ async def stream_handoff_agent_response(
         event_data = json.dumps({"type": "error", "text": error_msg}, ensure_ascii=False)
         yield f"data: {event_data}\n\n"
     finally:
+        try:
+            external_servers_to_clean = getattr(locals().get("agent"), "_byaan_external_mcp_servers", None)
+            if external_servers_to_clean:
+                from server.services.external_mcp_service import ExternalMCPService
+
+                await ExternalMCPService.cleanup_openai_agents_servers(external_servers_to_clean)
+        except Exception as exc:
+            logger.warning(f"External MCP cleanup error: {exc}")
+
         # On cancellation, skip expensive operations and clean up quickly
         if was_cancelled:
             if title_generation_task and not title_generation_task.done():

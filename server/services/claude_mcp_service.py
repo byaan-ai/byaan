@@ -92,6 +92,7 @@ async def stream_claude_with_mcp_tools(
     attachments: list[dict[str, str]] | None = None,  # Image attachments for multimodal
     disallowed_tools_override: list[str] | None = None,
     max_turns: int | None = None,
+    db_session: Any = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     Stream Claude responses using ClaudeSDKClient with MCP tools and native session management.
@@ -150,6 +151,22 @@ async def stream_claude_with_mcp_tools(
             mcp_servers_dict = {"byaan_tools": mcp_server}
             allowed_tools_list = [f"mcp__byaan_tools__{tool.name}" for tool in mcp_tools]
             logger.info(f"[CLAUDE MCP] Allowed tools: {allowed_tools_list[:3]}...")
+
+        if db_session is not None:
+            try:
+                from server.services.external_mcp_service import ExternalMCPService
+
+                external_servers, external_patterns = await ExternalMCPService.build_claude_mcp_dict(db_session)
+                if external_servers:
+                    for name, cfg in external_servers.items():
+                        if name in mcp_servers_dict:
+                            logger.warning(f"[CLAUDE MCP] Skipping external MCP '{name}' - name collision")
+                            continue
+                        mcp_servers_dict[name] = cfg
+                    allowed_tools_list.extend(external_patterns)
+                    logger.info(f"[CLAUDE MCP] Attached {len(external_servers)} external MCP server(s)")
+            except Exception as exc:
+                logger.warning(f"[CLAUDE MCP] Failed to load external MCP servers: {exc}")
 
         # Block tools from the global "byaan" stdio MCP server (defined in ~/.claude.json).
         # Claude CLI auto-loads it, creating duplicate tools with mcp__byaan__ prefix that
@@ -376,6 +393,7 @@ async def stream_claude_with_mcp_tools(
         last_html_tool_id = None
         html_edit_occurred = False
         pending_datasource_events: dict[str, dict] = {}
+        external_mcp_calls: dict[str, dict] = {}
         pending_plan_tool_ids: set[str] = set()
         pending_query_saved_events: dict[str, str] = {}
         pending_memory_updated_events: set[str] = set()
@@ -451,6 +469,26 @@ async def stream_claude_with_mcp_tools(
                             logger.info(f"[CLAUDE MCP] ToolUseBlock: {tool_name}, ID: {tool_id}")
 
                             display_name = tool_name.replace("mcp__byaan_tools__", "").replace("mcp__byaan__", "")
+
+                            external_mcp_server_name: str | None = None
+                            if tool_name.startswith("mcp__") and not tool_name.startswith(
+                                ("mcp__byaan_tools__", "mcp__byaan__")
+                            ):
+                                parts = tool_name.split("__", 2)
+                                if len(parts) >= 3:
+                                    external_mcp_server_name = parts[1]
+                                    display_name = parts[2]
+                                    external_mcp_calls[tool_id] = {
+                                        "server": external_mcp_server_name,
+                                        "tool": display_name,
+                                    }
+                                    yield {
+                                        "type": "external_mcp_tool_call_start",
+                                        "server": external_mcp_server_name,
+                                        "tool_name": display_name,
+                                        "tool_id": tool_id,
+                                        "args": tool_input,
+                                    }
 
                             friendly_desc = get_user_friendly_tool_description(display_name)
 
@@ -607,6 +645,15 @@ async def stream_claude_with_mcp_tools(
                                 f"[CLAUDE MCP] ToolResultBlock for ID: {tool_id}, content: {str(content)[:200]}..."
                             )
 
+                            if tool_id in external_mcp_calls:
+                                call_info = external_mcp_calls.pop(tool_id)
+                                yield {
+                                    "type": "external_mcp_tool_call_end",
+                                    "server": call_info["server"],
+                                    "tool_name": call_info["tool"],
+                                    "tool_id": tool_id,
+                                }
+
                             if html_context_request_id and tool_id:
                                 logger.info("[CLAUDE MCP] HTML context fetch completed")
                                 yield {
@@ -752,6 +799,15 @@ async def stream_claude_with_mcp_tools(
                         if block_type == "ToolResultBlock":
                             tool_use_id = getattr(block, "tool_use_id", "unknown")
                             logger.info(f"[CLAUDE MCP] UserMessage ToolResultBlock for ID: {tool_use_id}")
+
+                            if tool_use_id in external_mcp_calls:
+                                call_info = external_mcp_calls.pop(tool_use_id)
+                                yield {
+                                    "type": "external_mcp_tool_call_end",
+                                    "server": call_info["server"],
+                                    "tool_name": call_info["tool"],
+                                    "tool_id": tool_use_id,
+                                }
 
                             if tool_use_id in pending_datasource_events:
                                 ds_info = pending_datasource_events.pop(tool_use_id)
