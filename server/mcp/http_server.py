@@ -357,6 +357,7 @@ async def byaan_system_prompt(context: Context = None) -> str:
                         "api_base_url": skill.api_base_url,
                         "api_type": skill.api_type,
                         "api_auth_type": skill.api_auth_type,
+                        "api_auth_header": skill.api_auth_header,
                         "api_domain": skill.api_domain,
                         "domain_active": skill.domain_active,
                     }

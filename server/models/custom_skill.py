@@ -42,6 +42,7 @@ class CustomSkill(Base):
     api_base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     api_type: Mapped[str | None] = mapped_column(String(20), nullable=True, default="rest")
     api_auth_type: Mapped[str | None] = mapped_column(String(20), nullable=True, default="bearer")
+    api_auth_header: Mapped[str | None] = mapped_column(String(100), nullable=True)
     api_domain: Mapped[str | None] = mapped_column(String(200), nullable=True)
     api_credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     domain_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

@@ -132,12 +132,7 @@ async def _execute_skill_api_internal(
         return {"success": False, "error": f"Could not resolve API URL for {skill_name}"}
 
     headers = {"Content-Type": "application/json", **config.api.headers}
-    api_key = credentials.get("api_key", "")
-    if api_key:
-        if config.api.auth_type == "bearer":
-            headers["Authorization"] = f"Bearer {api_key}"
-        else:
-            headers["Authorization"] = api_key
+    headers.update(config.api.auth_headers(credentials.get("api_key", "")))
 
     async with httpx.AsyncClient() as client:
         try:
@@ -653,12 +648,10 @@ class QueryService:
         if skill_config and skill_config.api.headers:
             headers.update(skill_config.api.headers)
 
-        if api_key:
-            auth_type = skill_config.api.auth_type if skill_config else "bearer"
-            if auth_type == "bearer":
-                headers["Authorization"] = f"Bearer {api_key}"
-            else:
-                headers["Authorization"] = api_key
+        if skill_config:
+            headers.update(skill_config.api.auth_headers(api_key))
+        elif api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
 
         url = _resolve_skill_api_url(saved_query.skill_name, config)
         if not url:

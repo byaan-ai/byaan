@@ -31,6 +31,7 @@ def _build_custom_skill_config(skill_data: dict) -> SkillConfig:
             base_url=skill_data.get("api_base_url", ""),
             type=skill_data.get("api_type", "rest"),
             auth_type=skill_data.get("api_auth_type", "bearer"),
+            auth_header=skill_data.get("api_auth_header") or "",
             domain=skill_data.get("api_domain", ""),
         ),
         credentials=[SkillCredentialConfig(key="api_key", label="API Key")],
@@ -39,12 +40,7 @@ def _build_custom_skill_config(skill_data: dict) -> SkillConfig:
 
 def _build_request_headers(config: SkillConfig, credentials: dict) -> dict[str, str]:
     headers = {"Content-Type": "application/json", **config.api.headers}
-    api_key = credentials.get("api_key", "")
-    if api_key:
-        if config.api.auth_type == "bearer":
-            headers["Authorization"] = f"Bearer {api_key}"
-        else:
-            headers["Authorization"] = api_key
+    headers.update(config.api.auth_headers(credentials.get("api_key", "")))
     return headers
 
 

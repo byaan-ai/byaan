@@ -1,16 +1,44 @@
+import re
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+HEADER_NAME_PATTERN = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]+")
+RESERVED_AUTH_HEADERS = {
+    "accept",
+    "accept-encoding",
+    "connection",
+    "content-length",
+    "content-type",
+    "host",
+    "transfer-encoding",
+    "user-agent",
+}
 
 
 class CustomSkillApiConfig(BaseModel):
     api_base_url: str = Field(..., min_length=1, max_length=500)
     api_type: Literal["rest", "graphql"] = "rest"
-    api_auth_type: Literal["bearer", "custom"] = "bearer"
+    api_auth_type: Literal["bearer", "custom", "header"] = "bearer"
+    api_auth_header: str = Field("", max_length=100)
     api_domain: str = ""
     api_key: str = ""
+
+    @model_validator(mode="after")
+    def validate_auth_header(self) -> "CustomSkillApiConfig":
+        if self.api_auth_type != "header":
+            self.api_auth_header = ""
+            return self
+        self.api_auth_header = self.api_auth_header.strip()
+        if not self.api_auth_header:
+            raise ValueError("api_auth_header is required when api_auth_type is 'header'")
+        if not HEADER_NAME_PATTERN.fullmatch(self.api_auth_header):
+            raise ValueError("api_auth_header must be a valid HTTP header name, e.g. 'xi-api-key'")
+        if self.api_auth_header.lower() in RESERVED_AUTH_HEADERS:
+            raise ValueError(f"'{self.api_auth_header}' cannot be used as the auth header")
+        return self
 
 
 class CustomSkillCreate(BaseModel):
@@ -54,6 +82,7 @@ class CustomSkillResponse(BaseModel):
     api_base_url: str | None = None
     api_type: str | None = None
     api_auth_type: str | None = None
+    api_auth_header: str | None = None
     api_domain: str | None = None
     domain_active: bool = True
     has_credentials: bool = False
@@ -79,6 +108,7 @@ class CustomSkillListItem(BaseModel):
     api_base_url: str | None = None
     api_type: str | None = None
     api_auth_type: str | None = None
+    api_auth_header: str | None = None
     api_domain: str | None = None
     domain_active: bool = True
     has_credentials: bool = False
