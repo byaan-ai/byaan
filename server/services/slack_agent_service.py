@@ -872,17 +872,12 @@ User's question:
                             SlackBlockBuilder.actions([dashboard_button]),
                         ]
                     else:
-                        auto_button = SlackBlockBuilder.button(
-                            text="🤖 Auto Generate",
-                            action_id="auto_generate_chart",
-                            value=value_str,
-                        )
                         customize_button = SlackBlockBuilder.button(
                             text="⚙️ Customize",
                             action_id="customize_chart_show_options",
                             value=value_str,
                         )
-                        action_buttons = [auto_button, customize_button, dashboard_button]
+                        action_buttons = [customize_button, dashboard_button]
 
                         download_value = json.dumps(
                             {

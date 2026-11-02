@@ -25,7 +25,6 @@ from server.services.slack_signature_service import SlackSignatureError, SlackSi
 from server.services.slack_suggestion_service import handle_suggestion_action
 from server.utils.custom_logger import get_logger
 from server.utils.deployment import is_feature_enabled
-from server.utils.slack_chart_detector import SlackChartDetector
 
 logger = get_logger(__name__)
 
@@ -360,17 +359,6 @@ async def slack_interactivity(
                 channel_id=value_data.get("channel_id"),
                 thread_ts=value_data.get("thread_ts"),
                 user_id=user_id,
-            )
-
-            return JSONResponse(status_code=200, content={"ok": True})
-
-        elif action_id == "auto_generate_chart":
-            value_data = json.loads(action.get("value", "{}"))
-
-            background_tasks.add_task(
-                _process_auto_generate_chart,
-                team_id=team_id,
-                table_data=value_data,
             )
 
             return JSONResponse(status_code=200, content={"ok": True})
@@ -875,96 +863,6 @@ async def _process_generate_dashboard_button(
         logger.error(f"Error processing generate dashboard button: {e}", exc_info=True)
 
 
-async def _process_auto_generate_chart(
-    team_id: str,
-    table_data: dict,
-):
-    """Process auto generate chart button click in background."""
-    try:
-        async with AsyncSessionFactory() as session:
-            repo = SlackWorkspaceRepository(session)
-            workspace = await repo.get_by_team_id(team_id)
-
-            if not workspace:
-                logger.error(f"Workspace not found for team: {team_id}")
-                return
-
-            bot_token = await SlackAgentService._get_bot_token(workspace, session)
-            slack_client = SlackService(bot_token)
-
-            channel_id = table_data.get("channel_id")
-            thread_ts = table_data.get("thread_ts")
-
-            tables = table_data.get("tables")
-            if not tables:
-                rows = table_data.get("rows")
-                if rows:
-                    tables = [rows]
-
-            if not tables or len(tables) == 0:
-                await slack_client.post_message(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text="Error: Table data not found.",
-                )
-                return
-
-            llm_connection_id = workspace.default_llm_connection_id
-
-            if not llm_connection_id:
-                await slack_client.post_message(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text="Error: No LLM connection configured for chart generation.",
-                )
-                return
-
-            await slack_client.post_message(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text="🤖 Generating chart with LLM selected labels and data points...",
-            )
-
-            chart_urls = []
-            for table_rows in tables:
-                if len(table_rows) < 2:
-                    continue
-
-                markdown_table = "| " + " | ".join(table_rows[0]) + " |\n"
-                markdown_table += "| " + " | ".join(["---"] * len(table_rows[0])) + " |\n"
-                for row in table_rows[1:]:
-                    markdown_table += "| " + " | ".join(row) + " |\n"
-
-                table_chart_urls = await SlackChartDetector.generate_chart_with_llm(
-                    markdown_table, str(llm_connection_id), session
-                )
-                if table_chart_urls:
-                    chart_urls.extend(table_chart_urls)
-
-            if chart_urls:
-                from server.utils.slack_block_elements import SlackBlockBuilder
-
-                chart_blocks = []
-                for chart_url in chart_urls:
-                    chart_blocks.append(SlackBlockBuilder.image(image_url=chart_url, alt_text="Auto-generated chart"))
-
-                await slack_client.post_message(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text=f"✅ Generated {len(chart_urls)} chart(s)",
-                    blocks=chart_blocks,
-                )
-            else:
-                await slack_client.post_message(
-                    channel=channel_id,
-                    thread_ts=thread_ts,
-                    text="❌ Could not generate chart from this data. The table may not contain suitable numeric data.",
-                )
-
-    except Exception as e:
-        logger.error(f"Error processing auto generate chart: {e}", exc_info=True)
-
-
 async def _process_customize_chart_options(
     team_id: str,
     table_data: dict,
@@ -1024,12 +922,6 @@ async def _process_customize_chart_options(
                 {"text": {"type": "plain_text", "text": "Donut Chart"}, "value": "doughnut"},
             ]
 
-            auto_button = SlackBlockBuilder.button(
-                text="🤖 Auto Generate",
-                action_id="auto_generate_chart",
-                value=json.dumps(table_data),
-            )
-
             customize_button = SlackBlockBuilder.button(
                 text="⚙️ Customize",
                 action_id="customize_chart_show_options",
@@ -1052,7 +944,7 @@ async def _process_customize_chart_options(
                 ),
             )
 
-            top_action_buttons = [auto_button, customize_button, dashboard_button]
+            top_action_buttons = [customize_button, dashboard_button]
             download_excel_value = json.dumps(
                 {
                     "tables": tables,
