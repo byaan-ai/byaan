@@ -112,7 +112,11 @@ class QueryWithFilters(BaseModel):
     filters: list[QueryFilter] = Field(default_factory=list, description="Filters to apply to this specific query")
     filter_values: dict[str, Any] | None = Field(
         None,
-        description="Optional UI/filter-intent map keyed by filter id (or id suffixes like _start/_end).",
+        description=(
+            "Optional map keyed by a configured filter id or alias. Exact keys take precedence; "
+            "_start/_end/_min/_max shorthand applies only to date_range or number_range filters "
+            "when no exact key matches. Range filters also accept min/max/start/end bound objects."
+        ),
     )
 
 
