@@ -50,6 +50,7 @@ export interface CustomSkill {
   api_base_url: string | null
   api_type: string | null
   api_auth_type: string | null
+  api_auth_header: string | null
   api_domain: string | null
   domain_active: boolean
   has_credentials: boolean
@@ -58,10 +59,13 @@ export interface CustomSkill {
   github_repo_name: string | null
 }
 
+export type ApiAuthType = 'bearer' | 'custom' | 'header'
+
 export interface ApiConfig {
   api_base_url: string
   api_type: 'rest' | 'graphql'
-  api_auth_type: 'bearer' | 'custom'
+  api_auth_type: ApiAuthType
+  api_auth_header?: string
   api_domain: string
   api_key: string
 }

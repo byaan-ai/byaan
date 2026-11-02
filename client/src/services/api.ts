@@ -3616,7 +3616,8 @@ export class ApiService {
     api_config?: {
       api_base_url: string
       api_type: 'rest' | 'graphql'
-      api_auth_type: 'bearer' | 'custom'
+      api_auth_type: 'bearer' | 'custom' | 'header'
+      api_auth_header?: string
       api_domain: string
       api_key: string
     }
@@ -3661,7 +3662,8 @@ export class ApiService {
     api_config?: {
       api_base_url: string
       api_type: 'rest' | 'graphql'
-      api_auth_type: 'bearer' | 'custom'
+      api_auth_type: 'bearer' | 'custom' | 'header'
+      api_auth_header?: string
       api_domain: string
       api_key: string
     }

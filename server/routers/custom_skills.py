@@ -53,6 +53,7 @@ def _to_response(skill, include_instructions: bool = True) -> dict:
         "api_base_url": skill.api_base_url,
         "api_type": skill.api_type,
         "api_auth_type": skill.api_auth_type,
+        "api_auth_header": skill.api_auth_header,
         "api_domain": skill.api_domain,
         "domain_active": skill.domain_active,
         "has_credentials": bool(skill.api_credentials_encrypted),
@@ -73,6 +74,7 @@ async def _process_api_config(payload_api_config, existing_skill, session) -> di
     api_fields["api_base_url"] = payload_api_config.api_base_url
     api_fields["api_type"] = payload_api_config.api_type
     api_fields["api_auth_type"] = payload_api_config.api_auth_type
+    api_fields["api_auth_header"] = payload_api_config.api_auth_header or None
 
     domain = payload_api_config.api_domain
     if not domain:
@@ -203,6 +205,7 @@ async def update_custom_skill(
         updates["api_base_url"] = None
         updates["api_type"] = None
         updates["api_auth_type"] = None
+        updates["api_auth_header"] = None
         updates["api_domain"] = None
         updates["api_credentials_encrypted"] = None
         updates["domain_active"] = True

@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Loader2, ChevronDown, ChevronRight } from 'lucide-react';
-import type { CustomSkill, CreateCustomSkillData } from '@/stores/slices/contextSlice';
+import type { ApiAuthType, CustomSkill, CreateCustomSkillData } from '@/stores/slices/contextSlice';
 
 interface WriteSkillModalProps {
   isOpen: boolean;
@@ -30,7 +30,8 @@ export function WriteSkillModal({ isOpen, onClose, onSave, editingSkill, readOnl
   const [apiEnabled, setApiEnabled] = useState(false);
   const [apiBaseUrl, setApiBaseUrl] = useState('');
   const [apiType, setApiType] = useState<'rest' | 'graphql'>('rest');
-  const [apiAuthType, setApiAuthType] = useState<'bearer' | 'custom'>('bearer');
+  const [apiAuthType, setApiAuthType] = useState<ApiAuthType>('bearer');
+  const [apiAuthHeader, setApiAuthHeader] = useState('');
   const [apiDomain, setApiDomain] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [apiSectionOpen, setApiSectionOpen] = useState(false);
@@ -44,7 +45,8 @@ export function WriteSkillModal({ isOpen, onClose, onSave, editingSkill, readOnl
       setApiEnabled(hasApi);
       setApiBaseUrl(editingSkill.api_base_url ?? '');
       setApiType((editingSkill.api_type as 'rest' | 'graphql') ?? 'rest');
-      setApiAuthType((editingSkill.api_auth_type as 'bearer' | 'custom') ?? 'bearer');
+      setApiAuthType((editingSkill.api_auth_type as ApiAuthType) ?? 'bearer');
+      setApiAuthHeader(editingSkill.api_auth_header ?? '');
       setApiDomain(editingSkill.api_domain ?? '');
       setApiKey('');
       setApiSectionOpen(hasApi);
@@ -56,6 +58,7 @@ export function WriteSkillModal({ isOpen, onClose, onSave, editingSkill, readOnl
       setApiBaseUrl('');
       setApiType('rest');
       setApiAuthType('bearer');
+      setApiAuthHeader('');
       setApiDomain('');
       setApiKey('');
       setApiSectionOpen(false);
@@ -64,7 +67,7 @@ export function WriteSkillModal({ isOpen, onClose, onSave, editingSkill, readOnl
   }, [editingSkill, isOpen]);
 
   const isValid = name?.trim() && description?.trim() && instructions?.trim()
-    && (!apiEnabled || apiBaseUrl?.trim());
+    && (!apiEnabled || (apiBaseUrl?.trim() && (apiAuthType !== 'header' || apiAuthHeader.trim())));
 
   const isNewApiSetup = apiEnabled && !editingSkill?.has_credentials;
   const apiKeyRequired = isNewApiSetup && !apiKey?.trim();
@@ -87,6 +90,7 @@ export function WriteSkillModal({ isOpen, onClose, onSave, editingSkill, readOnl
           api_base_url: apiBaseUrl.trim(),
           api_type: apiType,
           api_auth_type: apiAuthType,
+          api_auth_header: apiAuthType === 'header' ? apiAuthHeader.trim() : '',
           api_domain: apiDomain.trim(),
           api_key: apiKey,
         };
@@ -131,7 +135,7 @@ export function WriteSkillModal({ isOpen, onClose, onSave, editingSkill, readOnl
                   <div className="p-3 bg-[#1a1a1a] border border-gray-700 rounded-md text-sm text-gray-400 space-y-1">
                     <p>Base URL: {editingSkill.api_base_url}</p>
                     <p>Type: {editingSkill.api_type?.toUpperCase()}</p>
-                    <p>Auth: {editingSkill.api_auth_type}</p>
+                    <p>Auth: {editingSkill.api_auth_type}{editingSkill.api_auth_header ? ` (${editingSkill.api_auth_header})` : ''}</p>
                     {editingSkill.api_domain && <p>Domain: {editingSkill.api_domain}</p>}
                   </div>
                 </div>
@@ -256,14 +260,28 @@ When generating a status report, summarize work in three sections:
                         <label className="text-xs font-medium text-gray-300">Auth Type</label>
                         <select
                           value={apiAuthType}
-                          onChange={(e) => setApiAuthType(e.target.value as 'bearer' | 'custom')}
+                          onChange={(e) => setApiAuthType(e.target.value as ApiAuthType)}
                           className="w-full px-3 py-2 bg-[#0d0d0d] border border-gray-700 rounded-md text-white text-sm focus:outline-none focus:ring-2 focus:ring-brand-orange"
                         >
                           <option value="bearer">Bearer Token</option>
-                          <option value="custom">Custom Header</option>
+                          <option value="custom">Raw Authorization Header</option>
+                          <option value="header">Custom Header Name</option>
                         </select>
                       </div>
                     </div>
+
+                    {apiAuthType === 'header' && (
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-gray-300">Header Name *</label>
+                        <Input
+                          placeholder="e.g. xi-api-key"
+                          value={apiAuthHeader}
+                          onChange={(e) => setApiAuthHeader(e.target.value)}
+                          className="bg-[#0d0d0d] border-gray-700 text-sm"
+                        />
+                        <p className="text-xs text-gray-500">The API key is sent as the value of this header.</p>
+                      </div>
+                    )}
 
                     <div className="space-y-1">
                       <label className="text-xs font-medium text-gray-300">Domain</label>

@@ -50,9 +50,19 @@ class SkillApiConfig:
     base_url: str
     type: str = "rest"
     auth_type: str = "bearer"
+    auth_header: str = ""
     headers: dict[str, str] = field(default_factory=dict)
     domain: str = ""
     aws_service: str = ""
+
+    def auth_headers(self, api_key: str) -> dict[str, str]:
+        if not api_key:
+            return {}
+        if self.auth_type == "header":
+            return {self.auth_header: api_key} if self.auth_header else {}
+        if self.auth_type == "bearer":
+            return {"Authorization": f"Bearer {api_key}"}
+        return {"Authorization": api_key}
 
     @property
     def allowed_domains(self) -> list[str]:
@@ -114,6 +124,7 @@ def _parse_skill_config(frontmatter: dict[str, Any], docs: str) -> SkillConfig |
         base_url=api_data.get("base_url", ""),
         type=api_data.get("type", "rest"),
         auth_type=auth_data.get("type", "bearer"),
+        auth_header=auth_data.get("header", ""),
         headers=api_data.get("headers", {}),
         domain=api_data.get("domain", ""),
         aws_service=api_data.get("aws_service", ""),
