@@ -851,9 +851,14 @@ Focus on what the data shows, not technical details about queries."""
         thread_ts = override_thread_ts if override_channel_id else schedule.slack_thread_ts
         reply_broadcast = (schedule.broadcast_to_channel or force_broadcast) if thread_ts else False
         try:
+            # v1 is the placeholder shell every notebook ships with; agent-generated
+            # content lands at v2+. Only upload a dashboard when real content exists.
             has_dashboard = False
-            if schedule.notebook and hasattr(schedule.notebook, "dashboards"):
-                has_dashboard = len(schedule.notebook.dashboards) > 0
+            if schedule.notebook_id:
+                from server.repositories.dashboard import DashboardRepository
+
+                latest_dashboard = await DashboardRepository(session).get_latest_version(str(schedule.notebook_id))
+                has_dashboard = bool(latest_dashboard and latest_dashboard.version_num > 1)
 
             posted_channel: str | None = None
             posted_ts: str | None = None
