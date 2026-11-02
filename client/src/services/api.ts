@@ -5374,6 +5374,49 @@ export class ApiService {
     return extractData<ExternalMCPTestResponse>(data)
   }
 
+  static async startExternalMCPOAuth(payload: {
+    name: string
+    mcp_url: string
+    transport?: 'sse' | 'streamable_http'
+    enabled?: boolean
+    tool_filter?: string[] | null
+    scopes?: string[] | null
+  }): Promise<{ authorization_url: string; state: string }> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers/oauth/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to start OAuth flow')
+    }
+    const data = await response.json()
+    return extractData<{ authorization_url: string; state: string }>(data)
+  }
+
+  static async pollExternalMCPOAuthStatus(state: string): Promise<{ status: 'pending' | 'success' | 'error'; name?: string | null; error?: string | null }> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers/oauth/pending-status/${encodeURIComponent(state)}`)
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to poll OAuth status')
+    }
+    const data = await response.json()
+    return extractData<{ status: 'pending' | 'success' | 'error'; name?: string | null; error?: string | null }>(data)
+  }
+
+  static async reconnectExternalMCPOAuth(id: string): Promise<{ authorization_url: string; state: string }> {
+    const response = await apiFetch(`${API_BASE_URL}/external-mcp-servers/${id}/oauth/reconnect`, {
+      method: 'POST',
+    })
+    if (!response.ok) {
+      const errorData = await response.json()
+      throw new Error(extractErrorMessage(errorData) || 'Failed to start OAuth reconnect')
+    }
+    const data = await response.json()
+    return extractData<{ authorization_url: string; state: string }>(data)
+  }
+
 }
 
 export type ExternalMCPTransport = 'stdio' | 'sse' | 'streamable_http'
@@ -5386,6 +5429,12 @@ export interface ExternalMCPServer {
   enabled: boolean
   tool_filter: string[] | null
   decrypt_error?: string | null
+  auth_type?: 'static_bearer' | 'oauth' | null
+  oauth_status?: {
+    needs_reconnect: boolean
+    expires_at: number | null
+    has_refresh_token: boolean
+  } | null
   created_at: string
   updated_at: string
 }

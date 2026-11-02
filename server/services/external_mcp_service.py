@@ -30,6 +30,15 @@ def _stdio_env_with_path(env: dict[str, str] | None) -> dict[str, str]:
     return base
 
 
+def _build_effective_headers(cfg: dict[str, Any]) -> dict[str, str]:
+    headers = dict(cfg.get("headers") or {})
+    if cfg.get("auth_type") == "oauth":
+        access_token = cfg.get("access_token")
+        if access_token:
+            headers["Authorization"] = f"Bearer {access_token}"
+    return headers
+
+
 _METADATA_HOSTS = {
     "169.254.169.254",
     "fd00:ec2::254",
@@ -91,14 +100,47 @@ class ExternalMCPService:
         for rec in records:
             try:
                 decrypted = await repo.decrypt_config(rec)
-                out.append((rec, decrypted))
             except Exception as exc:
                 logger.error(
                     f"Failed to decrypt external MCP server {rec.id} ({rec.name}); "
                     f"the stored secret cannot be read with the current encryption key — "
                     f"re-enter credentials to recover: {exc}"
                 )
+                continue
+
+            if decrypted.get("auth_type") == "oauth":
+                try:
+                    decrypted = await ExternalMCPService._ensure_fresh_oauth_token(repo=repo, record=rec, cfg=decrypted)
+                except Exception as exc:
+                    logger.error(
+                        f"OAuth token refresh failed for external MCP '{rec.name}': {exc}. "
+                        f"Server will be skipped until user reconnects."
+                    )
+                    continue
+
+            out.append((rec, decrypted))
         return out
+
+    @staticmethod
+    async def _ensure_fresh_oauth_token(
+        repo: ExternalMCPServerRepository,
+        record: ExternalMCPServer,
+        cfg: dict[str, Any],
+    ) -> dict[str, Any]:
+        import time as _time
+
+        from server.services.external_mcp_oauth_service import TOKEN_REFRESH_SKEW_SECONDS, refresh_access_token
+
+        expires_at = cfg.get("expires_at")
+        if expires_at and expires_at - _time.time() > TOKEN_REFRESH_SKEW_SECONDS:
+            return cfg
+
+        new_cfg = await refresh_access_token(str(record.id), cfg)
+        if new_cfg is cfg:
+            return cfg
+
+        await repo.update(record.id, {"config_dict": new_cfg})
+        return new_cfg
 
     @staticmethod
     async def decrypt_safely(
@@ -157,7 +199,7 @@ class ExternalMCPService:
                         continue
                     params = MCPServerSseParams(
                         url=cfg["url"],
-                        headers=cfg.get("headers", {}),
+                        headers=_build_effective_headers(cfg),
                         timeout=cfg.get("timeout_seconds", CLIENT_SESSION_TIMEOUT_SECONDS),
                     )
                     built.append(
@@ -179,7 +221,7 @@ class ExternalMCPService:
                         continue
                     params = MCPServerStreamableHttpParams(
                         url=cfg["url"],
-                        headers=cfg.get("headers", {}),
+                        headers=_build_effective_headers(cfg),
                         timeout=cfg.get("timeout_seconds", CLIENT_SESSION_TIMEOUT_SECONDS),
                     )
                     built.append(
@@ -245,8 +287,9 @@ class ExternalMCPService:
                         logger.warning(f"Skipping external MCP '{rec.name}': {ssrf_err}")
                         continue
                     entry: dict[str, Any] = {"type": "sse", "url": cfg["url"]}
-                    if cfg.get("headers"):
-                        entry["headers"] = cfg["headers"]
+                    eff_headers = _build_effective_headers(cfg)
+                    if eff_headers:
+                        entry["headers"] = eff_headers
                     servers_dict[rec.name] = entry
                 elif rec.transport == "streamable_http":
                     ssrf_err = _validate_remote_url(cfg.get("url", ""))
@@ -254,8 +297,9 @@ class ExternalMCPService:
                         logger.warning(f"Skipping external MCP '{rec.name}': {ssrf_err}")
                         continue
                     entry = {"type": "http", "url": cfg["url"]}
-                    if cfg.get("headers"):
-                        entry["headers"] = cfg["headers"]
+                    eff_headers = _build_effective_headers(cfg)
+                    if eff_headers:
+                        entry["headers"] = eff_headers
                     servers_dict[rec.name] = entry
                 else:
                     continue
@@ -304,7 +348,7 @@ class ExternalMCPService:
                 server = MCPServerSse(
                     params=MCPServerSseParams(
                         url=config["url"],
-                        headers=config.get("headers", {}),
+                        headers=_build_effective_headers(config),
                         timeout=config.get("timeout_seconds", TEST_CONNECTION_TIMEOUT_SECONDS),
                     ),
                     cache_tools_list=False,
@@ -318,7 +362,7 @@ class ExternalMCPService:
                 server = MCPServerStreamableHttp(
                     params=MCPServerStreamableHttpParams(
                         url=config["url"],
-                        headers=config.get("headers", {}),
+                        headers=_build_effective_headers(config),
                         timeout=config.get("timeout_seconds", TEST_CONNECTION_TIMEOUT_SECONDS),
                     ),
                     cache_tools_list=False,
@@ -365,4 +409,28 @@ class ExternalMCPService:
                 )
                 for k, v in headers.items()
             }
+
+        if masked.get("auth_type") == "oauth":
+            for secret_key in ("access_token", "refresh_token", "client_secret"):
+                if masked.get(secret_key):
+                    masked[secret_key] = "***"
         return masked
+
+    @staticmethod
+    def compute_oauth_status(decrypted: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Return OAuth status fields for list rows (needs_reconnect, expires_at)."""
+        if not decrypted or decrypted.get("auth_type") != "oauth":
+            return None
+
+        import time as _time
+
+        expires_at = decrypted.get("expires_at")
+        has_refresh = bool(decrypted.get("refresh_token"))
+        now = _time.time()
+        expired = expires_at is not None and expires_at < now
+        needs_reconnect = expired and not has_refresh
+        return {
+            "needs_reconnect": needs_reconnect,
+            "expires_at": expires_at,
+            "has_refresh_token": has_refresh,
+        }
