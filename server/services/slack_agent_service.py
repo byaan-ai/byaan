@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 from datetime import datetime
 from uuid import UUID
 
 import litellm
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,8 +50,38 @@ logger = get_logger(__name__)
 class SlackAgentService:
     """Service for processing Slack messages through the AI agent."""
 
-    CONFIRMATION_MESSAGE = "Hey, I'm working on your request. I'll let you know once it's ready."
+    ROTATING_ACKS = (
+        "On it — fetching what you need 🔎",
+        "Got your request — digging in now 📊",
+        "Checking your data now — results in a moment ⚡",
+        "Working on it — results coming shortly 📊",
+        "Working on it — give me a moment to dig in 🔍",
+        "On it! Results coming shortly ✨",
+        "On it — pulling your data 📥",
+        "Got it — crunching now 🧮",
+    )
     SLACK_MENTION_HINT = "\n\n_Reply here or @Byaan to continue the conversation_"
+
+    @staticmethod
+    async def _pick_ack_message(
+        workspace: SlackWorkspace,
+        channel_id: str,
+        thread_ts: str | None,
+        session: AsyncSession,
+    ) -> str:
+        """Random ack from pool. First turn in a thread gets a 'Hey!' prefix."""
+        msg = random.choice(SlackAgentService.ROTATING_ACKS)
+        query = (
+            select(SlackConversation.id)
+            .where(SlackConversation.slack_workspace_id == workspace.id)
+            .where(SlackConversation.slack_channel_id == channel_id)
+        )
+        if thread_ts:
+            query = query.where(SlackConversation.slack_thread_ts == thread_ts)
+        else:
+            query = query.where(SlackConversation.slack_thread_ts.is_(None))
+        existing = (await session.execute(query.limit(1))).scalar_one_or_none()
+        return f"Hey! {msg}" if existing is None else msg
 
     @staticmethod
     async def _resolve_classifier_model(
@@ -138,9 +170,15 @@ class SlackAgentService:
         slack_client = SlackService(bot_token)
 
         try:
+            ack_text = await SlackAgentService._pick_ack_message(
+                workspace=workspace,
+                channel_id=channel_id,
+                thread_ts=thread_ts or event_ts,
+                session=session,
+            )
             await slack_client.post_message(
                 channel=channel_id,
-                text=SlackAgentService.CONFIRMATION_MESSAGE,
+                text=ack_text,
                 thread_ts=thread_ts or event_ts,
             )
 
@@ -1057,9 +1095,15 @@ User's question:
                 await session.commit()
                 return
 
+            ack_text = await SlackAgentService._pick_ack_message(
+                workspace=workspace,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                session=session,
+            )
             await slack_client.post_message(
                 channel=channel_id,
-                text=SlackAgentService.CONFIRMATION_MESSAGE,
+                text=ack_text,
                 thread_ts=thread_ts,
             )
 
@@ -1214,9 +1258,15 @@ User's newest message:
             bot_token = await SlackAgentService._get_bot_token(workspace, session)
             slack_client = SlackService(bot_token)
 
+            ack_text = await SlackAgentService._pick_ack_message(
+                workspace=workspace,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                session=session,
+            )
             await slack_client.post_message(
                 channel=channel_id,
-                text="Hey, I'm working on your request. I'll let you know once it's ready.",
+                text=ack_text,
                 thread_ts=thread_ts,
             )
 
