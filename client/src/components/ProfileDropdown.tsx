@@ -62,6 +62,12 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
     }
   }, [isOpen])
 
+  useEffect(() => {
+    const openMcp = () => setMcpKeysModalOpen(true)
+    window.addEventListener('open-mcp-modal', openMcp)
+    return () => window.removeEventListener('open-mcp-modal', openMcp)
+  }, [])
+
   if (!user) return null
 
   const getInitials = (): string => {

@@ -4,6 +4,7 @@ import { ToastContainer } from 'react-toastify'
 import Layout from './components/Layout'
 import ChatPreview from './pages/ChatPreview'
 import LLMConnectionsPage from './pages/LLMConnections'
+import { OAuthReturnHandler } from './components/OAuthReturnHandler'
 import MonitorsPage from './pages/Monitors'
 import DatabasesPage from './pages/Databases'
 import TeamMembersPage from './pages/TeamMembers'
@@ -97,6 +98,7 @@ function App() {
   if (isEnterprise) {
     return (
       <>
+        <OAuthReturnHandler />
         <Routes>
           {/* Guest-only auth routes - redirect to home if already logged in */}
           <Route path="/login" element={<AuthGuard guestOnly><Login /></AuthGuard>} />
@@ -305,6 +307,7 @@ function App() {
   if (!isLocal || !isTauriApp()) {
     return (
       <>
+        <OAuthReturnHandler />
         <Layout>
           <Routes>
             <Route path="/" element={<HomePage />} />
@@ -345,6 +348,7 @@ function App() {
   // Local mode (Mac app) - WaitlistGate flow
   return (
     <>
+      <OAuthReturnHandler />
       <WaitlistGate>
         <Layout>
           <Routes>

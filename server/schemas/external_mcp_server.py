@@ -102,6 +102,8 @@ class ExternalMCPServerResponse(BaseModel):
     enabled: bool
     tool_filter: list[str] | None = None
     decrypt_error: str | None = None
+    auth_type: str | None = None
+    oauth_status: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -150,3 +152,31 @@ class TestConnectionResponse(BaseModel):
 class TestConfigRequest(BaseModel):
     transport: Literal["stdio", "sse", "streamable_http"]
     config: dict[str, Any]
+
+
+class OAuthDiscoverRequest(BaseModel):
+    mcp_url: str
+
+
+class OAuthStartRequest(BaseModel):
+    name: str
+    transport: Literal["sse", "streamable_http"] = "streamable_http"
+    mcp_url: str
+    enabled: bool = True
+    tool_filter: list[str] | None = None
+    scopes: list[str] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        v_lower = v.lower()
+        if v_lower in RESERVED_NAMES:
+            raise ValueError(f"'{v}' is a reserved name")
+        if not NAME_PATTERN.match(v_lower):
+            raise ValueError("name must be lowercase alphanumeric with hyphens/underscores, 3-64 chars")
+        return v_lower
+
+
+class OAuthStartResponse(BaseModel):
+    authorization_url: str
+    state: str
