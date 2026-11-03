@@ -443,6 +443,56 @@ class SlackAgentService:
         return conversation
 
     @staticmethod
+    async def _maybe_create_monitor_inherited_conversation(
+        workspace: SlackWorkspace,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        session: AsyncSession,
+    ) -> SlackConversation | None:
+        """
+        For a channel-posted monitor message, create a bot-owned conversation that
+        inherits the monitor's notebook. Returns None when the thread is not tied
+        to any monitor run so cold channel threads remain protected by layer1.
+        """
+        from server.models.schedules import Schedule, ScheduleRun
+
+        try:
+            stmt = (
+                select(Schedule.notebook_id)
+                .join(ScheduleRun, ScheduleRun.schedule_id == Schedule.id)
+                .where(ScheduleRun.slack_channel_id == channel_id)
+                .where(ScheduleRun.slack_message_ts == thread_ts)
+                .where(Schedule.tenant_id == workspace.tenant_id)
+                .limit(1)
+            )
+            inherited_notebook_id = (await session.execute(stmt)).scalar_one_or_none()
+        except Exception as inherit_err:
+            logger.warning(f"Monitor-run lookup failed for followup inheritance: {inherit_err}")
+            return None
+
+        if inherited_notebook_id is None:
+            return None
+
+        conversation = SlackConversation(
+            slack_workspace_id=workspace.id,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            slack_user_id=user_id,
+            notebook_id=inherited_notebook_id,
+            bot_owned=True,
+        )
+        session.add(conversation)
+        try:
+            await session.commit()
+            await session.refresh(conversation)
+        except IntegrityError:
+            await session.rollback()
+            return await get_conversation(workspace.id, channel_id, thread_ts, session)
+
+        return conversation
+
+    @staticmethod
     async def _run_agent(
         request: AgentRequest,
         session: AsyncSession,
@@ -1015,6 +1065,15 @@ User's question:
 
         try:
             conversation = await get_conversation(workspace.id, channel_id, thread_ts, session)
+
+            if conversation is None and thread_ts:
+                conversation = await SlackAgentService._maybe_create_monitor_inherited_conversation(
+                    workspace=workspace,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    user_id=user_id,
+                    session=session,
+                )
 
             if check_resume_keyword(text):
                 if conversation and conversation.auto_follow_muted:
