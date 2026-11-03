@@ -78,6 +78,26 @@ class SlackService:
             logger.error(f"Slack API error posting message: {e.response['error']}")
             raise
 
+    async def set_assistant_status(self, channel: str, thread_ts: str, status: str) -> bool:
+        """
+        Show a transient 'Byaan is thinking...' style status under the thread.
+        Pass an empty status to clear. Returns True on success, False on failure.
+        """
+        try:
+            await self.client.api_call(
+                "assistant.threads.setStatus",
+                json={"channel_id": channel, "thread_ts": thread_ts, "status": status},
+            )
+            logger.debug(f"Slack set_assistant_status ok=True status={status!r}")
+            return True
+        except SlackApiError as e:
+            err = e.response.get("error") if hasattr(e, "response") else str(e)
+            logger.warning(f"Slack set_assistant_status failed: {err} status={status!r}")
+            return False
+        except Exception as e:
+            logger.warning(f"Slack set_assistant_status unexpected error: {e} status={status!r}")
+            return False
+
     async def add_reaction(self, channel: str, timestamp: str, name: str) -> bool:
         """Add an emoji reaction to a message. Returns True on success, False on failure."""
         try:
