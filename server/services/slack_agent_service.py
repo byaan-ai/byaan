@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
@@ -28,7 +29,12 @@ from server.services.crypto_service import CryptoService
 from server.services.export_service import CompiledHtmlExportService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
 from server.services.slack_context import SlackContext, slack_context_scope
-from server.services.slack_intent_classifier import classify_intent
+from server.services.slack_intent_classifier import (
+    INTENT_FALSE_REACT,
+    INTENT_SKIP,
+    INTENT_TRUE_REACT,
+    classify_intent,
+)
 from server.services.slack_service import SlackService, strip_bot_mentions
 from server.services.slack_thread_filter import (
     check_mute_keyword,
@@ -1135,7 +1141,7 @@ User's question:
             )
             cleaned_text = strip_bot_mentions(text, workspace.bot_user_id)
 
-            should_respond, decision_source = await classify_intent(
+            intent, decision_source = await classify_intent(
                 text=cleaned_text,
                 history=history,
                 llm_connection_id=llm_connection_id,
@@ -1144,27 +1150,39 @@ User's question:
             )
 
             logger.info(
-                f"Slack followup classifier decision: respond={should_respond} "
+                f"Slack followup classifier decision: intent={intent} "
                 f"source={decision_source} model={classifier_model} thread={thread_ts}"
             )
 
-            if not should_respond:
+            if intent == INTENT_SKIP:
                 event_log.processing_status = "skipped_classifier"
                 event_log.error_message = decision_source
                 await session.commit()
                 return
 
-            ack_text = await SlackAgentService._pick_ack_message(
-                workspace=workspace,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                session=session,
-            )
-            await slack_client.post_message(
-                channel=channel_id,
-                text=ack_text,
-                thread_ts=thread_ts,
-            )
+            if intent == INTENT_FALSE_REACT:
+                asyncio.create_task(slack_client.add_reaction(channel=channel_id, timestamp=event_ts, name="thumbsup"))
+                event_log.processing_status = "reacted"
+                event_log.error_message = decision_source
+                await session.commit()
+                return
+
+            if intent == INTENT_TRUE_REACT:
+                asyncio.create_task(slack_client.add_reaction(channel=channel_id, timestamp=event_ts, name="thumbsup"))
+            else:
+                ack_text = await SlackAgentService._pick_ack_message(
+                    workspace=workspace,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    session=session,
+                )
+                asyncio.create_task(
+                    slack_client.post_message(
+                        channel=channel_id,
+                        text=ack_text,
+                        thread_ts=thread_ts,
+                    )
+                )
 
             async with acquire_thread_lock(workspace.slack_team_id, channel_id, thread_ts):
                 conversation = await SlackAgentService._get_or_create_conversation(

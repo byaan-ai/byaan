@@ -78,6 +78,18 @@ class SlackService:
             logger.error(f"Slack API error posting message: {e.response['error']}")
             raise
 
+    async def add_reaction(self, channel: str, timestamp: str, name: str) -> bool:
+        """Add an emoji reaction to a message. Returns True on success, False on failure."""
+        try:
+            await self.client.reactions_add(channel=channel, timestamp=timestamp, name=name)
+            return True
+        except SlackApiError as e:
+            err = e.response.get("error") if hasattr(e, "response") else str(e)
+            if err == "already_reacted":
+                return True
+            logger.warning(f"Slack reaction add failed: {err}")
+            return False
+
     async def get_bot_info(self) -> dict:
         """Get bot's own info to extract bot_user_id."""
         try:

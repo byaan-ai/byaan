@@ -21,23 +21,40 @@ logger = get_logger(__name__)
 
 CLASSIFIER_TIMEOUT_SEC = 20.0
 
-STRICTNESS_HINT = (
-    "TRUE when: (1) data/analytics question, (2) dashboard or chart tweak, "
-    "(3) direct follow-up on Byaan's previous reply (including short answers "
-    "like 'yes', 'no', 'the second one' etc when Byaan just asked something), "
-    "(4) correction or clarification of the user's earlier question to Byaan, "
-    "(5) meta question about Byaan's capabilities or available data. "
-    "FALSE when: side chatter between humans, thank-you or acknowledgment "
-    "replies, messages addressed to a named teammate (e.g. 'Hey John...'), "
-    "or messages about topics Byaan clearly has no data for."
+INTENT_TRUE_TEXT = "true_text"
+INTENT_TRUE_REACT = "true_react"
+INTENT_FALSE_REACT = "false_react"
+INTENT_SKIP = "skip"
+
+CLASSIFIER_POLICY = (
+    "You decide two things for the newest message in one shot:\n"
+    "(a) should_respond — does Byaan run the agent and post a content "
+    "reply?\n"
+    "(b) ack_mode — how to acknowledge receipt: a text ack ('Working on "
+    "it…'), a 👍 reaction, or nothing.\n\n"
+    "Output exactly ONE of these four tokens:\n"
+    "TRUE_TEXT  → run agent AND post a text ack. Use for a fresh, "
+    "standalone data/analytics/dashboard request that opens a new line "
+    "of work.\n"
+    "TRUE_REACT → run agent AND add a 👍 reaction (no text ack). Use "
+    "for a mid-thread continuation that still asks Byaan to produce "
+    "content: follow-up ask, correction, redirection, "
+    "approval+instruction, rejection+instruction, or any warm-thread ask.\n"
+    "FALSE_REACT → do NOT run agent, add a 👍 reaction only. Use for "
+    "messages directed at Byaan that need no content reply — "
+    "approvals, rejections, confirmations, gestures, sentiment, "
+    "closing remarks, lightweight nudges with no new ask.\n"
+    "SKIP → do nothing. Use when the message is not directed at Byaan: "
+    "side chatter between humans, message to a named teammate, "
+    "off-topic noise."
 )
 
 
 SYSTEM_PROMPT = (
-    "You are a strict binary classifier for the Byaan analytics Slack bot. "
-    "Read the Slack thread excerpt and decide if the newest message expects "
-    "a Byaan reply. Output exactly ONE token: TRUE or FALSE. No punctuation, "
-    "no reasoning, no other words."
+    "You are a strict intent classifier for the Byaan analytics Slack bot. "
+    "Read the Slack thread excerpt and classify the newest message. Output "
+    "exactly ONE token from this set: TRUE_TEXT, TRUE_REACT, FALSE_REACT, "
+    "SKIP. No punctuation, no reasoning, no other words."
 )
 
 
@@ -54,12 +71,17 @@ def _format_history(history: list[dict]) -> str:
     return "\n".join(lines) if lines else "(no prior messages in thread)"
 
 
-def _parse_decision(raw: str | None) -> bool:
+def _parse_decision(raw: str | None) -> str:
     if not raw:
-        return False
-    token = raw.strip().upper()
-    token = re.sub(r"[^A-Z]", "", token)[:5]
-    return token.startswith("TRUE")
+        return INTENT_SKIP
+    token = re.sub(r"[^A-Z_]", "", raw.strip().upper())
+    if token.startswith("TRUE_TEXT"):
+        return INTENT_TRUE_TEXT
+    if token.startswith("TRUE_REACT"):
+        return INTENT_TRUE_REACT
+    if token.startswith("FALSE_REACT"):
+        return INTENT_FALSE_REACT
+    return INTENT_SKIP
 
 
 async def classify_intent(
@@ -68,12 +90,14 @@ async def classify_intent(
     llm_connection_id: UUID,
     session: AsyncSession,
     model: str | None = None,
-) -> tuple[bool, str]:
-    """Return (should_respond, decision_source).
+) -> tuple[str, str]:
+    """Return (intent, decision_source).
 
-    decision_source is one of: 'llm_true', 'llm_false', 'timeout', 'error'.
+    intent is one of: 'true_text', 'true_react', 'false_react', 'skip'.
+    decision_source mirrors the intent prefixed by 'llm_', or 'timeout' / 'error'.
     """
-    prompt = f"""Strictness policy: {STRICTNESS_HINT}
+    prompt = f"""Classification policy:
+{CLASSIFIER_POLICY}
 
 Recent thread (oldest to newest):
 {_format_history(history)}
@@ -81,7 +105,7 @@ Recent thread (oldest to newest):
 Newest message from user:
 \"\"\"{text.strip()}\"\"\"
 
-Is the newest message directed at Byaan and expecting a response? Answer TRUE or FALSE."""
+Output TRUE_TEXT, TRUE_REACT, FALSE_REACT, or SKIP."""
 
     try:
         raw = await asyncio.wait_for(
@@ -96,10 +120,10 @@ Is the newest message directed at Byaan and expecting a response? Answer TRUE or
         )
     except TimeoutError:
         logger.info("Slack intent classifier timed out; defaulting to skip")
-        return False, "timeout"
+        return INTENT_SKIP, "timeout"
     except Exception as e:
         logger.warning(f"Slack intent classifier error: {e}")
-        return False, "error"
+        return INTENT_SKIP, "error"
 
-    decision = _parse_decision(raw)
-    return decision, "llm_true" if decision else "llm_false"
+    intent = _parse_decision(raw)
+    return intent, f"llm_{intent}"
