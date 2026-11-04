@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import random
 import re
@@ -28,7 +29,12 @@ from server.services.crypto_service import CryptoService
 from server.services.export_service import CompiledHtmlExportService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
 from server.services.slack_context import SlackContext, slack_context_scope
-from server.services.slack_intent_classifier import classify_intent
+from server.services.slack_intent_classifier import (
+    INTENT_FALSE_REACT,
+    INTENT_SKIP,
+    INTENT_TRUE_REACT,
+    classify_intent,
+)
 from server.services.slack_service import SlackService, strip_bot_mentions
 from server.services.slack_thread_filter import (
     check_mute_keyword,
@@ -47,6 +53,9 @@ from server.utils.slack_thread_lock import acquire_thread_lock
 logger = get_logger(__name__)
 
 
+_ASSISTANT_CAPABILITY_CACHE: dict[UUID, bool] = {}
+
+
 class SlackAgentService:
     """Service for processing Slack messages through the AI agent."""
 
@@ -61,6 +70,37 @@ class SlackAgentService:
         "Got it — crunching now 🧮",
     )
     SLACK_MENTION_HINT = "\n\n_Reply here or @Byaan to continue the conversation_"
+
+    REACTION_EMOJIS_WORKING = (
+        "eyes",
+        "mag_right",
+        "bar_chart",
+        "abacus",
+        "mag",
+        "chart_with_upwards_trend",
+        "inbox_tray",
+    )
+    REACTION_EMOJIS_ACK = ("thumbsup", "white_check_mark", "ok_hand", "100", "raised_hands", "clap", "sparkles")
+
+    STATUS_MESSAGES = (
+        "is thinking…",
+        "is digging into your data…",
+        "is crunching numbers…",
+        "is pulling results…",
+        "is working on it…",
+        "is fetching data…",
+        "is analyzing…",
+        "is building your answer…",
+    )
+
+    @staticmethod
+    def _pick_reaction_emoji(for_ack: bool) -> str:
+        pool = SlackAgentService.REACTION_EMOJIS_ACK if for_ack else SlackAgentService.REACTION_EMOJIS_WORKING
+        return random.choice(pool)
+
+    @staticmethod
+    def _pick_status_message() -> str:
+        return random.choice(SlackAgentService.STATUS_MESSAGES)
 
     @staticmethod
     async def _pick_ack_message(
@@ -82,6 +122,25 @@ class SlackAgentService:
             query = query.where(SlackConversation.slack_thread_ts.is_(None))
         existing = (await session.execute(query.limit(1))).scalar_one_or_none()
         return f"Hey! {msg}" if existing is None else msg
+
+    @staticmethod
+    async def _is_assistant_enabled(
+        workspace: SlackWorkspace,
+        slack_client: SlackService,
+        channel_id: str,
+        thread_ts: str,
+    ) -> bool:
+        """
+        Workspace-scoped probe for Slack AI Assistant capability. Caches the
+        result per worker so later calls skip the probe. Fail-open fallback:
+        any error means Assistant is treated as disabled for this workspace.
+        """
+        cached = _ASSISTANT_CAPABILITY_CACHE.get(workspace.id)
+        if cached is not None:
+            return cached
+        ok = await slack_client.set_assistant_status(channel=channel_id, thread_ts=thread_ts, status="")
+        _ASSISTANT_CAPABILITY_CACHE[workspace.id] = ok
+        return ok
 
     @staticmethod
     async def _resolve_classifier_model(
@@ -170,17 +229,33 @@ class SlackAgentService:
         slack_client = SlackService(bot_token)
 
         try:
-            ack_text = await SlackAgentService._pick_ack_message(
+            assistant_enabled = await SlackAgentService._is_assistant_enabled(
                 workspace=workspace,
+                slack_client=slack_client,
                 channel_id=channel_id,
                 thread_ts=thread_ts or event_ts,
-                session=session,
             )
-            await slack_client.post_message(
-                channel=channel_id,
-                text=ack_text,
-                thread_ts=thread_ts or event_ts,
-            )
+
+            if assistant_enabled:
+                asyncio.create_task(
+                    slack_client.add_reaction(
+                        channel=channel_id,
+                        timestamp=event_ts,
+                        name=SlackAgentService._pick_reaction_emoji(for_ack=False),
+                    )
+                )
+            else:
+                ack_text = await SlackAgentService._pick_ack_message(
+                    workspace=workspace,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts or event_ts,
+                    session=session,
+                )
+                await slack_client.post_message(
+                    channel=channel_id,
+                    text=ack_text,
+                    thread_ts=thread_ts or event_ts,
+                )
 
             question = SlackAgentService._extract_question(text, workspace.bot_user_id)
 
@@ -230,32 +305,51 @@ class SlackAgentService:
                 byaan_user_id=byaan_user_id,
             )
 
-            with slack_context_scope(slack_run_ctx):
-                raw_response, new_notebook_id, dashboard_generated, query_executed = await SlackAgentService._run_agent(
-                    request=agent_request,
-                    session=session,
-                    tenant_id=workspace.tenant_id,
-                    user_id=byaan_user_id,
+            status_thread_ts = thread_ts or event_ts
+            if assistant_enabled:
+                asyncio.create_task(
+                    slack_client.set_assistant_status(
+                        channel=channel_id, thread_ts=status_thread_ts, status=SlackAgentService._pick_status_message()
+                    )
                 )
 
-            if new_notebook_id and conversation.notebook_id is None:
-                conversation.notebook_id = new_notebook_id
-                await session.commit()
+            try:
+                with slack_context_scope(slack_run_ctx):
+                    (
+                        raw_response,
+                        new_notebook_id,
+                        dashboard_generated,
+                        query_executed,
+                    ) = await SlackAgentService._run_agent(
+                        request=agent_request,
+                        session=session,
+                        tenant_id=workspace.tenant_id,
+                        user_id=byaan_user_id,
+                    )
 
-            await SlackAgentService._post_agent_response(
-                workspace=workspace,
-                slack_client=slack_client,
-                conversation=conversation,
-                channel_id=channel_id,
-                thread_ts=thread_ts or event_ts,
-                raw_response=raw_response,
-                dashboard_generated=dashboard_generated,
-                query_executed=query_executed,
-                llm_connection_id=llm_connection_id,
-                resolved_model=resolved_model,
-                append_mention_hint=True,
-                session=session,
-            )
+                if new_notebook_id and conversation.notebook_id is None:
+                    conversation.notebook_id = new_notebook_id
+                    await session.commit()
+
+                await SlackAgentService._post_agent_response(
+                    workspace=workspace,
+                    slack_client=slack_client,
+                    conversation=conversation,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts or event_ts,
+                    raw_response=raw_response,
+                    dashboard_generated=dashboard_generated,
+                    query_executed=query_executed,
+                    llm_connection_id=llm_connection_id,
+                    resolved_model=resolved_model,
+                    append_mention_hint=True,
+                    session=session,
+                )
+            finally:
+                if assistant_enabled:
+                    asyncio.create_task(
+                        slack_client.set_assistant_status(channel=channel_id, thread_ts=status_thread_ts, status="")
+                    )
 
             await SlackAgentService._maybe_post_monitor_card(
                 workspace=workspace,
@@ -439,6 +533,56 @@ class SlackAgentService:
 
         conversation.last_activity_at = datetime.now()
         await session.commit()
+
+        return conversation
+
+    @staticmethod
+    async def _maybe_create_monitor_inherited_conversation(
+        workspace: SlackWorkspace,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        session: AsyncSession,
+    ) -> SlackConversation | None:
+        """
+        For a channel-posted monitor message, create a bot-owned conversation that
+        inherits the monitor's notebook. Returns None when the thread is not tied
+        to any monitor run so cold channel threads remain protected by layer1.
+        """
+        from server.models.schedules import Schedule, ScheduleRun
+
+        try:
+            stmt = (
+                select(Schedule.notebook_id)
+                .join(ScheduleRun, ScheduleRun.schedule_id == Schedule.id)
+                .where(ScheduleRun.slack_channel_id == channel_id)
+                .where(ScheduleRun.slack_message_ts == thread_ts)
+                .where(Schedule.tenant_id == workspace.tenant_id)
+                .limit(1)
+            )
+            inherited_notebook_id = (await session.execute(stmt)).scalar_one_or_none()
+        except Exception as inherit_err:
+            logger.warning(f"Monitor-run lookup failed for followup inheritance: {inherit_err}")
+            return None
+
+        if inherited_notebook_id is None:
+            return None
+
+        conversation = SlackConversation(
+            slack_workspace_id=workspace.id,
+            slack_channel_id=channel_id,
+            slack_thread_ts=thread_ts,
+            slack_user_id=user_id,
+            notebook_id=inherited_notebook_id,
+            bot_owned=True,
+        )
+        session.add(conversation)
+        try:
+            await session.commit()
+            await session.refresh(conversation)
+        except IntegrityError:
+            await session.rollback()
+            return await get_conversation(workspace.id, channel_id, thread_ts, session)
 
         return conversation
 
@@ -1016,6 +1160,15 @@ User's question:
         try:
             conversation = await get_conversation(workspace.id, channel_id, thread_ts, session)
 
+            if conversation is None and thread_ts:
+                conversation = await SlackAgentService._maybe_create_monitor_inherited_conversation(
+                    workspace=workspace,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    user_id=user_id,
+                    session=session,
+                )
+
             if check_resume_keyword(text):
                 if conversation and conversation.auto_follow_muted:
                     conversation.auto_follow_muted = False
@@ -1076,7 +1229,7 @@ User's question:
             )
             cleaned_text = strip_bot_mentions(text, workspace.bot_user_id)
 
-            should_respond, decision_source = await classify_intent(
+            intent, decision_source = await classify_intent(
                 text=cleaned_text,
                 history=history,
                 llm_connection_id=llm_connection_id,
@@ -1085,27 +1238,55 @@ User's question:
             )
 
             logger.info(
-                f"Slack followup classifier decision: respond={should_respond} "
+                f"Slack followup classifier decision: intent={intent} "
                 f"source={decision_source} model={classifier_model} thread={thread_ts}"
             )
 
-            if not should_respond:
+            if intent == INTENT_SKIP:
                 event_log.processing_status = "skipped_classifier"
                 event_log.error_message = decision_source
                 await session.commit()
                 return
 
-            ack_text = await SlackAgentService._pick_ack_message(
-                workspace=workspace,
-                channel_id=channel_id,
-                thread_ts=thread_ts,
-                session=session,
+            if intent == INTENT_FALSE_REACT:
+                asyncio.create_task(
+                    slack_client.add_reaction(
+                        channel=channel_id,
+                        timestamp=event_ts,
+                        name=SlackAgentService._pick_reaction_emoji(for_ack=True),
+                    )
+                )
+                event_log.processing_status = "reacted"
+                event_log.error_message = decision_source
+                await session.commit()
+                return
+
+            assistant_enabled = await SlackAgentService._is_assistant_enabled(
+                workspace=workspace, slack_client=slack_client, channel_id=channel_id, thread_ts=thread_ts
             )
-            await slack_client.post_message(
-                channel=channel_id,
-                text=ack_text,
-                thread_ts=thread_ts,
-            )
+
+            if intent == INTENT_TRUE_REACT or assistant_enabled:
+                asyncio.create_task(
+                    slack_client.add_reaction(
+                        channel=channel_id,
+                        timestamp=event_ts,
+                        name=SlackAgentService._pick_reaction_emoji(for_ack=False),
+                    )
+                )
+            else:
+                ack_text = await SlackAgentService._pick_ack_message(
+                    workspace=workspace,
+                    channel_id=channel_id,
+                    thread_ts=thread_ts,
+                    session=session,
+                )
+                asyncio.create_task(
+                    slack_client.post_message(
+                        channel=channel_id,
+                        text=ack_text,
+                        thread_ts=thread_ts,
+                    )
+                )
 
             async with acquire_thread_lock(workspace.slack_team_id, channel_id, thread_ts):
                 conversation = await SlackAgentService._get_or_create_conversation(
@@ -1149,37 +1330,50 @@ User's question:
                     byaan_user_id=byaan_user_id,
                 )
 
-                with slack_context_scope(slack_run_ctx):
-                    (
-                        raw_response,
-                        new_notebook_id,
-                        dashboard_generated,
-                        query_executed,
-                    ) = await SlackAgentService._run_agent(
-                        request=agent_request,
-                        session=session,
-                        tenant_id=workspace.tenant_id,
-                        user_id=byaan_user_id,
+                if assistant_enabled:
+                    asyncio.create_task(
+                        slack_client.set_assistant_status(
+                            channel=channel_id, thread_ts=thread_ts, status=SlackAgentService._pick_status_message()
+                        )
                     )
 
-                if new_notebook_id and conversation.notebook_id is None:
-                    conversation.notebook_id = new_notebook_id
-                    await session.commit()
+                try:
+                    with slack_context_scope(slack_run_ctx):
+                        (
+                            raw_response,
+                            new_notebook_id,
+                            dashboard_generated,
+                            query_executed,
+                        ) = await SlackAgentService._run_agent(
+                            request=agent_request,
+                            session=session,
+                            tenant_id=workspace.tenant_id,
+                            user_id=byaan_user_id,
+                        )
 
-                await SlackAgentService._post_agent_response(
-                    workspace=workspace,
-                    slack_client=slack_client,
-                    conversation=conversation,
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                    raw_response=raw_response,
-                    dashboard_generated=dashboard_generated,
-                    query_executed=query_executed,
-                    llm_connection_id=llm_connection_id,
-                    resolved_model=resolved_model,
-                    append_mention_hint=True,
-                    session=session,
-                )
+                    if new_notebook_id and conversation.notebook_id is None:
+                        conversation.notebook_id = new_notebook_id
+                        await session.commit()
+
+                    await SlackAgentService._post_agent_response(
+                        workspace=workspace,
+                        slack_client=slack_client,
+                        conversation=conversation,
+                        channel_id=channel_id,
+                        thread_ts=thread_ts,
+                        raw_response=raw_response,
+                        dashboard_generated=dashboard_generated,
+                        query_executed=query_executed,
+                        llm_connection_id=llm_connection_id,
+                        resolved_model=resolved_model,
+                        append_mention_hint=True,
+                        session=session,
+                    )
+                finally:
+                    if assistant_enabled:
+                        asyncio.create_task(
+                            slack_client.set_assistant_status(channel=channel_id, thread_ts=thread_ts, status="")
+                        )
 
                 await SlackAgentService._maybe_post_monitor_card(
                     workspace=workspace,
