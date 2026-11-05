@@ -660,6 +660,11 @@ class SlackAgentService:
 TRANSFORMATION RULES:
 {combined_instructions}
 
+NON-NEGOTIABLE FORMAT RULES (apply after the above):
+- Any tabular data MUST be a pipe-markdown table (`| col | col |` with a `|---|---|` separator row). Never wrap tabular data in triple-backtick code fences.
+- Triple-backtick code fences are reserved for SQL, JSON, or other code — never for query results.
+- Keep units in column headers (e.g. "Revenue (USD)") not in cells.
+
 RAW RESPONSE:
 {raw_response}
 
@@ -673,7 +678,8 @@ RULES:
 3. Present only the final answer/insight
 4. Be concise and conversational
 5. Keep standard Markdown formatting (headers, bold, links, lists)
-6. For markdown tables with numeric data, move units from cell values to column headers (e.g., "Avg Delay (mins)" in header, "18.1" in cell, not "18.1 mins")
+6. Any tabular data MUST be a pipe-markdown table (`| col | col |` with a `|---|---|` separator row). Never wrap query results, row dumps, or column-aligned data in triple-backtick code fences — code fences are reserved for SQL/JSON/code only.
+7. For markdown tables with numeric data, move units from cell values to column headers (e.g., "Avg Delay (mins)" in header, "18.1" in cell, not "18.1 mins")
 
 RAW RESPONSE:
 {raw_response}
