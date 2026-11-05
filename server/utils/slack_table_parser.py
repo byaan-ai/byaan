@@ -32,6 +32,49 @@ class SlackTableParser:
         return text
 
     @staticmethod
+    def _unfence_tabular_code_blocks(text: str) -> str:
+        """Convert ```-fenced blocks that hold tabular text into pipe markdown.
+
+        Agents sometimes wrap query results in a fenced code block instead of a
+        pipe-markdown table, which Slack then renders as a monospace code block.
+        We detect two shapes inside a fence:
+        1. Already pipe-delimited rows (``| a | b |`` with 2+ rows) — just drop
+           the fence so the downstream parser can convert them.
+        2. Whitespace-aligned columns — 2+ consecutive lines with 2+ cells each,
+           split on 2+ spaces or tabs. Convert to pipe markdown with a header
+           separator row before returning.
+
+        Non-tabular fences (prose, JSON, SQL, single-column lists) are left
+        untouched.
+        """
+
+        def repl(match: re.Match[str]) -> str:
+            body = match.group(1)
+            lines = [line for line in body.split("\n") if line.strip()]
+            if len(lines) < 2:
+                return match.group(0)
+
+            pipe_rows = [line for line in lines if line.count("|") >= 2]
+            if len(pipe_rows) >= 2 and len(pipe_rows) >= len(lines) - 1:
+                return "\n".join(lines) + "\n"
+
+            split_rows = [re.split(r"(?:\t|  +)", line.strip()) for line in lines]
+            col_counts = [len(r) for r in split_rows]
+            if min(col_counts) < 2 or max(col_counts) - min(col_counts) > 1:
+                return match.group(0)
+            if len(split_rows) < 2:
+                return match.group(0)
+
+            max_cols = max(col_counts)
+            padded = [row + ["-"] * (max_cols - len(row)) for row in split_rows]
+            header = "| " + " | ".join(padded[0]) + " |"
+            sep = "| " + " | ".join(["---"] * max_cols) + " |"
+            data = ["| " + " | ".join(row) + " |" for row in padded[1:]]
+            return "\n".join([header, sep, *data]) + "\n"
+
+        return re.sub(r"```(?:[a-zA-Z]*)?\n?(.*?)```", repl, text, flags=re.DOTALL)
+
+    @staticmethod
     def has_markdown_table(text: str) -> bool:
         """
         Check if text contains a markdown table.
@@ -42,6 +85,7 @@ class SlackTableParser:
         Returns:
             True if markdown table is found
         """
+        text = SlackTableParser._unfence_tabular_code_blocks(text)
         text = SlackTableParser._normalize_table_boundaries(text)
         # Require at least 2 cells per line and at least 2 rows for robust detection
         table_pattern = r"\|[^|\n]+\|[^|\n]+\|[\r\n]+\|[^|\n]+\|[^|\n]+\|"
@@ -58,6 +102,7 @@ class SlackTableParser:
         Returns:
             Tuple of (blocks list, remaining text without tables)
         """
+        text = SlackTableParser._unfence_tabular_code_blocks(text)
         text = SlackTableParser._normalize_table_boundaries(text)
         blocks: list[dict[str, Any]] = []
         remaining_text = text
