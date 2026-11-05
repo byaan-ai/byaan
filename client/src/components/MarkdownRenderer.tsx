@@ -6,6 +6,8 @@ import { Button } from "./ui/button"
 import { parseMessage } from "../utils/parseMessage"
 import { ToolCallCard } from "./ToolCallCard"
 import { ChatMonitorCard } from "./monitors/ChatMonitorCard"
+import { ChatHandoffCard } from "./handoffs/ChatHandoffCard"
+import { ChatHandoffRunCard } from "./handoffs/ChatHandoffRunCard"
 import { CodeHighlight } from "./CodeHighlight"
 
 interface MarkdownRendererProps {
@@ -585,6 +587,18 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
           />
         )
       }
+      if (part.type === "handoff_run") {
+        return (
+          <ChatHandoffRunCard
+            key={`handoff-run-${index}-${part.handoff_id}-${part.start_seq}`}
+            handoffId={part.handoff_id}
+            startSeq={part.start_seq}
+          />
+        )
+      }
+      if (part.type === "handoff_card") {
+        return <ChatHandoffCard key={`handoff-${index}-${part.handoff_id}`} handoffId={part.handoff_id} />
+      }
       if (part.type === "monitor_card") {
         return (
           <ChatMonitorCard
@@ -692,7 +706,7 @@ export default function MarkdownRenderer({ content, onCodeInject }: MarkdownRend
     })
   }
 
-  if (messageParts.some(part => part.type === "tool_call" || part.type === "monitor_card" || part.type === "monitor_run_header")) {
+  if (messageParts.some(part => part.type === "tool_call" || part.type === "monitor_card" || part.type === "monitor_run_header" || part.type === "handoff_card" || part.type === "handoff_run")) {
     return <div className="space-y-2">{renderMessageParts()}</div>
   }
 

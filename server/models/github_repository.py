@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
-from sqlalchemy import TIMESTAMP, Boolean, ForeignKey, String, Text, UniqueConstraint, func, true
+from sqlalchemy import JSON, TIMESTAMP, Boolean, ForeignKey, String, Text, UniqueConstraint, false, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from server.db.base import GUID, Base
@@ -38,6 +38,8 @@ class GitHubRepository(Base):
     language_breakdown: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     scope: Mapped[str] = mapped_column(String(10), nullable=False, default="user", server_default="user")
+    handoff_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=false())
+    handoff_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=False), default=datetime.now, server_default=func.current_timestamp()

@@ -11,6 +11,7 @@ from server.models.folder_dashboard import FolderDashboard
 from server.models.folder_member import FolderMember
 from server.models.folder_notebook import FolderNotebook
 from server.models.github_repository import GitHubRepository
+from server.models.handoff import Handoff, HandoffEvent, HandoffMessage
 from server.models.learning import Learning
 from server.models.llm_connections import LLMConnection
 from server.models.mcp_api_key import MCPAPIKey
@@ -52,6 +53,9 @@ __all__ = [
     "File",
     "Folder",
     "GitHubRepository",
+    "Handoff",
+    "HandoffEvent",
+    "HandoffMessage",
     "FolderDashboard",
     "FolderMember",
     "FolderNotebook",

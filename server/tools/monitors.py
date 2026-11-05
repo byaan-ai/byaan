@@ -724,6 +724,8 @@ async def record_monitor_findings(
     """
     Record the structured findings of this scheduled run. Call this exactly once
     at the end of a scheduled run. Only available inside scheduled runs.
+    If this Monitor checks a connected repository's code and the alert comes from a concrete code bug, call
+    propose_handoff before this when it is available.
 
     Args:
         outcome: 'ok' | 'alert' | 'no_change'.

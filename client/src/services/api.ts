@@ -5457,3 +5457,5 @@ export interface ExternalMCPTestResponse {
   tools: string[]
   error: string | null
 }
+
+export { apiFetch as authorizedFetch, extractErrorMessage }

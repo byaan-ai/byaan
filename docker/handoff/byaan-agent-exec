@@ -1,0 +1,4 @@
+#!/bin/sh
+umask 0002
+export DISABLE_AUTOUPDATER=1
+exec claude "$@"

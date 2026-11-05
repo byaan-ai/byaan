@@ -228,3 +228,10 @@ class TestMultipleBlockTypes:
         blocks, _ = markdown_to_slack_blocks(text)
         assert len(blocks) == 3
         assert "code here" in blocks[1]["text"]["text"]
+
+
+def test_handoff_markers_are_stripped_from_slack_replies():
+    from server.services.slack_agent_service import HANDOFF_MARKER_RE
+
+    text = "Click Start to begin. [[HANDOFF_CARD:c99be27c-90be-4f41-bfe9-383f1d4efbf6]]\nRun [[HANDOFF_RUN:abc|3]] done"
+    assert HANDOFF_MARKER_RE.sub("", text) == "Click Start to begin.\nRun done"

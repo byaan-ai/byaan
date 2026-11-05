@@ -52,6 +52,7 @@ class GitHubRepoResponse(BaseModel):
     language_breakdown: str | None
     is_active: bool
     scope: str = "user"
+    handoff_enabled: bool = False
     created_at: datetime
     updated_at: datetime
     skills: list[RepoSkillSummary] = []

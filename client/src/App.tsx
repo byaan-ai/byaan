@@ -6,6 +6,7 @@ import ChatPreview from './pages/ChatPreview'
 import LLMConnectionsPage from './pages/LLMConnections'
 import { OAuthReturnHandler } from './components/OAuthReturnHandler'
 import MonitorsPage from './pages/Monitors'
+import HandoffsPage from './pages/Handoffs'
 import DatabasesPage from './pages/Databases'
 import TeamMembersPage from './pages/TeamMembers'
 import NotebooksPage from './pages/NotebooksPage'
@@ -215,6 +216,18 @@ function App() {
             }
           />
           <Route
+            path="/handoffs"
+            element={
+              <AuthGuard>
+                <ViewerRedirect>
+                  <Layout>
+                    <HandoffsPage />
+                  </Layout>
+                </ViewerRedirect>
+              </AuthGuard>
+            }
+          />
+          <Route
             path="/databases"
             element={
               <AuthGuard>
@@ -318,6 +331,7 @@ function App() {
             <Route path="/skill-review" element={<SkillReviewPage />} />
             <Route path="/llm-connections" element={<LLMConnectionsPage />} />
             <Route path="/monitors" element={<MonitorsPage />} />
+            <Route path="/handoffs" element={<HandoffsPage />} />
             <Route path="/databases" element={<DatabasesPage />} />
             <Route path="/github" element={<GitHubIntegrations />} />
             <Route path="/folders" element={<FoldersPage />} />
@@ -360,6 +374,7 @@ function App() {
             <Route path="/skill-review" element={<SkillReviewPage />} />
             <Route path="/llm-connections" element={<LLMConnectionsPage />} />
             <Route path="/monitors" element={<MonitorsPage />} />
+            <Route path="/handoffs" element={<HandoffsPage />} />
             <Route path="/databases" element={<DatabasesPage />} />
             <Route path="/github" element={<GitHubIntegrations />} />
             <Route path="/folders" element={<FoldersPage />} />
