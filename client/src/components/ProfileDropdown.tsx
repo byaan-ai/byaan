@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
-import { Check, LogOut, ChevronUp, Building2, Users, Bot, MessageSquare, Clock, Key, Github, BarChart3, Sparkles } from 'lucide-react'
+import { Check, LogOut, ChevronUp, Building2, Users, Bot, MessageSquare, Clock, Key, Github, BarChart3, Sparkles, GitPullRequest } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useStore } from '../stores/useStore'
 import { useScopes } from '@/hooks/useScopes'
 import { useSlackConfig } from '@/hooks/useSlackConfig'
 import { useSchedules } from '@/hooks/useSchedules'
 import { usePendingSuggestionCount } from '../hooks/useSkillSuggestions'
+import { useHandoffRequirements } from '../hooks/useHandoffs'
 import { ApiService } from '@/services/api'
 import { useAppConfig } from '@/hooks/useAppConfig'
 import { isTauriApp } from '@/lib/tauri-api'
@@ -34,6 +35,7 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
     : { isConnected: false, loading: false }
   const { data: schedules = [] } = useSchedules()
   const { data: pendingSuggestionCount = 0 } = usePendingSuggestionCount()
+  const { data: handoffRequirements } = useHandoffRequirements()
   const navigate = useNavigate()
   const [isOpen, setIsOpen] = useState(false)
   const [slackModalOpen, setSlackModalOpen] = useState(false)
@@ -131,6 +133,11 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
   const handleMonitorsClick = () => {
     setIsOpen(false)
     navigate('/monitors')
+  }
+
+  const handleHandoffsClick = () => {
+    setIsOpen(false)
+    navigate('/handoffs')
   }
 
   const handleMCPKeysClick = () => {
@@ -265,6 +272,15 @@ export function ProfileDropdown({ isExpanded, onExpandSidebar }: ProfileDropdown
                     {activeMonitorCount}
                   </span>
                 )}
+              </button>
+            )}
+            {!isViewer && handoffRequirements?.enabled && (
+              <button
+                onClick={handleHandoffsClick}
+                className="w-full px-3 py-2.5 flex items-center gap-3 hover:bg-[#333333] transition-colors text-white"
+              >
+                <GitPullRequest className="w-4 h-4" />
+                <span className="text-sm flex-1 text-left">Handoffs</span>
               </button>
             )}
             {!isViewer && (

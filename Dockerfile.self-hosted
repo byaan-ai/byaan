@@ -98,6 +98,15 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /app/start-backend.sh
 # Create non-root user for backend
 RUN useradd --create-home --shell /bin/bash byaan
 
+# Byaan Handoffs: git for clone/push, sudo plus an isolated agent user running the Claude CLI bundled with claude-agent-sdk
+RUN apt-get update && apt-get install -y --no-install-recommends git sudo \
+    && rm -rf /var/lib/apt/lists/*
+RUN CLAUDE_BIN="$(/app/.venv/bin/python -c 'import claude_agent_sdk, os; print(os.path.join(os.path.dirname(claude_agent_sdk.__file__), "_bundled", "claude"))')" \
+    && test -x "$CLAUDE_BIN" \
+    && ln -s "$CLAUDE_BIN" /usr/local/bin/claude
+COPY docker/handoff/ /tmp/handoff/
+RUN sh /tmp/handoff/setup-agent-user.sh
+
 # Create data directory and cache for byaan user
 RUN mkdir -p /data/postgres /data/uploads /data/backups /data/logs /home/byaan/.cache/uv
 
@@ -111,6 +120,9 @@ RUN chown -R byaan:byaan /app /data/uploads /data/backups /data/logs /home/byaan
 # Environment variables
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/data
+ENV HANDOFFS_STORAGE_DIR=/data/handoffs
+ENV HANDOFF_AGENT_CLI=/usr/local/bin/byaan-agent-claude
+ENV HANDOFF_AGENT_GROUP=byaan-handoff
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 

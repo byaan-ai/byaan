@@ -77,6 +77,7 @@ export interface ConnectedRepo {
   language_breakdown: string | null
   is_active: boolean
   scope: 'user' | 'org'
+  handoff_enabled: boolean
   created_at: string
   updated_at: string
   skills: RepoSkill[]

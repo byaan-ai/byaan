@@ -49,6 +49,7 @@ import { buildActiveFilterChips, removeActiveFilterChip } from '../utils/filterD
 import PlanDisplay from '../components/PlanDisplay'
 import PlanModeToggle from '../components/PlanModeToggle'
 import { ResizableSplitPanel } from '../components/ResizableSplitPanel'
+import { HANDOFF_REFRESH_EVENT } from '../hooks/useHandoffs'
 
 type ScheduleFrequency = 'daily' | 'weekly' | 'custom'
 const CHAT_PREFLIGHT_DEBUG_STORAGE_KEY = 'chat_preview_filter_preflight_debug'
@@ -1828,9 +1829,11 @@ Please modify this element to: `
     }
     window.addEventListener('byaan:monitor-test-complete', handler)
     window.addEventListener('byaan:monitor-messages-refresh', handler)
+    window.addEventListener(HANDOFF_REFRESH_EVENT, handler)
     return () => {
       window.removeEventListener('byaan:monitor-test-complete', handler)
       window.removeEventListener('byaan:monitor-messages-refresh', handler)
+      window.removeEventListener(HANDOFF_REFRESH_EVENT, handler)
     }
   }, [notebookId])
 

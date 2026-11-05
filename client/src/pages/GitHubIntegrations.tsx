@@ -20,6 +20,8 @@ import {
   Users,
 } from 'lucide-react'
 import { GitHubService, type GitHubRepo, type ConnectedRepo } from '../services/github'
+import { GitHubAppCard } from '../components/handoffs/GitHubAppCard'
+import { RepoHandoffSettings } from '../components/handoffs/RepoHandoffSettings'
 import { LocalRepoService } from '../services/localRepos'
 import { isTauriApp } from '../lib/tauri-api'
 import { useStore } from '../stores/useStore'
@@ -51,7 +53,7 @@ export default function GitHubIntegrations() {
     openSidebar,
     user,
   } = useStore()
-  const { features } = useScopes()
+  const { features, canManageTeam } = useScopes()
   const teamSharingEnabled = features.team_sharing_enabled
   const currentUserId = user?.id
   const [togglingShareRepos, setTogglingShareRepos] = useState<Set<string>>(new Set())
@@ -767,6 +769,8 @@ export default function GitHubIntegrations() {
           )}
 
           {/* Connected Repos */}
+          {githubConnected && <GitHubAppCard canManage={canManageTeam} />}
+
           {connectedRepos.filter(r => r.source !== 'local').length > 0 && (
             <div>
               <h2 className="text-lg font-semibold text-white mb-4">Connected Repositories</h2>
@@ -892,6 +896,14 @@ export default function GitHubIntegrations() {
                               </Badge>
                             ))}
                         </div>
+                      )}
+
+                      {githubConnected && (
+                        <RepoHandoffSettings
+                          repo={repo}
+                          canEdit={canManageTeam || repo.user_id === currentUserId}
+                          onChanged={loadConnectedRepos}
+                        />
                       )}
                     </div>
                   </Card>

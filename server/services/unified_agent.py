@@ -424,6 +424,7 @@ async def _load_github_repos_for_agent(tenant_id: UUID, user_id: UUID | None, se
                 "default_branch": repo.default_branch,
                 "skills": skills_dict,
                 "file_tree": file_tree,
+                "handoff_enabled": bool(repo.handoff_enabled),
             }
 
         logger.info(f"[GITHUB AGENT] Loaded {len(result)} analyzed repos into agent context")
@@ -446,7 +447,28 @@ async def _get_github_token_for_agent(tenant_id: UUID, user_id: UUID | None, ses
         return None
 
 
-def _build_github_repos_hint(github_repos: dict[str, dict]) -> str:
+def _build_handoff_hint(github_repos: dict[str, dict], monitor_proposals: bool = False) -> str:
+    from server.utils.deployment import is_feature_enabled
+
+    if not is_feature_enabled("handoffs_enabled"):
+        return ""
+    enabled = [data["repo_full_name"] for data in github_repos.values() if data.get("handoff_enabled")]
+    repos = ", ".join(enabled) if enabled else "none yet (an admin turns them on in Settings → GitHub → Handoffs)"
+    return f"""
+CODE FIXES (Byaan Handoffs):
+- The repo tools above are read-only. To change code, fix a bug, add tests or open a pull request in a connected repo, call `propose_handoff`.
+- Treat "fix this", "hand it to Claude Code", "open a PR" or "make this change" for a connected repo as a handoff request. Do not edit local files, do not message other sessions, and do not just draft a patch as text.
+- `propose_handoff` drafts the task and shows a card; a person clicks Start (or asks you to start it, then call `start_handoff`), then Claude Code makes the change and Byaan opens the PR. Read the relevant files first so the brief names exact file paths, then include the returned card marker verbatim in your reply.
+- Repos with handoffs ON: {repos}. When more than one is on and the person didn't name one, ask which repository they mean before exploring or drafting.
+- Use `get_handoff_status`, `start_handoff` (only when the person explicitly asks to start a draft they have seen), `message_handoff` (only while a handoff is still in progress), `restart_handoff`, `cancel_handoff` and `list_handoffs` for progress, follow-ups, re-starts and stopping; pass `handoff_id` when the conversation has more than one handoff. Changes to a finished, failed or stopped handoff go through `propose_handoff`.
+- Each conversation has one handoff per task and repository: drafting again for the same repository revises that handoff (same branch, pull request and Claude Code session). Pass `handoff_id` to `propose_handoff` to revise a specific one, or `new_task=True` only for a different task.{_MONITOR_PROPOSAL_HINT if monitor_proposals else ""}"""
+
+
+_MONITOR_PROPOSAL_HINT = """
+- MONITOR RUNS THAT CHECK CODE: this Monitor run may draft code fixes. If the Monitor checks a connected repository's code, or traces an error back to code, and you confirm a concrete bug by reading the file, call `propose_handoff` before `record_monitor_findings`: cite file:line in suspected_files and give an acceptance check that fails today. Byaan posts the draft card; a person must click Start. Monitors about data, metrics or anything outside a repository never propose handoffs, and never propose speculative changes."""
+
+
+def _build_github_repos_hint(github_repos: dict[str, dict], monitor_proposals: bool = False) -> str:
     if not github_repos:
         return ""
 
@@ -459,7 +481,8 @@ def _build_github_repos_hint(github_repos: dict[str, dict]) -> str:
 
     repo_lines = []
     for repo_id, data in github_repos.items():
-        repo_lines.append(f"\n- **{data['repo_full_name']}** (id: `{repo_id}`)")
+        handoff_note = " · handoffs ON" if data.get("handoff_enabled") else ""
+        repo_lines.append(f"\n- **{data['repo_full_name']}** (id: `{repo_id}`){handoff_note}")
         skills = data.get("skills", {})
         if skills:
             for skill_type, skill_data in skills.items():
@@ -511,6 +534,7 @@ CREATING CUSTOM SKILLS:
 - Workflow: (1) call `search_repo_code` and `get_repo_file` to gather the source you need, (2) write the markdown analysis yourself, (3) call `create_repo_skill(repo_id, skill_name, description, instructions=<the markdown>)` to persist it.
 - The tool just saves — it does not generate content. You are responsible for the analysis quality.
 - After saving, the skill is retrievable via `get_repo_skill(repo_id, "custom:<skill_name>")` in future conversations.
+{_build_handoff_hint(github_repos, monitor_proposals)}
 </github_repos>"""
 
 
@@ -628,6 +652,7 @@ def _build_agent_tools(
     has_github_repos: bool = False,
     has_local_repos: bool = False,
     scheduled_run: bool = False,
+    handoff_proposals: bool = False,
 ) -> list:
     """
     Build the unified tool list for the agent.
@@ -687,6 +712,12 @@ def _build_agent_tools(
             from server.tools.monitors import get_monitor_tools
 
             tools.extend(get_monitor_tools(scheduled_run=True))
+        if handoff_proposals and has_github_repos and is_feature_enabled("handoffs_enabled"):
+            from server.tools.github_tools import get_github_read_tools
+            from server.tools.handoffs import get_handoff_tools
+
+            tools.extend(get_github_read_tools())
+            tools.extend(get_handoff_tools(scheduled_run=True))
         return tools
 
     tools.extend(
@@ -751,6 +782,11 @@ def _build_agent_tools(
 
         tools.extend(get_monitor_tools(scheduled_run=False))
 
+    if is_feature_enabled("handoffs_enabled"):
+        from server.tools.handoffs import get_handoff_tools
+
+        tools.extend(get_handoff_tools(scheduled_run=False))
+
     return tools
 
 
@@ -805,12 +841,19 @@ async def create_unified_agent(
             github_repos = await _load_github_repos_for_agent(tenant_id, user_id, session)
             local_repos = await _load_local_repos_for_agent(tenant_id, user_id, session)
 
+        handoff_proposals = False
+        if scheduled_run and tenant_id and session:
+            from server.services.handoff_service import proposals_allowed
+
+            handoff_proposals = await proposals_allowed(session, tenant_id)
+
         tools = _build_agent_tools(
             database_schemas,
             plan_mode=plan_mode,
             has_github_repos=bool(github_repos),
             has_local_repos=bool(local_repos),
             scheduled_run=scheduled_run,
+            handoff_proposals=handoff_proposals,
         )
 
         if database_schemas:
@@ -826,7 +869,7 @@ async def create_unified_agent(
         )
 
         if github_repos:
-            instructions += _build_github_repos_hint(github_repos)
+            instructions += _build_github_repos_hint(github_repos, handoff_proposals)
         if local_repos:
             instructions += _build_local_repos_hint(local_repos)
 
@@ -1397,12 +1440,20 @@ async def stream_handoff_agent_response(
                 github_token = await _get_github_token_for_agent(tenant_id, user_id, session)
                 local_repos = await _load_local_repos_for_agent(tenant_id, user_id, session)
 
+                is_scheduled_run = bool(getattr(request, "scheduled_run", False))
+                handoff_proposals = False
+                if is_scheduled_run:
+                    from server.services.handoff_service import proposals_allowed
+
+                    handoff_proposals = await proposals_allowed(session, tenant_id)
+
                 tools = _build_agent_tools(
                     database_schemas,
                     plan_mode=request.plan_mode,
                     has_github_repos=bool(github_repos),
                     has_local_repos=bool(local_repos),
-                    scheduled_run=bool(getattr(request, "scheduled_run", False)),
+                    scheduled_run=is_scheduled_run,
+                    handoff_proposals=handoff_proposals,
                 )
 
                 instructions, enabled_skills, enabled_skill_names, custom_skills = await _load_skills_for_agent(
@@ -1410,7 +1461,7 @@ async def stream_handoff_agent_response(
                 )
 
                 if github_repos:
-                    instructions += _build_github_repos_hint(github_repos)
+                    instructions += _build_github_repos_hint(github_repos, handoff_proposals)
                 if local_repos:
                     instructions += _build_local_repos_hint(local_repos)
 

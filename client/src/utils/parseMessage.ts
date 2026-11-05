@@ -25,50 +25,50 @@ export interface MonitorRunHeaderPart {
   trigger_phrase: string
 }
 
-export type MessagePart = TextPart | ToolCallPart | MonitorCardPart | MonitorRunHeaderPart
+export interface HandoffCardPart {
+  type: "handoff_card"
+  handoff_id: string
+}
+
+export interface HandoffRunPart {
+  type: "handoff_run"
+  handoff_id: string
+  start_seq: number
+}
+
+export type MessagePart = TextPart | ToolCallPart | MonitorCardPart | MonitorRunHeaderPart | HandoffCardPart | HandoffRunPart
 
 // Tools that should be hidden from chat (handled by separate UI)
 const HIDDEN_TOOLS = ['emit_plan_status']
 
 export function parseMessage(text: string): MessagePart[] {
-  // Extract monitor-card markers first so they survive the tool-call regex.
-  const monitorMarkerRegex = /\[\[MONITOR_(CARD|DELETED):([a-f0-9-]+)\]\]/gi
-  const monitorIntervals: Array<{
-    start: number
-    end: number
-    kind: "card" | "header"
-    monitor_id: string
-    deleted: boolean
-    monitor_name?: string
-    when?: string
-    trigger_phrase?: string
-  }> = []
-  let mm: RegExpExecArray | null
-  while ((mm = monitorMarkerRegex.exec(text)) !== null) {
-    monitorIntervals.push({
-      start: mm.index,
-      end: mm.index + mm[0].length,
-      kind: "card",
-      monitor_id: mm[2],
-      deleted: mm[1].toUpperCase() === "DELETED",
-    })
+  // Extract card markers first so they survive the tool-call regex.
+  const markerIntervals: Array<{ start: number; end: number; part: MessagePart }> = []
+  const collect = (regex: RegExp, toPart: (m: RegExpExecArray) => MessagePart) => {
+    let m: RegExpExecArray | null
+    while ((m = regex.exec(text)) !== null) {
+      markerIntervals.push({ start: m.index, end: m.index + m[0].length, part: toPart(m) })
+    }
   }
-
-  const headerRegex = /\[\[MONITOR_RUN_HEADER:([a-f0-9-]+)\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]\]/gi
-  let hm: RegExpExecArray | null
-  while ((hm = headerRegex.exec(text)) !== null) {
-    monitorIntervals.push({
-      start: hm.index,
-      end: hm.index + hm[0].length,
-      kind: "header",
-      monitor_id: hm[1],
-      monitor_name: hm[2],
-      when: hm[3],
-      trigger_phrase: hm[4],
-      deleted: false,
-    })
-  }
-  monitorIntervals.sort((a, b) => a.start - b.start)
+  collect(/\[\[MONITOR_(CARD|DELETED):([a-f0-9-]+)\]\]/gi, (m) => ({
+    type: "monitor_card",
+    monitor_id: m[2],
+    deleted: m[1].toUpperCase() === "DELETED",
+  }))
+  collect(/\[\[MONITOR_RUN_HEADER:([a-f0-9-]+)\|([^|\]]*)\|([^|\]]*)\|([^\]]*)\]\]/gi, (m) => ({
+    type: "monitor_run_header",
+    monitor_id: m[1],
+    monitor_name: m[2] || "",
+    when: m[3] || "",
+    trigger_phrase: m[4] || "",
+  }))
+  collect(/\[\[HANDOFF_CARD:([a-f0-9-]+)\]\]/gi, (m) => ({ type: "handoff_card", handoff_id: m[1] }))
+  collect(/\[\[HANDOFF_RUN:([a-f0-9-]+)\|(\d+)\]\]/gi, (m) => ({
+    type: "handoff_run",
+    handoff_id: m[1],
+    start_seq: Number(m[2]),
+  }))
+  markerIntervals.sort((a, b) => a.start - b.start)
 
   // b64-encoded args form (current backend): args payload is `b64:<base64>` which contains only [A-Za-z0-9+/=],
   // so matching up to the closing `]]` is unambiguous. Legacy form (pre-b64) kept as fallback for old sessions.
@@ -79,27 +79,17 @@ export function parseMessage(text: string): MessagePart[] {
   let hasMatches = false
 
   const pushRangeAsText = (from: number, to: number) => {
-    // Walk the range and interleave any monitor markers; emits the final tail
+    // Walk the range and interleave any card markers; emits the final tail
     // text once (never duplicated). Also covers the no-markers case naturally.
     let cursor = from
-    for (const iv of monitorIntervals) {
+    for (const iv of markerIntervals) {
       if (iv.start < from || iv.end > to) continue
       if (iv.start > cursor) {
         const chunk = text.slice(cursor, iv.start)
         const trimmed = chunk.trim()
         if (trimmed && trimmed !== "{}") parts.push({ type: "text", content: chunk })
       }
-      if (iv.kind === "header") {
-        parts.push({
-          type: "monitor_run_header",
-          monitor_id: iv.monitor_id,
-          monitor_name: iv.monitor_name || "",
-          when: iv.when || "",
-          trigger_phrase: iv.trigger_phrase || "",
-        })
-      } else {
-        parts.push({ type: "monitor_card", monitor_id: iv.monitor_id, deleted: iv.deleted })
-      }
+      parts.push(iv.part)
       cursor = iv.end
     }
     if (cursor < to) {
@@ -174,7 +164,7 @@ export function parseMessage(text: string): MessagePart[] {
   }
 
   // If no tool calls OR monitor markers were found, keep the original text.
-  if (!hasMatches && monitorIntervals.length === 0 && parts.length === 0) {
+  if (!hasMatches && markerIntervals.length === 0 && parts.length === 0) {
     parts.push({ type: "text", content: text })
   }
 

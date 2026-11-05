@@ -9,11 +9,13 @@ Supports two authentication methods:
 2. Long-term token - User runs `claude setup-token` and pastes token (lasts ~1 year)
 """
 
+import asyncio
 import base64
 import hashlib
 import json
 import os
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -26,6 +28,27 @@ from server.utils.custom_logger import get_logger
 logger = get_logger(__name__)
 
 AuthMethod = Literal["oauth", "token", None]
+
+_refresh_lock = asyncio.Lock()
+
+
+@asynccontextmanager
+async def _credentials_file_lock():
+    """Serialize refreshes across worker processes; a rotated refresh token must never be spent twice."""
+    lock_path = Path.home() / ".claude" / ".byaan-refresh.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    with open(lock_path, "w") as handle:
+        await asyncio.to_thread(fcntl.flock, handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
 
 # Claude OAuth Configuration (same as Claude Code CLI)
 CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -365,11 +388,13 @@ async def get_active_token_with_refresh() -> str | None:
         return long_term
 
     if is_token_expired():
-        logger.info("[CLAUDE OAUTH] Token expired, attempting refresh...")
-        refreshed = await refresh_tokens()
-        if not refreshed:
-            logger.warning("[CLAUDE OAUTH] Token refresh failed")
-            return None
+        async with _refresh_lock, _credentials_file_lock():
+            if is_token_expired():
+                logger.info("[CLAUDE OAUTH] Token expired, attempting refresh...")
+                refreshed = await refresh_tokens()
+                if not refreshed:
+                    logger.warning("[CLAUDE OAUTH] Token refresh failed")
+                    return None
 
     credentials = get_credentials()
     if credentials and credentials.get("accessToken"):

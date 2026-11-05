@@ -169,3 +169,7 @@ async def create_repo_skill(
 
 def get_github_tools() -> list:
     return [get_repo_skill, list_repo_skills, search_repo_code, get_repo_file, create_repo_skill]
+
+
+def get_github_read_tools() -> list:
+    return [get_repo_skill, list_repo_skills, search_repo_code, get_repo_file]

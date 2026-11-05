@@ -236,6 +236,14 @@ mkdir -p /data/app_data/datasets
 # Set ownership for byaan user (backend runs as non-root)
 chown -R byaan:byaan /data/claude /data/app_data /data/uploads /data/backups /data/logs
 
+# Handoff workspaces: the agent user can traverse but not list them
+mkdir -p /data/handoffs
+chown byaan:byaan-handoff /data/handoffs
+chmod 2710 /data/handoffs
+
+# Keep the Claude Code agent user out of Byaan's own data (credentials, datasets, uploads, logs)
+chmod -R o-rwx /data/claude /data/app_data /data/uploads /data/backups /data/logs
+
 # ============================================
 # 4a. Symlink application paths to persistent volume
 # ============================================

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,7 @@ from server.schemas.github import (
     GitHubRepoConnect,
     GitHubRepoResponse,
 )
+from server.schemas.handoff import GitHubAppManifestRequest, HandoffRepoSettingsUpdate
 from server.schemas.standard_response import error_response, success_response
 from server.services import github_service
 from server.utils.config_loader import get_email_config, is_self_hosted
@@ -426,6 +428,9 @@ async def delete_repo(
         )
 
     was_shared = existing.scope == "org"
+    from server.services.handoff_service import cancel_for_repo
+
+    await cancel_for_repo(session, repo_id, "Stopped: the repository was disconnected from Byaan")
     deleted = await repo_repo.delete(repo_id, auth.tenant_id)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
@@ -602,3 +607,147 @@ async def get_analysis_status(
             total_files=progress.total_files if progress else None,
         ).model_dump()
     )
+
+
+async def _repo_for_handoff_settings(session: AsyncSession, auth: AuthContext, repo_id: UUID):
+    repo = await GitHubRepoRepository(session).get(repo_id, auth.tenant_id)
+    if not repo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    if not auth.is_admin and repo.user_id != auth.user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an admin or the repo owner can do this")
+    return repo
+
+
+@router.get("/github/repos/{repo_id}/handoff-settings")
+async def get_handoff_settings(
+    repo_id: UUID,
+    auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    from server.schemas.handoff import HandoffRepoConfig
+
+    repo = await GitHubRepoRepository(session).get(repo_id, auth.tenant_id)
+    if not repo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
+    return success_response(
+        data={"enabled": repo.handoff_enabled, "config": HandoffRepoConfig.from_db(repo.handoff_config).model_dump()}
+    )
+
+
+@router.put("/github/repos/{repo_id}/handoff-settings")
+async def update_handoff_settings(
+    repo_id: UUID,
+    body: HandoffRepoSettingsUpdate,
+    auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    from server.services.github_app_service import can_push, resolve_auth
+    from server.services.handoff_github import GitHubError, HandoffGitHub
+
+    repo = await _repo_for_handoff_settings(session, auth, repo_id)
+    if body.enabled and not repo.handoff_enabled:
+        if repo.source != "github":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Handoffs need a GitHub repository")
+        github_auth = await resolve_auth(
+            session,
+            tenant_id=auth.tenant_id,
+            repo_full_name=repo.repo_full_name,
+            requester_id=auth.user_id,
+            origin="notebook",
+        )
+        if not github_auth:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Connect GitHub first")
+        try:
+            push_allowed = await can_push(github_auth, HandoffGitHub(github_auth.token), repo.repo_full_name)
+        except GitHubError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        if not push_allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"The connected GitHub account can't push to {repo.repo_full_name}",
+            )
+    turned_off = repo.handoff_enabled and not body.enabled
+    repo.handoff_enabled = body.enabled
+    if body.config is not None:
+        repo.handoff_config = body.config.model_dump()
+    await session.commit()
+    if turned_off:
+        from server.services.handoff_service import cancel_for_repo
+
+        await cancel_for_repo(session, repo.id, "Handoffs were turned off for this repository")
+    return success_response(
+        data={"enabled": repo.handoff_enabled, "config": repo.handoff_config}, message="Handoff settings saved"
+    )
+
+
+@router.post("/github/repos/{repo_id}/handoff-test")
+async def test_handoff_setup(
+    repo_id: UUID,
+    auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    from server.services.handoff_runner import test_setup
+
+    repo = await _repo_for_handoff_settings(session, auth, repo_id)
+    return success_response(data=await test_setup(session, repo, auth.user_id))
+
+
+@router.get("/github/app")
+async def github_app_status(
+    auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    from server.services.github_app_service import app_status
+
+    return success_response(data=await app_status(auth.tenant_id, session))
+
+
+@router.post("/github/app/manifest")
+async def github_app_manifest(
+    request: Request,
+    body: GitHubAppManifestRequest,
+    auth: AuthContext = Depends(require_scope(Scope.SETTINGS_UPDATE)),
+):
+    from server.services.github_app_service import manifest_for, sign_state
+
+    if not auth.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    base_url = (github_service._get_frontend_url() or str(request.base_url)).rstrip("/")
+    name = body.name or f"byaan-{str(auth.tenant_id)[:8]}"
+    state = sign_state(auth.tenant_id, auth.user_id)
+    owner = f"organizations/{body.organization}/" if body.organization else ""
+    return success_response(
+        data={
+            "post_url": f"https://github.com/{owner}settings/apps/new?state={state}",
+            "manifest": manifest_for(name, base_url),
+        }
+    )
+
+
+@router.get("/github/app/callback")
+async def github_app_callback(code: str, state: str, session: AsyncSession = Depends(get_async_session)):
+    from server.services.github_app_service import GitHubAppError, convert_manifest, save_app, verify_state
+
+    frontend_url = github_service._frontend_url or get_email_config().get("frontend_url", "")
+    try:
+        tenant_id, user_id = verify_state(state)
+        set_tenant_id(tenant_id)
+        data = await convert_manifest(code)
+        await save_app(tenant_id, user_id, data, session)
+    except (GitHubAppError, httpx.HTTPError) as exc:
+        logger.error(f"[GITHUB] App creation failed: {exc}")
+        return RedirectResponse(url=f"{frontend_url}/github?github_app_error={quote(str(exc))}")
+    return RedirectResponse(url=f"{data['html_url']}/installations/new")
+
+
+@router.delete("/github/app")
+async def delete_github_app(
+    auth: AuthContext = Depends(require_scope(Scope.SETTINGS_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    from server.services.github_app_service import delete_app
+
+    if not auth.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
+    await delete_app(auth.tenant_id, session)
+    return success_response(message="GitHub App disconnected from Byaan")

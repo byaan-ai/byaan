@@ -64,6 +64,7 @@ from server.routers import (
 )  # File upload with DB storage
 from server.routers import folders as folders_router
 from server.routers import github as github_router
+from server.routers import handoffs as handoffs_router
 from server.routers import imports as imports_router
 from server.routers import learnings as learnings_router
 from server.routers import llm_connections, unified_agent
@@ -87,10 +88,12 @@ from server.schemas.standard_response import error_response, success_response
 from server.services.conversation_evaluation_service import skill_loop_service
 from server.services.credit_sync_service import credit_sync_service
 from server.services.dashboard_refresh_service import dashboard_refresh_service
+from server.services.handoff_runner import handoff_runner
 from server.services.posthog_service import PostHogService
 from server.services.schedule_runner_service import schedule_runner_service
 from server.utils.config_loader import get_skill_loop_config, is_community_mode, is_self_hosted
 from server.utils.custom_logger import configure_log_redaction, get_logger
+from server.utils.deployment import is_feature_enabled
 
 logging.basicConfig(
     level=logging.INFO,
@@ -193,6 +196,9 @@ async def app_lifespan(app: FastAPI):
         await schedule_runner_service.start()
         logger.info(f"⏰ Schedule runner service started: {time.perf_counter() - start:.3f}s")
 
+        if is_feature_enabled("handoffs_enabled"):
+            await handoff_runner.start()
+
         if get_skill_loop_config()["enabled"]:
             start = time.perf_counter()
             await skill_loop_service.start()
@@ -250,6 +256,8 @@ async def shutdown_event():
 
         # Stop schedule runner service
         await schedule_runner_service.stop()
+
+        await handoff_runner.stop()
 
         # Stop skill loop service
         await skill_loop_service.stop()
@@ -644,6 +652,8 @@ app.include_router(scopes_router.router, prefix="/api", tags=["scopes"])
 app.include_router(cache_router.router, prefix="/api", tags=["cache"])
 
 app.include_router(schedules_router.router, prefix="/api", tags=["schedules"])
+
+app.include_router(handoffs_router.router, prefix="/api", tags=["handoffs"])
 
 
 @app.get("/health")

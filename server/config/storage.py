@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import platform
 import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
@@ -86,3 +87,16 @@ def dataset_directory(dataset_id: str) -> Path:
     (base / "raw").mkdir(parents=True, exist_ok=True)
     (base / "duckdb").mkdir(parents=True, exist_ok=True)
     return base
+
+
+@lru_cache(maxsize=1)
+def handoffs_root() -> Path:
+    """Per-handoff workspaces; outside the frozen app they live in the temp dir so dev hot-reload never sees the clones."""
+    default = (
+        DEFAULT_DATA_DIR / "handoffs"
+        if getattr(sys, "frozen", False)
+        else Path(tempfile.gettempdir()) / "byaan-handoffs"
+    )
+    path = _resolve_path(os.getenv("HANDOFFS_STORAGE_DIR"), default)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
