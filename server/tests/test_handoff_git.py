@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import secrets
+import string
 import subprocess
 from pathlib import Path
 from uuid import uuid4
@@ -92,13 +94,17 @@ def test_path_policy():
     assert disallowed_paths([".github/workflows/ci.yml"], HandoffPaths()) == [".github/workflows/ci.yml"]
 
 
+def _fake_aws_key() -> str:
+    return "AKIA" + "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(16))
+
+
 def test_secret_scan_reports_path_and_line():
     diff = (
         "diff --git a/app/c.py b/app/c.py\n"
         "+++ b/app/c.py\n"
         "@@ -0,0 +3,2 @@\n"
         "+x = compute(total)\n"
-        '+aws = "AKIAIOSFODNN7EXAMPLE"\n'
+        f'+aws = "{_fake_aws_key()}"\n'
     )
     findings = scan_added_lines(diff)
     assert [(f.path, f.line, f.kind) for f in findings] == [("app/c.py", 4, "AWS Access Key")]
@@ -167,9 +173,9 @@ def test_failing_step_output_keeps_the_whole_failing_step():
         ('os.environ["TWILIO_AUTH_TOKEN"] = "test-token"', False),
         ('password = "changeme"', False),
         ('api_key = "<your-api-key>"', False),
-        ('api_key = "sk-live-9fK2xQ7pLmN4vR8tZ1wY"', True),
-        ('aws = "AKIAIOSFODNN7EXAMPLE"', True),
-        ('token = "ghp_' + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8" + '"', True),
+        (f'api_key = "sk-live-{secrets.token_hex(12)}"', True),
+        (f'aws = "{_fake_aws_key()}"', True),
+        (f'token = "ghp_{secrets.token_hex(18)}"', True),
     ],
 )
 def test_secret_scan_ignores_placeholders_but_blocks_real_secrets(line, blocked):

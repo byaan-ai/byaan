@@ -110,6 +110,19 @@ async def _auth_for(session: AsyncSession, handoff: Handoff) -> HandoffGitHubAut
     )
 
 
+_SELF_REVIEW = (
+    "Before calling submit_result, carefully review every change you made:\n"
+    "- Read your full diff as a strict code reviewer would.\n"
+    "- Make sure none of your changes break existing behaviour: check every caller, import and usage of "
+    "anything you modified, renamed or removed.\n"
+    "- Make sure your new code is correct, handles edge cases and matches the repository's existing style.\n"
+    "- Remove debugging leftovers and any edit that is not needed for this task.\n"
+    "- Fix any problem you find before calling submit_result, and mention remaining risks under risks. "
+    "Don't mention missing local dependencies or tests not being run locally anywhere in submit_result; "
+    "CI runs the tests."
+)
+
+
 class _Hooks:
     def __init__(self, handoff_id: UUID, work_dir: Path, in_prompt: frozenset[UUID] = frozenset()):
         self.handoff_id = handoff_id
@@ -533,8 +546,7 @@ class HandoffRunner:
         ).all()
         skill_text = "\n\n".join(f"### {name}\n{text[:6000]}" for name, text in skills)[:15000]
         repo_rules = handoff_git.read_repo_instructions(workspace.repo)
-        sections = [
-            "This session is a Byaan handoff: fix one specific problem in this repository and nothing else.",
+        rules = (
             "Rules:\n"
             f"- You may only change files matching: {allow}. Never change: {deny}.\n"
             "- Never edit CI configuration or weaken tests to make checks pass.\n"
@@ -544,16 +556,12 @@ class HandoffRunner:
             "the repository's CI runs the tests. Only run checks that work with what is already installed.\n"
             "- Never put secrets, credentials or row-level data (names, records, identifiers) in code, tests or text.\n"
             "- Call report_progress after meaningful milestones, ask_human only when truly blocked, "
-            "and submit_result when you are done.",
-            "Before calling submit_result, carefully review every change you made:\n"
-            "- Read your full diff as a strict code reviewer would.\n"
-            "- Make sure none of your changes break existing behaviour: check every caller, import and usage of "
-            "anything you modified, renamed or removed.\n"
-            "- Make sure your new code is correct, handles edge cases and matches the repository's existing style.\n"
-            "- Remove debugging leftovers and any edit that is not needed for this task.\n"
-            "- Fix any problem you find before calling submit_result, and mention remaining risks under risks. "
-            "Don't mention missing local dependencies or tests not being run locally anywhere in submit_result; "
-            "CI runs the tests.",
+            "and submit_result when you are done."
+        )
+        sections = [
+            "This session is a Byaan handoff: fix one specific problem in this repository and nothing else.",
+            rules,
+            _SELF_REVIEW,
             f"Repository: {handoff.repo_full_name}, base branch {handoff.base_branch}.",
         ]
         if repo_rules:
