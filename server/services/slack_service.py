@@ -3,6 +3,7 @@
 import re
 import time
 
+import httpx
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
@@ -55,6 +56,48 @@ class SlackService:
 
     def __init__(self, bot_token: str):
         self.client = AsyncWebClient(token=bot_token)
+        self._bot_token = bot_token
+
+    async def download_file_bytes(self, url_private: str, max_bytes: int = 10 * 1024 * 1024) -> bytes | None:
+        """Download a Slack-hosted file via its ``url_private`` using the bot token.
+
+        Requires ``files:read`` scope. Returns bytes on success, ``None`` on any
+        failure (missing scope, 404, oversize, timeout). Streams and enforces
+        ``max_bytes`` without buffering the full body if the server lies about
+        Content-Length.
+        """
+        if not url_private:
+            return None
+        headers = {"Authorization": f"Bearer {self._bot_token}"}
+        try:
+            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as http:
+                async with http.stream("GET", url_private, headers=headers) as response:
+                    if response.status_code != 200:
+                        logger.warning(
+                            f"Slack file download failed: status={response.status_code} url={url_private[:80]}"
+                        )
+                        return None
+                    content_type = (response.headers.get("content-type") or "").lower()
+                    if "text/html" in content_type:
+                        logger.warning(
+                            "Slack file download returned HTML — likely missing files:read scope or auth failure"
+                        )
+                        return None
+                    buf = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        buf.extend(chunk)
+                        if len(buf) > max_bytes:
+                            logger.warning(
+                                f"Slack file exceeded max_bytes={max_bytes}; aborting download url={url_private[:80]}"
+                            )
+                            return None
+                    return bytes(buf)
+        except httpx.TimeoutException:
+            logger.warning(f"Slack file download timed out url={url_private[:80]}")
+            return None
+        except Exception as e:
+            logger.warning(f"Slack file download unexpected error: {e}")
+            return None
 
     async def post_message(
         self,
