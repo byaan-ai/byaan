@@ -28,7 +28,7 @@ from server.services.crypto_service import CryptoService
 from server.services.query_service import QueryService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
 from server.services.slack_service import SlackService
-from server.services.unified_agent import stream_handoff_agent_response
+from server.services.unified_agent import _load_github_repos_for_agent, stream_handoff_agent_response
 from server.utils.custom_logger import get_logger
 from server.utils.slack_formatter import markdown_to_slack_blocks
 from server.utils.slack_table_parser import SlackTableParser
@@ -165,6 +165,7 @@ class ScheduleService:
         current_datetime = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         last_findings_block = await ScheduleService._format_last_findings(session, schedule)
+        handoff_step = await ScheduleService._handoff_step(session, schedule)
 
         scheduled_run_prompt = f"""## SCHEDULED MONITOR RUN
 
@@ -185,7 +186,7 @@ Date handling:
 - "this week" = start of current week to today
 - "last month" = previous calendar month
 - "past 30 days" = last 30 days
-
+{handoff_step}
 When you are done, call ``record_monitor_findings`` exactly once:
 - ``outcome='alert'`` when something in the instruction's alert criteria matches.
 - ``outcome='no_change'`` when the data looks the same as the previous run.
@@ -489,6 +490,21 @@ in the final text.
                 "metadata_": {"source": "monitor_run_summary"},
             }
         )
+
+    @staticmethod
+    async def _handoff_step(session: AsyncSession, schedule: Schedule) -> str:
+        from server.utils.deployment import is_feature_enabled
+
+        if not is_feature_enabled("handoffs_enabled"):
+            return ""
+        repos = await _load_github_repos_for_agent(schedule.tenant_id, schedule.created_by, session)
+        if not any(data.get("handoff_enabled") for data in repos.values()):
+            return ""
+        return """
+If this run traces a problem to code in a connected repository with handoffs ON, read the file to confirm the
+bug, then call ``propose_handoff`` (cite file:line, give a check that fails today) before
+``record_monitor_findings``. A person must click Start. Skip this for data-only problems or guesses.
+"""
 
     @staticmethod
     async def _format_last_findings(session: AsyncSession, schedule: Schedule) -> str:

@@ -148,9 +148,9 @@ async def propose_handoff(
 ) -> str:
     """Draft a code-fix handoff to Claude Code and show a card with a Start button. Never starts work by itself.
 
-    Use when someone asks to hand a code bug to Claude Code, or when you traced a bug to code.
-    Put references only in the brief (query ids, row counts, schema names, file:line). Never include
-    row-level data such as names, records or identifiers.
+    Use when someone asks for a code change, or on your own when you confirmed a concrete bug by reading the file in a
+    repository with handoffs on. Put references only in the brief (query ids, row counts, schema names, file:line).
+    Never include row-level data such as names, records or identifiers.
 
     One task per conversation and repository: if this conversation already has a handoff for the same
     repository, the draft revises that handoff (same branch, pull request and Claude Code session) instead of
@@ -164,8 +164,8 @@ async def propose_handoff(
         acceptance_check: A check that fails today and passes after the fix.
         evidence: Supporting references, e.g. "query q-12 returns 0 reminders for 214 patients".
         suspected_files: Likely locations, ideally "path/to/file.py:88".
-        repo: Repository full name (owner/name). Required when several repositories have handoffs on and neither
-            the person, the channel nor the code you read points to one; ask the person instead of guessing.
+        repo: Repository full name (owner/name) whose code you read. Required unless handoff_id is set. When the
+            person's request points to no repository and several have handoffs on, ask the person instead of guessing.
         new_task: True only when this is a different task from the conversation's existing handoff.
         handoff_id: The handoff to revise when the conversation has more than one for the same repository.
     """
@@ -184,6 +184,8 @@ async def propose_handoff(
     except ValidationError as exc:
         return _err(f"Invalid brief: {exc.errors()[0]['msg']}", code="invalid_brief")
 
+    if not repo and not handoff_id:
+        return _err("Set repo to the repository whose code you read.", code="needs_repo")
     revise_id = None
     if handoff_id and schedule_id:
         return _err("Scheduled runs can only propose new handoffs.", code="read_only")
@@ -203,7 +205,6 @@ async def propose_handoff(
                 title=title,
                 brief=brief,
                 repo_hint=repo,
-                channel_id=slack_ctx.channel_id if slack_ctx else None,
                 slack_conversation_id=await _slack_conversation_id(session),
                 notebook_id=_uuid(context.get("notebook_id")),
                 schedule_id=schedule_id,

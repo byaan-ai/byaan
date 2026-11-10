@@ -44,7 +44,6 @@ async def ctx(test_session):
         repo_full_name="acme/care-backend",
         default_branch="main",
         handoff_enabled=True,
-        handoff_config={"default_channels": ["C-OPS"], "allow_proposals": True},
     )
     web = GitHubRepository(
         tenant_id=tid, user_id=uid, repo_full_name="acme/care-web", default_branch="main", handoff_enabled=True
@@ -68,11 +67,11 @@ BRIEF = HandoffBrief(
 
 async def test_repo_resolution_order(test_session, ctx):
     resolve = handoff_service.resolve_repo
-    assert (await resolve(test_session, ctx.tenant, repo_hint="care-web", channel_id="C-OPS"))[0].id == ctx.web.id
-    assert (await resolve(test_session, ctx.tenant, repo_hint=None, channel_id="C-OPS"))[0].id == ctx.api.id
-    repo, candidates = await resolve(test_session, ctx.tenant, repo_hint=None, channel_id="C-OTHER")
+    assert (await resolve(test_session, ctx.tenant, repo_hint="care-web"))[0].id == ctx.web.id
+    assert (await resolve(test_session, ctx.tenant, repo_hint="other/care-web"))[0] is None
+    repo, candidates = await resolve(test_session, ctx.tenant, repo_hint=None)
     assert repo is None and {c.id for c in candidates} == {ctx.api.id, ctx.web.id}
-    assert (await resolve(test_session, ctx.tenant, repo_hint="acme/off", channel_id=None))[0] is None
+    assert (await resolve(test_session, ctx.tenant, repo_hint="acme/off"))[0] is None
 
 
 async def test_propose_supersedes_open_proposal_in_same_notebook(test_session, ctx):
@@ -140,19 +139,6 @@ async def test_monitor_proposal_rules_and_dedupe(test_session, ctx):
             title="Fix tz again",
             brief=BRIEF,
             repo_hint="care-backend",
-            schedule_id=schedule.id,
-            notebook_id=notebook.id,
-        )
-
-    with pytest.raises(HandoffError, match="does not allow"):
-        await handoff_service.propose(
-            test_session,
-            tenant_id=ctx.tenant,
-            requested_by=None,
-            origin="notebook",
-            title="web",
-            brief=BRIEF,
-            repo_hint="care-web",
             schedule_id=schedule.id,
             notebook_id=notebook.id,
         )
@@ -304,7 +290,8 @@ def test_card_buttons_follow_status(status, fields, expected):
 def test_handoff_tools_registered_in_both_modes(monkeypatch):
     from server.services.unified_agent import _build_agent_tools
 
-    names = {t.name for t in _build_agent_tools([{"db_type": "postgres"}])}
+    assert "propose_handoff" not in {t.name for t in _build_agent_tools([{"db_type": "postgres"}])}
+    names = {t.name for t in _build_agent_tools([{"db_type": "postgres"}], has_handoff_repos=True)}
     assert {
         "propose_handoff",
         "get_handoff_status",
@@ -320,7 +307,10 @@ def test_handoff_tools_registered_in_both_modes(monkeypatch):
     allowed = {
         t.name
         for t in _build_agent_tools(
-            [{"db_type": "postgres"}], scheduled_run=True, has_github_repos=True, handoff_proposals=True
+            [{"db_type": "postgres"}],
+            scheduled_run=True,
+            has_github_repos=True,
+            has_handoff_repos=True,
         )
     }
     assert {"propose_handoff", "get_repo_file"} <= allowed
@@ -872,7 +862,7 @@ async def test_scheduled_proposals_leave_the_card_to_byaan(test_session, nb_ctx,
     if scheduled:
         context |= {"scheduled_run": True, "schedule_id": str(uuid4())}
 
-    result = json.loads(await propose(SimpleNamespace(context=context), "Fix", "Problem", "Check"))
+    result = json.loads(await propose(SimpleNamespace(context=context), "Fix", "Problem", "Check", repo="acme/app"))
     assert ("card" in result) is not scheduled
     if scheduled:
         assert "Byaan posts its card" in result["note"]

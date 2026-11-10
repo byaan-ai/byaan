@@ -53,7 +53,6 @@ HANDOFF_WORKING_STATUS = "is working…"
 INDICATOR_STATUSES = tuple(s for s in ACTIVE_STATUSES if s != "waiting_on_human")
 
 _REPLY_STATUSES = {"running", "ci_running", "fixing", "done", "failed", "ci_failed", "cancelled", "taken_over"}
-_MIRROR_STATUSES = {"running", "ci_running", "done", "failed", "ci_failed"}
 
 
 async def notify_event(handoff_id: UUID, seq: int) -> None:
@@ -234,23 +233,6 @@ async def _deliver_slack(
         await post_slack_with_fallback(client, channel=channel, text=reply, blocks=blocks, thread_ts=thread_ts)
 
     await sync_thread_indicator(session, client, conversation)
-
-    status = (event.data or {}).get("status")
-    if config.mirror_channel and event.kind == "status" and status in _MIRROR_STATUSES and reply:
-        await _mirror(client, config.mirror_channel, channel, thread_ts, handoff, reply)
-
-
-async def _mirror(
-    client: Any, mirror_channel: str, channel: str, thread_ts: str | None, handoff: Handoff, reply: str
-) -> None:
-    try:
-        permalink = await client.get_permalink(channel, thread_ts) if thread_ts else None
-        link = f" (<{permalink}|thread>)" if permalink else ""
-        await post_slack_with_fallback(
-            client, channel=mirror_channel, text=f"*{handoff.title}*{link}\n{reply}", blocks=None, thread_ts=None
-        )
-    except Exception as exc:
-        logger.warning(f"[HANDOFF] Mirror post to {mirror_channel} failed for {handoff.id}: {exc}")
 
 
 async def _deliver_notebook(session: AsyncSession, handoff: Handoff, event: HandoffEvent, reply: str | None) -> None:

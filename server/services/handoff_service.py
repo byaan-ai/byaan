@@ -120,19 +120,14 @@ async def resolve_repo(
     tenant_id: UUID,
     *,
     repo_hint: str | None,
-    channel_id: str | None,
 ) -> tuple[GitHubRepository | None, list[GitHubRepository]]:
     candidates = await enabled_repos(session, tenant_id)
     if repo_hint:
         hint = repo_hint.strip().lower().removeprefix("https://github.com/").rstrip("/")
         exact = [r for r in candidates if r.repo_full_name.lower() == hint or str(r.id) == hint]
-        if not exact:
+        if not exact and "/" not in hint:
             exact = [r for r in candidates if r.repo_full_name.lower().split("/")[-1] == hint.split("/")[-1]]
         return (exact[0] if len(exact) == 1 else None), candidates
-    if channel_id:
-        mapped = [r for r in candidates if channel_id in repo_config(r).default_channels]
-        if len(mapped) == 1:
-            return mapped[0], candidates
     if len(candidates) == 1:
         return candidates[0], candidates
     return None, candidates
@@ -161,7 +156,6 @@ async def propose(
     title: str,
     brief: HandoffBrief,
     repo_hint: str | None = None,
-    channel_id: str | None = None,
     slack_conversation_id: UUID | None = None,
     notebook_id: UUID | None = None,
     schedule_id: UUID | None = None,
@@ -179,12 +173,13 @@ async def propose(
         target = await get_for_tenant(session, tenant_id, revise_handoff_id)
         if target.status in ("dismissed", "taken_over"):
             raise HandoffError(f"That handoff is {target.status.replace('_', ' ')}; draft a new task instead.")
+        await _require_handoffs_on(session, target)
         outcome = await _revise_task(session, target, title, brief, actor)
         if outcome is not None:
             return outcome
         repo_hint = target.repo_full_name
 
-    repo, candidates = await resolve_repo(session, tenant_id, repo_hint=repo_hint, channel_id=channel_id)
+    repo, candidates = await resolve_repo(session, tenant_id, repo_hint=repo_hint)
     if not candidates:
         raise HandoffError("No repository has handoffs turned on. Enable one in Settings → GitHub → Handoffs.")
     if repo is None:
@@ -192,8 +187,6 @@ async def propose(
 
     fingerprint = None
     if proposed_by_byaan or schedule_id:
-        if not repo_config(repo).allow_proposals:
-            raise HandoffError(f"{repo.repo_full_name} does not allow Byaan to propose handoffs.")
         validate_proposal_evidence(brief)
     if schedule_id:
         fingerprint = fingerprint_for(repo.repo_full_name, brief.suspected_files, brief.problem)
@@ -293,13 +286,17 @@ async def _revise_task(
     return None
 
 
-async def start(session: AsyncSession, tenant_id: UUID, handoff_id: UUID, actor: Actor) -> Handoff:
-    handoff = await get_for_tenant(session, tenant_id, handoff_id)
+async def _require_handoffs_on(session: AsyncSession, handoff: Handoff) -> None:
     if not handoff.github_repository_id:
-        raise HandoffError("Pick a repository before starting.")
+        raise HandoffError("This repository was disconnected from Byaan.")
     repo = await session.get(GitHubRepository, handoff.github_repository_id)
     if not repo or not repo.handoff_enabled:
         raise HandoffError("Handoffs are turned off for this repository.")
+
+
+async def start(session: AsyncSession, tenant_id: UUID, handoff_id: UUID, actor: Actor) -> Handoff:
+    handoff = await get_for_tenant(session, tenant_id, handoff_id)
+    await _require_handoffs_on(session, handoff)
     fields: dict[str, Any] = {}
     if actor.user_id and (handoff.requested_by is None or handoff.schedule_id):
         fields["requested_by"] = actor.user_id
@@ -395,6 +392,7 @@ async def restart_with_outcome(
     handoff = await get_for_tenant(session, tenant_id, handoff_id)
     if handoff.status not in RESTARTABLE_STATUSES:
         raise HandoffError("Only a finished, failed or stopped handoff can be re-started.")
+    await _require_handoffs_on(session, handoff)
     inbox = HandoffMessageRepository(session)
     revision = await pending_revision(session, handoff.id)
     if revision:
@@ -477,6 +475,7 @@ async def add_message(session: AsyncSession, tenant_id: UUID, handoff_id: UUID, 
         return "queued_after_ci"
 
     if handoff.status in RESTARTABLE_STATUSES:
+        await _require_handoffs_on(session, handoff)
         pending = await inbox.pending(handoff.id, "revision")
         if pending:
             text = f"{pending[-1].body}\n\nAdditional request: {text}"
@@ -652,11 +651,6 @@ async def send_review_feedback(session: AsyncSession, tenant_id: UUID, handoff_i
         "Address this reviewer feedback on the pull request:\n" + "\n".join(lines),
         actor,
     )
-
-
-async def proposals_allowed(session: AsyncSession, tenant_id: Any) -> bool:
-    tenant_uuid = tenant_id if isinstance(tenant_id, UUID) else UUID(str(tenant_id))
-    return any(repo_config(repo).allow_proposals for repo in await enabled_repos(session, tenant_uuid))
 
 
 _WORKSPACE_PREFIX = re.compile(r"^.*?/work/")

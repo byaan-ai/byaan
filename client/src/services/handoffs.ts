@@ -104,9 +104,6 @@ export interface HandoffPaths {
 export interface HandoffRepoConfig {
   paths: HandoffPaths
   minutes: number
-  default_channels: string[]
-  mirror_channel: string | null
-  allow_proposals: boolean
 }
 
 export interface HandoffRepoSettings {
@@ -163,7 +160,7 @@ export const HandoffsApi = {
     request<{ outcome: string }>(`/handoffs/${id}/messages`, { method: 'POST', body: JSON.stringify({ text }) }),
   requirements: () => request<HandoffRequirements>('/handoffs/requirements'),
   repoSettings: (repoId: string) => request<HandoffRepoSettings>(`/github/repos/${repoId}/handoff-settings`),
-  saveRepoSettings: (repoId: string, settings: HandoffRepoSettings) =>
+  saveRepoSettings: (repoId: string, settings: { enabled: boolean; config?: HandoffRepoSettings['config'] }) =>
     request<HandoffRepoSettings>(`/github/repos/${repoId}/handoff-settings`, {
       method: 'PUT',
       body: JSON.stringify(settings),

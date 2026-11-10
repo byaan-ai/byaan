@@ -45,9 +45,6 @@ class HandoffPaths(BaseModel):
 class HandoffRepoConfig(BaseModel):
     paths: HandoffPaths = Field(default_factory=HandoffPaths)
     minutes: int = Field(default=DEFAULT_MINUTES, ge=5, le=MAX_MINUTES)
-    default_channels: list[str] = Field(default_factory=list, max_length=50)
-    mirror_channel: str | None = Field(default=None, max_length=50)
-    allow_proposals: bool = False
 
     @classmethod
     def from_db(cls, raw: dict[str, Any] | None) -> HandoffRepoConfig:

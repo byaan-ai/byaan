@@ -74,9 +74,19 @@ async def search_repo_code(ctx: RunContextWrapper, repo_id: str, query: str) -> 
     )
 
 
+def number_lines(content: str) -> str:
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(f"{number}\t{line}" for number, line in enumerate(lines, start=1))
+
+
 @function_tool
 async def get_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) -> str:
     """Fetch a file's content from a connected GitHub repository via the GitHub API.
+
+    Each line starts with its line number and a tab. Cite these numbers as file:line, and leave them out when
+    quoting code.
 
     Args:
         repo_id: The repository ID
@@ -100,7 +110,7 @@ async def get_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) -> str:
     if content is None:
         return json.dumps({"error": f"File not found or too large: {path}"})
 
-    return json.dumps({"path": path, "content": content})
+    return json.dumps({"path": path, "content": number_lines(content)})
 
 
 @function_tool

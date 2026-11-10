@@ -30,7 +30,7 @@ from server.schemas.github import (
     GitHubRepoConnect,
     GitHubRepoResponse,
 )
-from server.schemas.handoff import GitHubAppManifestRequest, HandoffRepoSettingsUpdate
+from server.schemas.handoff import GitHubAppManifestRequest, HandoffRepoConfig, HandoffRepoSettingsUpdate
 from server.schemas.standard_response import error_response, success_response
 from server.services import github_service
 from server.utils.config_loader import get_email_config, is_self_hosted
@@ -624,8 +624,6 @@ async def get_handoff_settings(
     auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
     session: AsyncSession = Depends(get_async_session),
 ):
-    from server.schemas.handoff import HandoffRepoConfig
-
     repo = await GitHubRepoRepository(session).get(repo_id, auth.tenant_id)
     if not repo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Repository not found")
@@ -676,7 +674,8 @@ async def update_handoff_settings(
 
         await cancel_for_repo(session, repo.id, "Handoffs were turned off for this repository")
     return success_response(
-        data={"enabled": repo.handoff_enabled, "config": repo.handoff_config}, message="Handoff settings saved"
+        data={"enabled": repo.handoff_enabled, "config": HandoffRepoConfig.from_db(repo.handoff_config).model_dump()},
+        message="Handoff settings saved",
     )
 
 
