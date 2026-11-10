@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import random
 import re
@@ -54,7 +55,19 @@ from server.utils.slack_thread_lock import acquire_thread_lock
 logger = get_logger(__name__)
 
 
-_ASSISTANT_CAPABILITY_CACHE: dict[UUID, bool] = {}
+_ASSISTANT_CAPABILITY_CACHE: dict[UUID, tuple[bool, float]] = {}
+_ASSISTANT_CAPABILITY_NEGATIVE_TTL_SECONDS = 300.0
+
+SUPPORTED_IMAGE_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+MAX_IMAGE_ATTACHMENTS = 5
+DEFAULT_IMAGE_ONLY_PROMPT = "Analyze the attached image(s) and help me understand what you see."
+UNSUPPORTED_FILES_ONLY_PROMPT = (
+    "The user attached one or more files that are not supported image types "
+    "(Byaan can only read image/png, image/jpeg, image/webp in Slack). "
+    "Explain the limitation briefly and offer to help if they describe the content "
+    "or share supported image types."
+)
 
 
 class SlackAgentService:
@@ -64,8 +77,8 @@ class SlackAgentService:
         "On it — fetching what you need 🔎",
         "Got your request — digging in now 📊",
         "Checking your data now — results in a moment ⚡",
-        "Working on it — results coming shortly 📊",
-        "Working on it — give me a moment to dig in 🔍",
+        "Running your request — results shortly 🚀",
+        "Looking into this — hang tight ⏳",
         "On it! Results coming shortly ✨",
         "On it — pulling your data 📥",
         "Got it — crunching now 🧮",
@@ -132,15 +145,35 @@ class SlackAgentService:
         thread_ts: str,
     ) -> bool:
         """
-        Workspace-scoped probe for Slack AI Assistant capability. Caches the
-        result per worker so later calls skip the probe. Fail-open fallback:
-        any error means Assistant is treated as disabled for this workspace.
+        Workspace-scoped probe for Slack AI Assistant capability.
+
+        Positive results (``True``) are cached permanently per worker — once a
+        workspace is proven capable, we never re-probe. Negative results are
+        cached only briefly (``_ASSISTANT_CAPABILITY_NEGATIVE_TTL_SECONDS``) so
+        a single transient Slack API failure (5xx, rate limit, race on a
+        just-created thread) does not permanently disable the indicator for
+        every subsequent message on this worker.
         """
+        import time as _time
+
         cached = _ASSISTANT_CAPABILITY_CACHE.get(workspace.id)
         if cached is not None:
-            return cached
+            value, expires_at = cached
+            if value or expires_at > _time.monotonic():
+                return value
+
         ok = await slack_client.set_assistant_status(channel=channel_id, thread_ts=thread_ts, status="")
-        _ASSISTANT_CAPABILITY_CACHE[workspace.id] = ok
+        if ok:
+            _ASSISTANT_CAPABILITY_CACHE[workspace.id] = (True, float("inf"))
+        else:
+            logger.info(
+                f"Assistant capability probe failed for workspace {workspace.id}; "
+                f"caching negative for {_ASSISTANT_CAPABILITY_NEGATIVE_TTL_SECONDS}s"
+            )
+            _ASSISTANT_CAPABILITY_CACHE[workspace.id] = (
+                False,
+                _time.monotonic() + _ASSISTANT_CAPABILITY_NEGATIVE_TTL_SECONDS,
+            )
         return ok
 
     @staticmethod
@@ -226,6 +259,7 @@ class SlackAgentService:
         event_ts: str,
         event_id: str,
         session: AsyncSession,
+        files: list[dict] | None = None,
     ) -> None:
         """Process a Slack @mention event."""
         event_log = SlackEventLog(
@@ -263,20 +297,33 @@ class SlackAgentService:
                         name=SlackAgentService._pick_reaction_emoji(for_ack=False),
                     )
                 )
-            else:
-                ack_text = await SlackAgentService._pick_ack_message(
-                    workspace=workspace,
-                    channel_id=channel_id,
-                    thread_ts=thread_ts or event_ts,
-                    session=session,
-                )
-                await slack_client.post_message(
+
+            ack_text = await SlackAgentService._pick_ack_message(
+                workspace=workspace,
+                channel_id=channel_id,
+                thread_ts=thread_ts or event_ts,
+                session=session,
+            )
+            asyncio.create_task(
+                slack_client.post_message(
                     channel=channel_id,
                     text=ack_text,
                     thread_ts=thread_ts or event_ts,
                 )
+            )
 
             question = SlackAgentService._extract_question(text, workspace.bot_user_id)
+
+            attachments = await SlackAgentService._build_attachments_from_slack_files(
+                slack_client=slack_client,
+                files=files,
+            )
+
+            if not question:
+                if attachments:
+                    question = DEFAULT_IMAGE_ONLY_PROMPT
+                elif files:
+                    question = UNSUPPORTED_FILES_ONLY_PROMPT
 
             conversation = await SlackAgentService._get_or_create_conversation(
                 workspace=workspace,
@@ -289,7 +336,10 @@ class SlackAgentService:
 
             llm_connection_id = workspace.default_llm_connection_id
             resolved_model = await SlackAgentService._resolve_model_for_workspace(workspace, session)
-            logger.info(f"[SLACK] Using model for connection {llm_connection_id}: {resolved_model}")
+            logger.info(
+                f"[SLACK] Using model for connection {llm_connection_id}: {resolved_model} "
+                f"(attachments={len(attachments)})"
+            )
 
             user_tz = await slack_client.get_user_timezone(user_id, workspace_id=str(workspace.id))
             byaan_user_id = await SlackAgentService._resolve_byaan_user_id(
@@ -311,6 +361,7 @@ class SlackAgentService:
                 llm_connection_id=llm_connection_id,
                 create_notebook=conversation.notebook_id is None,
                 model=resolved_model,
+                attachments=attachments or None,
             )
 
             slack_run_ctx = SlackContext(
@@ -469,6 +520,71 @@ class SlackAgentService:
             text = re.sub(pattern, "", text)
         text = re.sub(r"<@\w+>", "", text)
         return text.strip()
+
+    @staticmethod
+    async def _build_attachments_from_slack_files(
+        slack_client: SlackService,
+        files: list[dict] | None,
+    ) -> list[dict[str, str]]:
+        """Convert Slack file payloads to AgentRequest attachment dicts.
+
+        Images only. Mirrors the web app's accepted mime types
+        (``image/png``, ``image/jpeg``, ``image/webp``). Silently skips any file
+        that is the wrong type, too big, or fails to download. Caps the number
+        of attachments at ``MAX_IMAGE_ATTACHMENTS`` to protect LLM context.
+        """
+        if not files:
+            return []
+
+        attachments: list[dict[str, str]] = []
+        skipped_unsupported = 0
+        skipped_download_failed = 0
+
+        for raw_file in files:
+            if not isinstance(raw_file, dict):
+                continue
+            if len(attachments) >= MAX_IMAGE_ATTACHMENTS:
+                logger.info(
+                    f"Slack attachment cap reached ({MAX_IMAGE_ATTACHMENTS}); "
+                    f"ignoring remaining {len(files) - len(attachments)} file(s)"
+                )
+                break
+
+            mime_type = (raw_file.get("mimetype") or "").lower()
+            if mime_type not in SUPPORTED_IMAGE_MIME_TYPES:
+                skipped_unsupported += 1
+                continue
+
+            size = raw_file.get("size")
+            if isinstance(size, int) and size > MAX_IMAGE_BYTES:
+                logger.info(
+                    f"Slack image '{raw_file.get('name')}' exceeds {MAX_IMAGE_BYTES} bytes (size={size}); skipping"
+                )
+                continue
+
+            url_private = raw_file.get("url_private") or raw_file.get("url_private_download")
+            if not url_private:
+                continue
+
+            data = await slack_client.download_file_bytes(url_private, max_bytes=MAX_IMAGE_BYTES)
+            if not data:
+                skipped_download_failed += 1
+                continue
+
+            attachments.append(
+                {
+                    "file_name": raw_file.get("name") or f"image.{mime_type.split('/')[-1]}",
+                    "mime_type": mime_type,
+                    "file_data": base64.b64encode(data).decode("ascii"),
+                }
+            )
+
+        if skipped_unsupported:
+            logger.info(f"Slack files skipped (unsupported type): {skipped_unsupported}")
+        if skipped_download_failed:
+            logger.warning(f"Slack files skipped (download failed): {skipped_download_failed}")
+
+        return attachments
 
     @staticmethod
     def _derive_thread_title(text: str | None) -> str | None:
@@ -1196,6 +1312,7 @@ User's question:
         event_ts: str,
         event_id: str,
         session: AsyncSession,
+        files: list[dict] | None = None,
     ) -> None:
         """Process a non-mention message in a Byaan-owned thread.
 
@@ -1259,7 +1376,12 @@ User's question:
                 await session.commit()
                 return
 
-            skip, reason = layer1_should_skip(text, workspace.bot_user_id, conversation)
+            has_image_files = bool(files) and any(
+                isinstance(f, dict) and (f.get("mimetype") or "").lower() in SUPPORTED_IMAGE_MIME_TYPES for f in files
+            )
+
+            gate_text = text if text.strip() else (DEFAULT_IMAGE_ONLY_PROMPT if has_image_files else text)
+            skip, reason = layer1_should_skip(gate_text, workspace.bot_user_id, conversation)
             if skip:
                 logger.info(f"Slack followup layer1 skip: reason={reason} thread={thread_ts}")
                 event_log.processing_status = "skipped_layer1"
@@ -1293,12 +1415,15 @@ User's question:
             )
             cleaned_text = strip_bot_mentions(text, workspace.bot_user_id)
 
+            total_file_count = sum(1 for f in (files or []) if isinstance(f, dict))
+
             intent, decision_source = await classify_intent(
                 text=cleaned_text,
                 history=history,
                 llm_connection_id=llm_connection_id,
                 session=session,
                 model=classifier_model,
+                attachment_count=total_file_count,
             )
 
             logger.info(
@@ -1337,33 +1462,48 @@ User's question:
                         name=SlackAgentService._pick_reaction_emoji(for_ack=False),
                     )
                 )
-            else:
-                ack_text = await SlackAgentService._pick_ack_message(
-                    workspace=workspace,
-                    channel_id=channel_id,
+
+            ack_text = await SlackAgentService._pick_ack_message(
+                workspace=workspace,
+                channel_id=channel_id,
+                thread_ts=thread_ts,
+                session=session,
+            )
+            asyncio.create_task(
+                slack_client.post_message(
+                    channel=channel_id,
+                    text=ack_text,
                     thread_ts=thread_ts,
-                    session=session,
                 )
-                asyncio.create_task(
-                    slack_client.post_message(
-                        channel=channel_id,
-                        text=ack_text,
-                        thread_ts=thread_ts,
-                    )
-                )
+            )
 
             async with acquire_thread_lock(workspace.slack_team_id, channel_id, thread_ts):
+                attachments = await SlackAgentService._build_attachments_from_slack_files(
+                    slack_client=slack_client,
+                    files=files,
+                )
+
+                has_any_files = bool(files)
+                if cleaned_text:
+                    effective_question = cleaned_text
+                elif attachments:
+                    effective_question = DEFAULT_IMAGE_ONLY_PROMPT
+                elif has_any_files:
+                    effective_question = UNSUPPORTED_FILES_ONLY_PROMPT
+                else:
+                    effective_question = cleaned_text
+
                 conversation = await SlackAgentService._get_or_create_conversation(
                     workspace=workspace,
                     channel_id=channel_id,
                     thread_ts=thread_ts,
                     user_id=user_id,
                     session=session,
-                    text=cleaned_text,
+                    text=effective_question,
                 )
 
                 slack_prompt = await SlackAgentService._build_followup_prompt(
-                    question=cleaned_text,
+                    question=effective_question,
                     tenant_id=workspace.tenant_id,
                     session=session,
                 )
@@ -1374,6 +1514,7 @@ User's question:
                     llm_connection_id=llm_connection_id,
                     create_notebook=conversation.notebook_id is None,
                     model=resolved_model,
+                    attachments=attachments or None,
                 )
 
                 user_tz = await slack_client.get_user_timezone(user_id, workspace_id=str(workspace.id))

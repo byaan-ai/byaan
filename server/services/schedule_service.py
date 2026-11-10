@@ -266,35 +266,35 @@ in the final text.
         # tools and record_findings then stops), synthesize a short summary from
         # the findings so the notebook isn't left with just tool-call cards.
         if not agent_response.strip() and (headline or findings):
-            try:
-                parts = []
-                if headline:
-                    parts.append(f"**{headline}**")
-                for f in findings[:5]:
-                    label = f.get("label") or f.get("name") or ""
-                    value = f.get("value") or f.get("summary") or ""
-                    if label and value:
-                        parts.append(f"- {label}: {value}")
-                    elif value:
-                        parts.append(f"- {value}")
-                synthesized = "\n\n".join(parts).strip()
-                if synthesized:
+            parts = []
+            if headline:
+                parts.append(f"**{headline}**")
+            for f in findings[:5]:
+                label = f.get("label") or f.get("name") or ""
+                value = f.get("value") or f.get("summary") or ""
+                if label and value:
+                    parts.append(f"- {label}: {value}")
+                elif value:
+                    parts.append(f"- {value}")
+            synthesized = "\n\n".join(parts).strip()
+            if synthesized:
+                agent_response = synthesized
+                try:
                     await ScheduleService._write_run_summary(session, schedule, synthesized)
-                    agent_response = synthesized
-            except Exception as syn_err:
-                logger.warning(f"Could not synthesize summary for schedule {schedule.id}: {syn_err}")
+                except Exception as syn_err:
+                    logger.warning(f"Could not persist synthesized summary for schedule {schedule.id}: {syn_err}")
         elif not agent_response.strip():
             # No prose, no findings — write a placeholder so the notebook has
             # something terminal to show instead of only tool cards. For manual
             # triggers also surface it to the triggering channel so the user
             # who pressed the button sees acknowledgement.
             placeholder = "_Monitor run completed. No narrative output was produced._"
+            if trigger_label == "manual":
+                agent_response = placeholder
             try:
                 await ScheduleService._write_run_summary(session, schedule, placeholder)
             except Exception as syn_err:
-                logger.warning(f"Could not write placeholder for schedule {schedule.id}: {syn_err}")
-            if trigger_label == "manual":
-                agent_response = placeholder
+                logger.warning(f"Could not persist placeholder for schedule {schedule.id}: {syn_err}")
 
         deliveries: list[dict[str, Any]] = []
 

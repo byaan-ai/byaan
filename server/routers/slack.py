@@ -195,6 +195,7 @@ async def slack_events(
             text=event.get("text", ""),
             event_ts=event.get("ts"),
             event_id=event_id,
+            files=event.get("files"),
         )
     elif event_type == "message":
         if _should_route_thread_followup(event, workspace.bot_user_id):
@@ -207,6 +208,7 @@ async def slack_events(
                 text=event.get("text", ""),
                 event_ts=event.get("ts"),
                 event_id=event_id,
+                files=event.get("files"),
             )
     return JSONResponse(status_code=200, content={"ok": True})
 
@@ -233,7 +235,8 @@ def _should_route_thread_followup(event: dict, bot_user_id: str | None) -> bool:
     if bot_user_id and event.get("user") == bot_user_id:
         return False
     text = event.get("text") or ""
-    if not text:
+    has_files = bool(event.get("files"))
+    if not text and not has_files:
         return False
     if bot_user_id and f"<@{bot_user_id}>" in text:
         return False
@@ -248,6 +251,7 @@ async def _process_app_mention(
     text: str,
     event_ts: str,
     event_id: str,
+    files: list[dict] | None = None,
 ):
     """Process app_mention event in background."""
     try:
@@ -268,6 +272,7 @@ async def _process_app_mention(
                 event_ts=event_ts,
                 event_id=event_id,
                 session=session,
+                files=files,
             )
     except Exception as e:
         logger.error(f"Error processing app_mention: {e}", exc_info=True)
@@ -281,6 +286,7 @@ async def _process_thread_followup(
     text: str,
     event_ts: str,
     event_id: str,
+    files: list[dict] | None = None,
 ):
     """Process a non-mention thread message when auto-followup is enabled."""
     try:
@@ -300,6 +306,7 @@ async def _process_thread_followup(
                 event_ts=event_ts,
                 event_id=event_id,
                 session=session,
+                files=files,
             )
     except Exception as e:
         logger.error(f"Error processing Slack thread followup: {e}", exc_info=True)

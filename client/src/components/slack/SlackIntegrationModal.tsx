@@ -86,6 +86,10 @@ function SetupStepsAccordion({ webhookUrl }: { webhookUrl: string }) {
               <span className="text-gray-500 text-xs">— To upload screenshots and HTML files</span>
             </div>
             <div className="flex items-center gap-2">
+              <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">files:read</code>
+              <span className="text-gray-500 text-xs">— To read image attachments users share with Byaan</span>
+            </div>
+            <div className="flex items-center gap-2">
               <code className="text-xs bg-gray-700 px-1.5 py-0.5 rounded">channels:read</code>
               <span className="text-gray-500 text-xs">— To list channels (optional)</span>
             </div>
