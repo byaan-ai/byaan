@@ -90,12 +90,32 @@ async def classify_intent(
     llm_connection_id: UUID,
     session: AsyncSession,
     model: str | None = None,
+    attachment_count: int = 0,
 ) -> tuple[str, str]:
     """Return (intent, decision_source).
 
     intent is one of: 'true_text', 'true_react', 'false_react', 'skip'.
     decision_source mirrors the intent prefixed by 'llm_', or 'timeout' / 'error'.
+
+    ``attachment_count`` is a signal (not file content) so the classifier can
+    weigh the presence of user-attached files when deciding intent. File content
+    is not sent to the classifier. The main agent can only process image
+    attachments (PNG/JPEG/WebP); non-image files are ignored by the agent but
+    still count here because their presence is a signal that the user is
+    directing something at Byaan.
     """
+    attachment_hint = ""
+    if attachment_count > 0:
+        noun = "file" if attachment_count == 1 else "files"
+        attachment_hint = (
+            f"\nNote: the user also attached {attachment_count} {noun} to this message. "
+            "Treat the attachment as part of what the user wants Byaan to look at — "
+            "if the accompanying text (or empty text) is consistent with asking "
+            "Byaan to inspect, analyze, or act on the attachment, lean toward TRUE_*. "
+            "If none of the attachments are images Byaan can view, the agent will "
+            "still see the text and respond accordingly."
+        )
+
     prompt = f"""Classification policy:
 {CLASSIFIER_POLICY}
 
@@ -103,7 +123,7 @@ Recent thread (oldest to newest):
 {_format_history(history)}
 
 Newest message from user:
-\"\"\"{text.strip()}\"\"\"
+\"\"\"{text.strip()}\"\"\"{attachment_hint}
 
 Output TRUE_TEXT, TRUE_REACT, FALSE_REACT, or SKIP."""
 
