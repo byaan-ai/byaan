@@ -214,38 +214,48 @@ async def _ignored(repo: Path, paths: list[str]) -> set[str]:
     return {p for p in out.decode(errors="replace").split("\0") if p}
 
 
-async def _collect_work_files(work: Path, repo: Path) -> dict[str, Path]:
-    collected: dict[str, Path] = {}
-    pending = [""]
+async def _collect_work_files(work: Path, repo: Path) -> tuple[list[tuple[str, int, str, bool]], list[int]]:
+    """Walk Claude's tree pinning every directory component with O_NOFOLLOW, so a concurrent process can't
+    swap a directory for a symlink mid-walk and redirect the copy outside the workspace. Returns
+    (rel, parent_dir_fd, name, is_symlink) tuples plus the open dir fds; the caller must close them."""
+    collected: list[tuple[str, int, str, bool]] = []
+    dir_fds: list[int] = [os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    pending: list[tuple[str, int]] = [("", dir_fds[0])]
     total = 0
     while pending:
-        rel_dir = pending.pop()
+        rel_dir, dir_fd = pending.pop()
         entries = []
-        for entry in os.scandir(work / rel_dir if rel_dir else work):
-            if entry.name == ".git":
+        for name in os.listdir(dir_fd):
+            if name == ".git":
                 continue
-            rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
-            is_dir = entry.is_dir(follow_symlinks=False)
-            entries.append((rel, entry, is_dir))
-        ignored = await _ignored(repo, [f"{rel}/" if is_dir else rel for rel, _, is_dir in entries])
-        for rel, entry, is_dir in entries:
+            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            entries.append((rel, name, st, stat.S_ISDIR(st.st_mode)))
+        ignored = await _ignored(repo, [f"{rel}/" if is_dir else rel for rel, _, _, is_dir in entries])
+        for rel, name, st, is_dir in entries:
             if is_dir:
-                if f"{rel}/" not in ignored and rel not in ignored:
-                    pending.append(rel)
+                if f"{rel}/" in ignored or rel in ignored:
+                    continue
+                try:
+                    child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+                except OSError:
+                    continue  # swapped for a symlink or removed since we listed it; skip it
+                dir_fds.append(child_fd)
+                pending.append((rel, child_fd))
                 continue
             if rel in ignored:
                 continue
-            if entry.is_symlink() or entry.is_file(follow_symlinks=False):
-                total += entry.stat(follow_symlinks=False).st_size
+            if stat.S_ISLNK(st.st_mode) or stat.S_ISREG(st.st_mode):
+                total += st.st_size
                 if total > MAX_SYNC_BYTES:
                     raise GitError("Changes are larger than 200 MB; refusing to sync")
-                collected[rel] = Path(entry.path)
-    return collected
+                collected.append((rel, dir_fd, name, stat.S_ISLNK(st.st_mode)))
+    return collected, dir_fds
 
 
-def _mirror_files(repo: Path, work_files: dict[str, Path]) -> None:
+def _mirror_files(repo: Path, collected: list[tuple[str, int, str, bool]]) -> None:
     repo_root = repo.resolve()
-    for rel, source in work_files.items():
+    for rel, parent_fd, name, is_symlink in collected:
         target = repo / rel
         if repo_root not in target.parent.resolve().parents and target.parent.resolve() != repo_root:
             raise GitError(f"Refusing to write outside the repository: {rel}")
@@ -255,11 +265,11 @@ def _mirror_files(repo: Path, work_files: dict[str, Path]) -> None:
                 shutil.rmtree(target)
             else:
                 target.unlink()
-        if source.is_symlink():
-            os.symlink(os.readlink(source), target)
+        if is_symlink:
+            os.symlink(os.readlink(name, dir_fd=parent_fd), target)
             continue
         try:
-            fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=parent_fd)
         except OSError as exc:
             raise GitError(f"{rel} changed while syncing; refusing to copy it") from exc
         with os.fdopen(fd, "rb") as src, open(target, "xb") as dst:
@@ -271,15 +281,18 @@ def _mirror_files(repo: Path, work_files: dict[str, Path]) -> None:
 
 async def sync_work_into_repo(workspace: Workspace) -> None:
     """Mirror Claude's files into Byaan's clone without ever running git against Claude's .git."""
-    work_files = await _collect_work_files(workspace.work, workspace.repo)
-    tracked = set((await run_git(["ls-files", "-z"], cwd=workspace.repo)).split("\0")) - {""}
-
-    for rel in tracked - set(work_files):
-        target = workspace.repo / rel
-        if target.is_symlink() or target.exists():
-            target.unlink()
-
-    await asyncio.to_thread(_mirror_files, workspace.repo, work_files)
+    collected, dir_fds = await _collect_work_files(workspace.work, workspace.repo)
+    try:
+        present = {rel for rel, _, _, _ in collected}
+        tracked = set((await run_git(["ls-files", "-z"], cwd=workspace.repo)).split("\0")) - {""}
+        for rel in tracked - present:
+            target = workspace.repo / rel
+            if target.is_symlink() or target.exists():
+                target.unlink()
+        await asyncio.to_thread(_mirror_files, workspace.repo, collected)
+    finally:
+        for fd in dir_fds:
+            os.close(fd)
     await run_git(["add", "-A"], cwd=workspace.repo)
 
 

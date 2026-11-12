@@ -93,8 +93,16 @@ def _plugins() -> list[dict[str, str]]:
     ]
 
 
-def scan_added_lines(unified_diff: str) -> list[SecretFinding]:
+def _scan_one(raw: str):
     from detect_secrets.core.scan import scan_line
+
+    for secret in scan_line(raw):
+        if secret.type == _KEYWORD_TYPE and not _looks_like_real_value(secret.secret_value or ""):
+            continue
+        yield secret.type
+
+
+def scan_added_lines(unified_diff: str) -> list[SecretFinding]:
     from detect_secrets.settings import transient_settings
 
     findings: list[SecretFinding] = []
@@ -110,9 +118,20 @@ def scan_added_lines(unified_diff: str) -> list[SecretFinding]:
                 line_no = int(match.group(1)) if match else 0
                 continue
             if raw.startswith("+") and current_path:
-                for secret in scan_line(raw[1:]):
-                    if secret.type == _KEYWORD_TYPE and not _looks_like_real_value(secret.secret_value or ""):
-                        continue
-                    findings.append(SecretFinding(path=current_path, line=line_no, kind=secret.type))
+                for kind in _scan_one(raw[1:]):
+                    findings.append(SecretFinding(path=current_path, line=line_no, kind=kind))
                 line_no += 1
+    return findings
+
+
+def scan_text(text: str, where: str) -> list[SecretFinding]:
+    """Scan text Byaan publishes itself (pull request title and body, Claude's summary) so a value Claude
+    saw never reaches the PR even though it never touched a tracked file."""
+    from detect_secrets.settings import transient_settings
+
+    findings: list[SecretFinding] = []
+    with transient_settings({"plugins_used": _plugins()}):
+        for line_no, raw in enumerate(text.splitlines(), 1):
+            for kind in _scan_one(raw):
+                findings.append(SecretFinding(path=where, line=line_no, kind=kind))
     return findings

@@ -26,7 +26,7 @@ from server.schemas.handoff import HandoffRepoConfig
 from server.services import handoff_git
 from server.services.github_app_service import HandoffGitHubAuth, can_push, create_signed_commit, resolve_auth
 from server.services.handoff_agent import AgentRunSpec, AgentUnavailable, ClaudeCodeAdapter
-from server.services.handoff_checks import disallowed_paths, scan_added_lines
+from server.services.handoff_checks import disallowed_paths, scan_added_lines, scan_text
 from server.services.handoff_github import GitHubError, HandoffGitHub, summarize_checks
 from server.services.handoff_service import activity_summary, move, record
 from server.utils.custom_logger import get_logger
@@ -513,19 +513,11 @@ class HandoffRunner:
         }
 
     def _data_tools(self) -> list[Any]:
+        """Schema only. The handoff agent has Bash and open network, so it must never hold live customer rows;
+        the query tools (execute_sql_query, execute_mongo_query, DuckDB) are deliberately left out."""
         from server.tools.agentic import get_database_schema, get_dataset_schema_by_id, search_datasets
-        from server.tools.dataframe import get_duckdb_tools
-        from server.tools.mongo import get_mongo_tools
-        from server.tools.sql import get_sql_tools
 
-        return [
-            search_datasets,
-            get_dataset_schema_by_id,
-            get_database_schema,
-            *get_sql_tools(),
-            *get_mongo_tools(),
-            *get_duckdb_tools(),
-        ]
+        return [search_datasets, get_dataset_schema_by_id, get_database_schema]
 
     async def _system_prompt(
         self,
@@ -656,14 +648,26 @@ class HandoffRunner:
             message = "Changes outside the allowed paths were blocked: " + ", ".join(blocked[:10])
             await move(session, handoff.id, fail_status, from_statuses=("pushing",), message=message, error=message)
             return
-        findings = scan_added_lines(await handoff_git.staged_added_lines(workspace.repo))
+        title = (result or {}).get("title") or handoff.title
+        outgoing = "\n".join(
+            filter(
+                None,
+                [
+                    title,
+                    *(((result or {}).get(k) or "") for k in ("summary", "tests", "risks")),
+                    *(result or {}).get("steps", []),
+                ],
+            )
+        )
+        findings = scan_added_lines(await handoff_git.staged_added_lines(workspace.repo)) + scan_text(
+            outgoing, "pull request text"
+        )
         if findings:
             where = ", ".join(f"{f.path}:{f.line} ({f.kind})" for f in findings[:5])
             message = f"Possible secrets found, nothing was pushed: {where}"
             await move(session, handoff.id, fail_status, from_statuses=("pushing",), message=message, error=message)
             return
 
-        title = (result or {}).get("title") or handoff.title
         if is_fix:
             title = (
                 f"Fix CI: {', '.join(failing or []) or 'failing checks'} (round {handoff.ci_fix_round}/{MAX_CI_ROUNDS})"

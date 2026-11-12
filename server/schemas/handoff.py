@@ -6,7 +6,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-ALWAYS_DENIED_PATHS = (".github/**",)
+ALWAYS_DENIED_PATHS = (
+    ".github/**",
+    ".gitlab-ci.yml",
+    ".circleci/**",
+    "azure-pipelines.yml",
+    "Jenkinsfile",
+    ".drone.yml",
+    "bitbucket-pipelines.yml",
+    ".pre-commit-config.yaml",
+    "CODEOWNERS",
+)
 DEFAULT_MINUTES = 30
 MAX_MINUTES = 240
 

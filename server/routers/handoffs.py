@@ -45,11 +45,22 @@ def _actor(auth: AuthContext) -> Actor:
 
 
 def _transcript_path(handoff_id: UUID) -> Path | None:
-    projects = Workspace.for_handoff(handoff_id).home / ".claude" / "projects"
+    """The agent owns this directory, so a planted symlink could point anywhere Byaan can read; only serve a
+    real file whose resolved path stays inside the handoff's own home."""
+    home = Workspace.for_handoff(handoff_id).home.resolve()
+    projects = home / ".claude" / "projects"
     if not projects.is_dir():
         return None
-    files = sorted(projects.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[0] if files else None
+    candidates = []
+    for path in projects.glob("*/*.jsonl"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        resolved = path.resolve()
+        if home == resolved.parent or home in resolved.parents:
+            candidates.append(resolved)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
 async def _detail(session: AsyncSession, handoff) -> dict:

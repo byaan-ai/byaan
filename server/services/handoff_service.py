@@ -430,7 +430,7 @@ async def _continue_task(session: AsyncSession, handoff: Handoff, request: str |
         handoff.id,
         "queued",
         from_statuses=RESTARTABLE_STATUSES,
-        message=f"{actor.display} {verb}",
+        message=f"{actor.display} {verb}: {request}" if request else f"{actor.display} {verb}",
         source="human",
         ci_fix_round=0,
         next_check_at=None,
@@ -463,7 +463,7 @@ async def add_message(session: AsyncSession, tenant_id: UUID, handoff_id: UUID, 
 
     if handoff.status in ("queued", *WORKING_STATUSES):
         await inbox.add(handoff.id, "followup", text, author_user_id=actor.user_id, author_label=actor.label)
-        await record(session, handoff.id, "human", "status", f"{actor.display} sent a follow-up", notify=False)
+        await record(session, handoff.id, "human", "status", f"{actor.display} asked for changes: {text}", notify=False)
         return "queued_for_running_session"
 
     if handoff.status == "ci_running":
@@ -471,7 +471,7 @@ async def add_message(session: AsyncSession, tenant_id: UUID, handoff_id: UUID, 
             new = await _followup_handoff(session, handoff, text, actor)
             return f"new_handoff:{new.id}"
         await inbox.add(handoff.id, "followup", text, author_user_id=actor.user_id, author_label=actor.label)
-        await record(session, handoff.id, "human", "status", f"{actor.display} sent a follow-up", notify=False)
+        await record(session, handoff.id, "human", "status", f"{actor.display} asked for changes: {text}", notify=False)
         return "queued_after_ci"
 
     if handoff.status in RESTARTABLE_STATUSES:
