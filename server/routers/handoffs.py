@@ -23,6 +23,7 @@ from server.schemas.handoff import (
     HandoffMessageCreate,
     HandoffRead,
     HandoffRename,
+    HandoffTeamSettings,
 )
 from server.schemas.standard_response import success_response
 from server.services import handoff_service
@@ -192,6 +193,33 @@ async def handoff_requirements(
     return success_response(
         data={"enabled": is_feature_enabled("handoffs_enabled"), **await requirements(session, auth.tenant_id)}
     )
+
+
+@router.get("/handoffs/settings")
+async def get_team_settings(
+    auth: AuthContext = Depends(require_scope(Scope.NOTEBOOK_READ_OWN)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    from server.services.handoff_runner import built_in_rules
+
+    _require_enabled()
+    settings = await handoff_service.team_settings(session, auth.tenant_id)
+    return success_response(
+        data={**settings.model_dump(), "built_in_rules": built_in_rules(), "can_edit": bool(auth.is_admin)}
+    )
+
+
+@router.put("/handoffs/settings")
+async def update_team_settings(
+    body: HandoffTeamSettings,
+    auth: AuthContext = Depends(require_scope(Scope.USER_UPDATE)),
+    session: AsyncSession = Depends(get_async_session),
+):
+    _require_enabled()
+    if not auth.is_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only an admin can change handoff settings")
+    settings = await handoff_service.save_team_settings(session, auth.tenant_id, body)
+    return success_response(data=settings.model_dump(), message="Handoff settings saved")
 
 
 @router.get("/handoffs/{handoff_id}")

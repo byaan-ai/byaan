@@ -128,7 +128,10 @@ def _bundled_cli() -> str | None:
 
 def resolve_cli() -> tuple[str, bool]:
     agent_cli = os.getenv("HANDOFF_AGENT_CLI")
-    if agent_cli and os.access(agent_cli, os.X_OK):
+    if agent_cli:
+        # A deployment that asks for the isolated agent user must never fall back to running Claude as Byaan itself
+        if not os.access(agent_cli, os.X_OK):
+            raise AgentUnavailable(f"The isolated Claude Code wrapper {agent_cli} is missing or not executable")
         return agent_cli, True
     claude_bin = find_claude_cli_path(search_path=build_expanded_path()) or shutil.which("claude") or _bundled_cli()
     if not claude_bin:

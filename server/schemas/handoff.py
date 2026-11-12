@@ -19,6 +19,8 @@ ALWAYS_DENIED_PATHS = (
 )
 DEFAULT_MINUTES = 30
 MAX_MINUTES = 240
+CI_FIX_ROUND_CHOICES = (1, 3, 5)
+DEFAULT_CI_FIX_ROUNDS = 3
 
 
 class HandoffBrief(BaseModel):
@@ -59,6 +61,23 @@ class HandoffRepoConfig(BaseModel):
     @classmethod
     def from_db(cls, raw: dict[str, Any] | None) -> HandoffRepoConfig:
         return cls.model_validate(raw or {})
+
+
+class HandoffTeamSettings(BaseModel):
+    instructions: str = Field(default="", max_length=4000)
+    ci_fix_rounds: int | None = DEFAULT_CI_FIX_ROUNDS
+
+    @field_validator("instructions")
+    @classmethod
+    def _strip(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("ci_fix_rounds")
+    @classmethod
+    def _known_choice(cls, value: int | None) -> int | None:
+        if value is not None and value not in CI_FIX_ROUND_CHOICES:
+            raise ValueError(f"CI fix attempts must be one of {CI_FIX_ROUND_CHOICES} or unlimited")
+        return value
 
 
 class HandoffRepoSettingsUpdate(BaseModel):

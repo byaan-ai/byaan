@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import shutil
@@ -28,7 +29,7 @@ from server.services.github_app_service import HandoffGitHubAuth, can_push, crea
 from server.services.handoff_agent import AgentRunSpec, AgentUnavailable, ClaudeCodeAdapter
 from server.services.handoff_checks import disallowed_paths, scan_added_lines, scan_text
 from server.services.handoff_github import GitHubError, HandoffGitHub, summarize_checks
-from server.services.handoff_service import activity_summary, move, record
+from server.services.handoff_service import activity_summary, move, record, team_settings
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,7 +46,7 @@ WORKSPACE_TTL = timedelta(hours=72)
 INDICATOR_REFRESH_SECONDS = 60
 ORPHAN_GRACE_SECONDS = 6 * 3600
 CLEANUP_EVERY_SECONDS = 600
-MAX_CI_ROUNDS = 3
+SAME_FAILURE_LIMIT = 3
 ANSWER_TIMEOUT_SECONDS = 600
 MIN_FREE_DISK_BYTES = 2 * 1024**3
 FAILURE_LOG_BUDGET = 30_000
@@ -108,6 +109,37 @@ async def _auth_for(session: AsyncSession, handoff: Handoff) -> HandoffGitHubAut
         requester_id=handoff.requested_by,
         origin=handoff.origin,
     )
+
+
+def handoff_rules(allow: str, deny: str) -> str:
+    return (
+        "Rules:\n"
+        f"- You may only change files matching: {allow}. Never change: {deny}.\n"
+        "- Never edit CI configuration or weaken tests to make checks pass.\n"
+        "- When you change behaviour, add or update a test that fails before your fix and passes after it. "
+        "Skip tests when there is no behaviour to test (docs, comments, copy, config values) and say why under "
+        "tests in submit_result.\n"
+        "- Do not commit, push or create branches; Byaan handles git and the pull request.\n"
+        "- Do not install dependencies or set up environments (no pip/npm/apt installs, no virtualenvs); "
+        "the repository's CI runs the tests. Only run checks that work with what is already installed.\n"
+        "- Never put secrets, credentials or row-level data (names, records, identifiers) in code, tests or text.\n"
+        "- Call report_progress after meaningful milestones, ask_human only when truly blocked, "
+        "and submit_result when you are done."
+    )
+
+
+def built_in_rules() -> str:
+    return "\n\n".join(
+        [handoff_rules("the repository's May edit paths", "its Never edit paths and CI configuration"), _SELF_REVIEW]
+    )
+
+
+_NOISE = re.compile(r"\d{4}-\d\d-\d\dT[\d:.]+Z?|\b[0-9a-f]{7,40}\b|\b\d+(\.\d+)?\s?(ms|s|m)\b")
+
+
+def failure_signature(failing: list[dict[str, Any]], context: str) -> str:
+    names = "\n".join(sorted(f["name"] for f in failing))
+    return hashlib.sha256(f"{names}\n{_NOISE.sub('', context)}".encode()).hexdigest()[:16]
 
 
 _SELF_REVIEW = (
@@ -538,24 +570,17 @@ class HandoffRunner:
         ).all()
         skill_text = "\n\n".join(f"### {name}\n{text[:6000]}" for name, text in skills)[:15000]
         repo_rules = handoff_git.read_repo_instructions(workspace.repo)
-        rules = (
-            "Rules:\n"
-            f"- You may only change files matching: {allow}. Never change: {deny}.\n"
-            "- Never edit CI configuration or weaken tests to make checks pass.\n"
-            "- Add or update a test that fails before your fix and passes after it.\n"
-            "- Do not commit, push or create branches; Byaan handles git and the pull request.\n"
-            "- Do not install dependencies or set up environments (no pip/npm/apt installs, no virtualenvs); "
-            "the repository's CI runs the tests. Only run checks that work with what is already installed.\n"
-            "- Never put secrets, credentials or row-level data (names, records, identifiers) in code, tests or text.\n"
-            "- Call report_progress after meaningful milestones, ask_human only when truly blocked, "
-            "and submit_result when you are done."
-        )
+        team = await team_settings(session, handoff.tenant_id)
         sections = [
             "This session is a Byaan handoff: fix one specific problem in this repository and nothing else.",
-            rules,
+            handoff_rules(allow, deny),
             _SELF_REVIEW,
-            f"Repository: {handoff.repo_full_name}, base branch {handoff.base_branch}.",
         ]
+        if team.instructions:
+            sections.append(
+                f"Team instructions (follow them unless they conflict with the rules above):\n{team.instructions}"
+            )
+        sections.append(f"Repository: {handoff.repo_full_name}, base branch {handoff.base_branch}.")
         if repo_rules:
             sections.append(f"Repository instructions:\n{repo_rules}")
         if skill_text:
@@ -669,9 +694,7 @@ class HandoffRunner:
             return
 
         if is_fix:
-            title = (
-                f"Fix CI: {', '.join(failing or []) or 'failing checks'} (round {handoff.ci_fix_round}/{MAX_CI_ROUNDS})"
-            )
+            title = f"Fix CI: {', '.join(failing or []) or 'failing checks'} (round {handoff.ci_fix_round})"
         commit_message = f"{title}\n\nByaan handoff {handoff.id}"
         parent_sha = await handoff_git.head_sha(workspace.repo)
         branch_exists = bool(handoff.pr_number) or await handoff_git.remote_branch_exists(
@@ -939,13 +962,14 @@ class HandoffRunner:
                 next_check_at=utcnow() + REVIEW_POLL_INTERVAL,
             )
             return
-        if handoff.ci_fix_round >= MAX_CI_ROUNDS:
+        limit = (await team_settings(session, handoff.tenant_id)).ci_fix_rounds
+        if limit is not None and handoff.ci_fix_round >= limit:
             await move(
                 session,
                 handoff.id,
                 "ci_failed",
                 from_statuses=("ci_running",),
-                message=f"CI still failing after {MAX_CI_ROUNDS} attempts ({names}). The PR stays open for a person.",
+                message=f"CI still failing after {limit} attempt{'' if limit == 1 else 's'} ({names}). The PR stays open for a person.",
                 next_check_at=utcnow() + REVIEW_POLL_INTERVAL,
             )
             return
@@ -953,14 +977,26 @@ class HandoffRunner:
             await repo_store.update_fields(handoff.id, next_check_at=utcnow() + timedelta(seconds=15))
             return
         context = await self._failure_context(github, handoff, failing)
+        signature = failure_signature(failing, context)
+        if await self._repeats_failure(session, handoff, signature):
+            await move(
+                session,
+                handoff.id,
+                "ci_failed",
+                from_statuses=("ci_running",),
+                message=f"Stopped: CI failing the same way repeatedly ({names}) needs a human review and fix.",
+                next_check_at=utcnow() + REVIEW_POLL_INTERVAL,
+            )
+            return
+        round_label = f"{handoff.ci_fix_round + 1}/{limit}" if limit else str(handoff.ci_fix_round + 1)
         moved = await move(
             session,
             handoff.id,
             "fixing",
             from_statuses=("ci_running",),
             source="github",
-            message=f"CI failed ({names}). Sending it back to Claude, round {handoff.ci_fix_round + 1}/{MAX_CI_ROUNDS}",
-            data={"failing": [f["name"] for f in failing], "log_excerpt": context[-3000:]},
+            message=f"CI failed ({names}). Sending it back to Claude, round {round_label}",
+            data={"failing": [f["name"] for f in failing], "log_excerpt": context[-3000:], "signature": signature},
             ci_fix_round=handoff.ci_fix_round + 1,
             worker_id=self.worker_id,
             heartbeat_at=utcnow(),
@@ -972,6 +1008,18 @@ class HandoffRunner:
             )
         else:
             await repo_store.update_fields(handoff.id, next_check_at=utcnow() + timedelta(seconds=15))
+
+    async def _repeats_failure(self, session: AsyncSession, handoff: Handoff, signature: str) -> bool:
+        needed = SAME_FAILURE_LIMIT - 1
+        if handoff.ci_fix_round < needed:
+            return False
+        events = await HandoffEventRepository(session).recent(handoff.id, 500)
+        previous = [
+            (e.data or {}).get("signature")
+            for e in events
+            if e.kind == "status" and (e.data or {}).get("status") == "fixing"
+        ][-needed:]
+        return len(previous) == needed and all(item == signature for item in previous)
 
     async def _finish_ci(self, session: AsyncSession, handoff: Handoff, message: str, pending_followups: list) -> None:
         if pending_followups:

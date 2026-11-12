@@ -142,6 +142,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body.data as T
 }
 
+export interface HandoffTeamSettings {
+  instructions: string
+  ci_fix_rounds: number | null
+}
+
+export interface HandoffTeamSettingsView extends HandoffTeamSettings {
+  built_in_rules: string
+  can_edit: boolean
+}
+
 export const HandoffsApi = {
   list: (limit: number) => request<Handoff[]>(`/handoffs?limit=${limit}`),
   get: (id: string) => request<HandoffDetail>(`/handoffs/${id}`),
@@ -159,6 +169,9 @@ export const HandoffsApi = {
   message: (id: string, text: string) =>
     request<{ outcome: string }>(`/handoffs/${id}/messages`, { method: 'POST', body: JSON.stringify({ text }) }),
   requirements: () => request<HandoffRequirements>('/handoffs/requirements'),
+  teamSettings: () => request<HandoffTeamSettingsView>('/handoffs/settings'),
+  saveTeamSettings: (settings: HandoffTeamSettings) =>
+    request<HandoffTeamSettings>('/handoffs/settings', { method: 'PUT', body: JSON.stringify(settings) }),
   repoSettings: (repoId: string) => request<HandoffRepoSettings>(`/github/repos/${repoId}/handoff-settings`),
   saveRepoSettings: (repoId: string, settings: { enabled: boolean; config?: HandoffRepoSettings['config'] }) =>
     request<HandoffRepoSettings>(`/github/repos/${repoId}/handoff-settings`, {
@@ -186,6 +199,16 @@ export const HandoffsApi = {
     link.click()
     URL.revokeObjectURL(url)
   },
+}
+
+export function briefText(title: string, repo: string, baseBranch: string, problem: string, brief: HandoffBrief): string {
+  const list = (items: string[]) => items.map((item) => `- ${item}`).join('\n')
+  const parts = [`# ${title}`, `Repository: ${repo} (base branch: ${baseBranch})`]
+  if (problem) parts.push(`## Task\n${problem}`)
+  if (brief.evidence?.length) parts.push(`## Evidence\n${list(brief.evidence)}`)
+  if (brief.suspected_files?.length) parts.push(`## Start by looking at\n${list(brief.suspected_files)}`)
+  if (brief.acceptance_check) parts.push(`## Done when\n${brief.acceptance_check}`)
+  return parts.join('\n\n')
 }
 
 export const isActiveHandoff = (status: HandoffStatus) => ACTIVE_HANDOFF_STATUSES.includes(status)

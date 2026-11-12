@@ -21,7 +21,8 @@ from server.models.notebooks import Notebook
 from server.models.tenant import Tenant
 from server.models.user import User
 from server.repositories.handoffs import utcnow
-from server.services import handoff_git, handoff_notifier, handoff_runner
+from server.schemas.handoff import HandoffTeamSettings
+from server.services import handoff_git, handoff_notifier, handoff_runner, handoff_service
 from server.services.github_app_service import HandoffGitHubAuth
 from server.services.handoff_agent import AgentRunResult
 
@@ -201,6 +202,10 @@ async def _drain(runner):
         await asyncio.gather(*list(runner._runs.values()), return_exceptions=True)
 
 
+def _lint_failure(error: str) -> dict[str, Any]:
+    return {"name": "lint", "status": "completed", "conclusion": "failure", "output": {"title": error}}
+
+
 async def _check(runner, factory, handoff_id):
     async with factory() as session:
         await runner._check_ci(session, handoff_id)
@@ -271,16 +276,42 @@ async def test_ci_gives_up_after_three_rounds(env):
     await runner._claim()
     await _drain(runner)
     FakeGitHub.pulls[1]["branch"] = (await _get(factory, handoff_id)).branch
-    FakeGitHub.checks = [{"name": "lint", "status": "completed", "conclusion": "failure"}]
 
     for round_no in range(1, 4):
+        FakeGitHub.checks = [_lint_failure(f"E{round_no}")]
         runner.adapter = FakeAdapter({"app/scheduler.py": f"v{round_no + 1}\n"})
         await _check(runner, factory, handoff_id)
         await _drain(runner)
+    FakeGitHub.checks = [_lint_failure("E4")]
     await _check(runner, factory, handoff_id)
     handoff = await _get(factory, handoff_id)
     assert handoff.status == "ci_failed"
     assert handoff.ci_fix_round == 3
+
+
+async def test_until_fixed_keeps_going_until_the_same_failure_repeats(env):
+    factory, ids = env
+    async with factory() as session:
+        await handoff_service.save_team_settings(session, ids["tenant"], HandoffTeamSettings(ci_fix_rounds=None))
+    handoff_id = await _queued(factory, ids)
+    runner = handoff_runner.HandoffRunner()
+    runner._running = True
+    runner.adapter = FakeAdapter({"app/scheduler.py": "v1\n"})
+    await runner._claim()
+    await _drain(runner)
+    FakeGitHub.pulls[1]["branch"] = (await _get(factory, handoff_id)).branch
+
+    errors = ["E1", "E2", "E3", "E4", "E5", "E5", "E5"]
+    for round_no, error in enumerate(errors, start=1):
+        FakeGitHub.checks = [_lint_failure(error)]
+        runner.adapter = FakeAdapter({"app/scheduler.py": f"v{round_no + 1}\n"})
+        await _check(runner, factory, handoff_id)
+        await _drain(runner)
+
+    handoff = await _get(factory, handoff_id)
+    assert handoff.status == "ci_failed"
+    assert handoff.ci_fix_round == 6
+    assert "CI failing the same way repeatedly" in (await _events(factory, handoff_id))[-1].message
 
 
 async def test_no_ci_marks_untested(env):

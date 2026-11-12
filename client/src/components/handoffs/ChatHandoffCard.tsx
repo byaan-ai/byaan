@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { ChevronRight, ExternalLink, GitPullRequest, Loader2, Send } from 'lucide-react'
+import { Check, ChevronRight, Copy, ExternalLink, GitPullRequest, Loader2, Send } from 'lucide-react'
 import { Card } from '../ui/card'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
@@ -11,11 +11,13 @@ import {
   useHandoff,
   useHandoffAction,
   useHandoffMessage,
+  useCopyText,
   useHandoffMessagesRefresh,
 } from '../../hooks/useHandoffs'
 import {
   HANDOFF_STATUS_LABELS,
   HandoffsApi,
+  briefText,
   canMessage,
   canRestart,
   canStop,
@@ -88,6 +90,7 @@ export function ChatHandoffCard({ handoffId }: { handoffId: string }) {
   const [editing, setEditing] = useState(false)
   const [reply, setReply] = useState('')
   const [showBrief, setShowBrief] = useState(false)
+  const { copied, copy } = useCopyText()
 
   useHandoffMessagesRefresh(handoff)
 
@@ -104,6 +107,9 @@ export function ChatHandoffCard({ handoffId }: { handoffId: string }) {
 
   const run = (kind: 'start' | 'dismiss' | 'cancel' | 'takeOver' | 'restart') =>
     action.mutate({ id: handoff.id, action: kind }, { onError: (e) => showToast.error(errorText(e, 'Action failed')) })
+
+  const copyBrief = () =>
+    copy(briefText(shownTitle, handoff.repo_full_name, handoff.base_branch, shownProblem, shownBrief))
 
   const send = (text: string, onSuccess?: () => void) => {
     if (!text.trim() || sendMessage.isPending) return
@@ -170,17 +176,31 @@ export function ChatHandoffCard({ handoffId }: { handoffId: string }) {
           )}
         </div>
 
-        {hasDetails && (
-          <div>
+        <div>
+          <div className="flex items-center justify-between gap-2">
+            {hasDetails ? (
+              <button
+                type="button"
+                onClick={() => setShowBrief(!showBrief)}
+                className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
+                aria-expanded={showBrief}
+              >
+                <ChevronRight className={`w-3.5 h-3.5 transition-transform duration-200 ${showBrief ? 'rotate-90' : ''}`} />
+                {showBrief ? 'Hide brief' : 'Show brief'}
+              </button>
+            ) : (
+              <span />
+            )}
             <button
               type="button"
-              onClick={() => setShowBrief(!showBrief)}
+              onClick={copyBrief}
               className="flex items-center gap-1 text-xs text-gray-400 hover:text-white transition-colors"
-              aria-expanded={showBrief}
             >
-              <ChevronRight className={`w-3.5 h-3.5 transition-transform duration-200 ${showBrief ? 'rotate-90' : ''}`} />
-              {showBrief ? 'Hide brief' : 'Show brief'}
+              {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copied ? 'Copied' : 'Copy brief'}
             </button>
+          </div>
+          {hasDetails && (
             <div
               className={`grid transition-[grid-template-rows,opacity] duration-300 ease-out ${
                 showBrief ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'
@@ -228,8 +248,8 @@ export function ChatHandoffCard({ handoffId }: { handoffId: string }) {
                 </div>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {(handoff.branch || handoff.pr_url || (progress && isActiveHandoff(handoff.status))) && (
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 border-t border-gray-800 pt-2.5">
@@ -245,7 +265,7 @@ export function ChatHandoffCard({ handoffId }: { handoffId: string }) {
             )}
             {handoff.untested && handoff.pr_url && <span className="text-yellow-400">UNTESTED</span>}
             {handoff.ci_fix_round > 0 && (handoff.status === 'fixing' || handoff.status === 'ci_running') && (
-              <span>CI fix round {handoff.ci_fix_round}/3</span>
+              <span>CI fix round {handoff.ci_fix_round}</span>
             )}
             {progress && isActiveHandoff(handoff.status) && <span className="text-gray-400">· {progress.message}</span>}
           </div>

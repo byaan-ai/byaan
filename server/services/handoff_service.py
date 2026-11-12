@@ -7,18 +7,20 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.models.github_repository import GitHubRepository
 from server.models.handoff import TERMINAL_STATUSES, WORKING_STATUSES, Handoff, HandoffEvent
+from server.models.settings import Setting
 from server.repositories.handoffs import (
     HandoffEventRepository,
     HandoffMessageRepository,
     HandoffRepository,
     utcnow,
 )
-from server.schemas.handoff import HandoffBrief, HandoffRepoConfig
+from server.schemas.handoff import HandoffBrief, HandoffRepoConfig, HandoffTeamSettings
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,6 +28,7 @@ logger = get_logger(__name__)
 PROPOSAL_COOLDOWN = timedelta(days=7)
 RESTARTABLE_STATUSES = ("done", "ci_failed", "failed", "cancelled")
 _FILE_LINE = re.compile(r"[\w./-]+\.\w+:\d+")
+TEAM_SETTINGS_KEY = "handoff_team_settings"
 
 
 class HandoffError(Exception):
@@ -97,6 +100,46 @@ async def get_for_tenant(session: AsyncSession, tenant_id: UUID, handoff_id: UUI
     if not handoff or handoff.tenant_id != tenant_id:
         raise HandoffError("Handoff not found")
     return handoff
+
+
+async def _team_settings_row(session: AsyncSession, tenant_id: UUID) -> Setting | None:
+    return (
+        await session.execute(
+            select(Setting).where(
+                Setting.tenant_id == tenant_id, Setting.user_id.is_(None), Setting.setting_key == TEAM_SETTINGS_KEY
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def team_settings(session: AsyncSession, tenant_id: UUID) -> HandoffTeamSettings:
+    row = await _team_settings_row(session, tenant_id)
+    if not row:
+        return HandoffTeamSettings()
+    try:
+        return HandoffTeamSettings.model_validate_json(row.setting_value)
+    except ValidationError:
+        logger.warning(f"[HANDOFF] Ignoring invalid team settings for tenant {tenant_id}")
+        return HandoffTeamSettings()
+
+
+async def save_team_settings(
+    session: AsyncSession, tenant_id: UUID, settings: HandoffTeamSettings
+) -> HandoffTeamSettings:
+    row = await _team_settings_row(session, tenant_id)
+    if row:
+        row.setting_value = settings.model_dump_json()
+    else:
+        session.add(
+            Setting(
+                tenant_id=tenant_id,
+                user_id=None,
+                setting_key=TEAM_SETTINGS_KEY,
+                setting_value=settings.model_dump_json(),
+            )
+        )
+    await session.commit()
+    return settings
 
 
 def repo_config(repo: GitHubRepository | None) -> HandoffRepoConfig:

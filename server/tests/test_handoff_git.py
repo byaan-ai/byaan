@@ -147,6 +147,30 @@ def test_local_cli_wrapper_scrubs_environment(tmp_path, monkeypatch):
     storage.handoffs_root.cache_clear()
 
 
+def test_missing_isolated_wrapper_fails_closed(tmp_path, monkeypatch):
+    from server.services.handoff_agent import AgentUnavailable, resolve_cli
+
+    monkeypatch.setenv("HANDOFF_AGENT_CLI", str(tmp_path / "byaan-agent-claude"))
+    with pytest.raises(AgentUnavailable):
+        resolve_cli()
+
+    wrapper = tmp_path / "byaan-agent-claude"
+    wrapper.write_text("#!/bin/sh\n")
+    wrapper.chmod(0o755)
+    assert resolve_cli() == (str(wrapper), True)
+
+
+def test_handoffs_root_is_not_listable_by_other_users(tmp_path, monkeypatch):
+    root = tmp_path / "handoffs"
+    root.mkdir(mode=0o2775)
+    root.chmod(0o2775)
+    monkeypatch.setenv("HANDOFFS_STORAGE_DIR", str(root))
+    storage.handoffs_root.cache_clear()
+
+    assert storage.handoffs_root().stat().st_mode & 0o7777 == 0o2711
+    storage.handoffs_root.cache_clear()
+
+
 def test_failing_step_output_keeps_the_whole_failing_step():
     from server.services.handoff_github import failing_step_output
 

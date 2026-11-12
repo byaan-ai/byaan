@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import {
   HandoffsApi,
@@ -7,6 +7,8 @@ import {
   type HandoffDetail,
   type HandoffEvent,
 } from '../services/handoffs'
+import { copyToClipboard } from '../lib/tauri-api'
+import { showToast } from '../utils/toast'
 
 export const handoffKeys = {
   all: ['handoffs'] as const,
@@ -14,6 +16,7 @@ export const handoffKeys = {
   page: ['handoffs', 'list', 'page'] as const,
   detail: (id: string) => ['handoffs', 'detail', id] as const,
   requirements: ['handoffs', 'requirements'] as const,
+  teamSettings: ['handoffs', 'team-settings'] as const,
   repoSettings: (repoId: string) => ['handoffs', 'repo-settings', repoId] as const,
 }
 
@@ -87,4 +90,41 @@ export function useHandoffMessagesRefresh(handoff: HandoffDetail | undefined) {
     if (finished) lastNotifiedSeq.delete(id)
     else lastNotifiedSeq.set(id, Math.max(previous ?? 0, seq))
   }, [id, seq, finished])
+}
+
+function copyWithSelection(text: string) {
+  const area = document.createElement('textarea')
+  area.value = text
+  area.setAttribute('readonly', '')
+  area.style.position = 'fixed'
+  area.style.opacity = '0'
+  const host = document.activeElement?.closest('[role="dialog"]') ?? document.body
+  host.appendChild(area)
+  area.select()
+  const ok = document.execCommand('copy')
+  area.remove()
+  if (!ok) throw new Error('copy failed')
+}
+
+export function useCopyText() {
+  const [copied, setCopied] = useState(false)
+
+  const copy = async (text: string) => {
+    try {
+      if (navigator.clipboard) await copyToClipboard(text)
+      else copyWithSelection(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      try {
+        copyWithSelection(text)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      } catch {
+        showToast.error('Could not copy the brief')
+      }
+    }
+  }
+
+  return { copied, copy }
 }

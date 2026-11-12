@@ -13,12 +13,14 @@ import {
   Play,
   RotateCcw,
   Send,
+  Settings,
   Square,
 } from 'lucide-react'
 import { Button } from '../components/ui/button'
 import { Card } from '../components/ui/card'
 import { Input } from '../components/ui/input'
 import { HandoffBriefDialog } from '../components/handoffs/HandoffBriefDialog'
+import { HandoffTeamSettingsDialog } from '../components/handoffs/HandoffTeamSettingsDialog'
 import { handoffKeys, refreshHandoff, useHandoff, useHandoffAction, useHandoffMessage } from '../hooks/useHandoffs'
 import {
   ACTIVE_HANDOFF_STATUSES,
@@ -459,6 +461,7 @@ function HandoffDetailPanel({ handoffId }: { handoffId: string }) {
 export default function HandoffsPage() {
   const [filter, setFilter] = useState<FilterKey>('all')
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const { data: handoffs = [], isLoading } = useQuery({
     queryKey: handoffKeys.page,
     queryFn: () => HandoffsApi.list(200),
@@ -489,6 +492,7 @@ export default function HandoffsPage() {
 
   return (
     <div className="h-full flex overflow-hidden">
+      <HandoffTeamSettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       <div className="w-[570px] min-w-[480px] max-w-[720px] border-r border-gray-800 flex flex-col">
         <div className="p-5 pb-3">
           <div className="flex items-start justify-between gap-3">
@@ -496,9 +500,14 @@ export default function HandoffsPage() {
               <h2 className="text-xl font-semibold text-white">Handoffs</h2>
               <p className="text-sm text-gray-400 mt-1">Code fixes handed to Claude Code from Slack, notebooks and Monitors.</p>
             </div>
-            <Button size="sm" variant="ghost" onClick={exportCsv}>
-              <Download className="w-4 h-4 mr-1" /> Export CSV
-            </Button>
+            <div className="flex shrink-0 gap-1">
+              <Button size="sm" variant="ghost" onClick={() => setSettingsOpen(true)}>
+                <Settings className="w-4 h-4 mr-1" /> Settings
+              </Button>
+              <Button size="sm" variant="ghost" onClick={exportCsv}>
+                <Download className="w-4 h-4 mr-1" /> Export CSV
+              </Button>
+            </div>
           </div>
           <div className="flex gap-1.5 mt-4 flex-wrap">
             {FILTERS.map((f) => (

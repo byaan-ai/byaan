@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 EDIT_CALLBACK = "handoff_edit_submit"
 CHANGES_CALLBACK = "handoff_changes_submit"
-_MODAL_ACTIONS = {"handoff_edit", "handoff_ask_changes", "handoff_view_brief"}
+_MODAL_ACTIONS = {"handoff_edit", "handoff_ask_changes", "handoff_view_brief", "handoff_copy_brief"}
 
 
 def is_handoff_action(action_id: str | None) -> bool:
@@ -56,23 +56,50 @@ def _plain_input(block_id: str, label: str, initial: str = "", multiline: bool =
     }
 
 
-def _brief_view(title: str, brief: dict[str, Any]) -> dict:
-    sections = [("Title", title), ("Task", brief.get("problem", ""))]
+def brief_text(title: str, repo: str, base_branch: str, brief: dict[str, Any]) -> str:
+    parts = [f"# {title}", f"Repository: {repo} (base branch: {base_branch})"]
+    if brief.get("problem"):
+        parts.append(f"## Task\n{brief['problem']}")
     if brief.get("evidence"):
-        sections.append(("Evidence", "\n".join(f"• {item}" for item in brief["evidence"])))
+        parts.append("## Evidence\n" + "\n".join(f"- {item}" for item in brief["evidence"]))
     if brief.get("suspected_files"):
-        sections.append(("Scope", "\n".join(f"`{item}`" for item in brief["suspected_files"])))
+        parts.append("## Start by looking at\n" + "\n".join(f"- {item}" for item in brief["suspected_files"]))
     if brief.get("acceptance_check"):
-        sections.append(("Done when", brief["acceptance_check"]))
+        parts.append(f"## Done when\n{brief['acceptance_check']}")
+    return "\n\n".join(parts)
+
+
+def _copy_blocks(text: str, limit: int = 2900) -> list[dict]:
+    chunks = [""]
+    for line in text.split("\n"):
+        while len(line) > limit:
+            chunks.append(line[:limit])
+            line = line[limit:]
+        if len(chunks[-1]) + len(line) + 1 > limit:
+            chunks.append("")
+        chunks[-1] += f"{line}\n"
+    return [
+        {
+            "type": "context",
+            "elements": [{"type": "mrkdwn", "text": "Full brief for Claude Code. Use the copy button on the box."}],
+        },
+        {
+            "type": "rich_text",
+            "elements": [
+                {"type": "rich_text_preformatted", "elements": [{"type": "text", "text": chunk.rstrip()}]}
+                for chunk in chunks
+                if chunk.strip()
+            ],
+        },
+    ]
+
+
+def _brief_view(text: str) -> dict:
     return {
         "type": "modal",
         "title": {"type": "plain_text", "text": "Handoff brief"},
         "close": {"type": "plain_text", "text": "Close"},
-        "blocks": [
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*{label}*\n{str(text)[:2900]}"}}
-            for label, text in sections
-            if text
-        ],
+        "blocks": _copy_blocks(text),
     }
 
 
@@ -101,10 +128,12 @@ async def open_modal(team_id: str, payload: dict[str, Any], action: dict[str, An
                 "submit": {"type": "plain_text", "text": "Send to Claude"},
                 "blocks": [_plain_input("changes", "What should change?", multiline=True)],
             }
-        elif action["action_id"] == "handoff_view_brief":
+        elif action["action_id"] in ("handoff_view_brief", "handoff_copy_brief"):
             handoff = await handoff_service.get_for_tenant(session, workspace.tenant_id, UUID(handoff_id))
             revision = await handoff_service.pending_revision(session, handoff.id) or {}
-            view = _brief_view(revision.get("title") or handoff.title, revision.get("brief") or handoff.brief or {})
+            title = revision.get("title") or handoff.title
+            brief = revision.get("brief") or handoff.brief or {}
+            view = _brief_view(brief_text(title, handoff.repo_full_name, handoff.base_branch, brief))
         else:
             handoff = await handoff_service.get_for_tenant(session, workspace.tenant_id, UUID(handoff_id))
             brief = handoff.brief or {}
@@ -115,6 +144,16 @@ async def open_modal(team_id: str, payload: dict[str, Any], action: dict[str, An
                 "title": {"type": "plain_text", "text": "View & edit brief"},
                 "submit": {"type": "plain_text", "text": "Save"},
                 "blocks": [
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": "Edit the brief, then Save."},
+                        "accessory": {
+                            "type": "button",
+                            "action_id": "handoff_copy_brief",
+                            "text": {"type": "plain_text", "text": ":clipboard: Copy brief"},
+                            "value": json.dumps({"h": handoff_id}),
+                        },
+                    },
                     _plain_input("title", "Title", handoff.title),
                     _plain_input("problem", "Task", brief.get("problem", ""), multiline=True),
                     _plain_input(
@@ -126,7 +165,10 @@ async def open_modal(team_id: str, payload: dict[str, Any], action: dict[str, An
                     _plain_input("check", "Done when", brief.get("acceptance_check", ""), True, True),
                 ],
             }
-        await client.open_view(payload["trigger_id"], view)
+        if action["action_id"] == "handoff_copy_brief":
+            await client.push_view(payload["trigger_id"], view)
+        else:
+            await client.open_view(payload["trigger_id"], view)
 
 
 async def handle_action(team_id: str, payload: dict[str, Any], action: dict[str, Any]) -> None:

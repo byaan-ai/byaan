@@ -1,10 +1,11 @@
 import { useState } from 'react'
-import { Loader2 } from 'lucide-react'
+import { Check, Copy, Loader2 } from 'lucide-react'
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { Label } from '../ui/label'
-import { HandoffsApi, type HandoffDetail } from '../../services/handoffs'
+import { useCopyText } from '../../hooks/useHandoffs'
+import { HandoffsApi, briefText, type HandoffDetail } from '../../services/handoffs'
 import { showToast } from '../../utils/toast'
 
 interface HandoffBriefDialogProps {
@@ -21,7 +22,7 @@ const lines = (value: string) =>
     .filter(Boolean)
 
 const textareaClass =
-  'w-full rounded-md border border-gray-700 bg-[#1a1a1a] px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-brand-orange'
+  'w-full rounded-md border border-gray-700 bg-[#1a1a1a] px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-brand-orange custom-scrollbar'
 
 export function HandoffBriefDialog({ handoff, open, onOpenChange, onSaved }: HandoffBriefDialogProps) {
   const [title, setTitle] = useState(handoff.title)
@@ -30,15 +31,13 @@ export function HandoffBriefDialog({ handoff, open, onOpenChange, onSaved }: Han
   const [files, setFiles] = useState(handoff.brief.suspected_files.join('\n'))
   const [check, setCheck] = useState(handoff.brief.acceptance_check)
   const [saving, setSaving] = useState(false)
+  const { copied, copy } = useCopyText()
+  const draft = { problem, evidence: lines(evidence), suspected_files: lines(files), acceptance_check: check }
 
   const save = async () => {
     setSaving(true)
     try {
-      const detail = await HandoffsApi.editBrief(
-        handoff.id,
-        { problem, evidence: lines(evidence), suspected_files: lines(files), acceptance_check: check },
-        title,
-      )
+      const detail = await HandoffsApi.editBrief(handoff.id, draft, title)
       onSaved(detail)
       onOpenChange(false)
     } catch (error) {
@@ -50,7 +49,7 @@ export function HandoffBriefDialog({ handoff, open, onOpenChange, onSaved }: Han
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="bg-[#232323] border-gray-800 text-white max-w-xl">
+      <DialogContent className="bg-[#232323] border-gray-800 text-white max-w-xl max-h-[90vh] overflow-y-auto custom-scrollbar">
         <DialogHeader>
           <DialogTitle>Edit handoff brief</DialogTitle>
         </DialogHeader>
@@ -77,6 +76,13 @@ export function HandoffBriefDialog({ handoff, open, onOpenChange, onSaved }: Han
           </div>
         </div>
         <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => copy(briefText(title, handoff.repo_full_name, handoff.base_branch, problem, draft))}
+          >
+            {copied ? <Check className="w-4 h-4 mr-2 text-green-400" /> : <Copy className="w-4 h-4 mr-2" />}
+            {copied ? 'Copied' : 'Copy brief'}
+          </Button>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={saving}>
             Cancel
           </Button>

@@ -145,6 +145,10 @@ class SlackService:
         response = await self.client.views_open(trigger_id=trigger_id, view=view)
         return response.data
 
+    async def push_view(self, trigger_id: str, view: dict) -> dict:
+        response = await self.client.views_push(trigger_id=trigger_id, view=view)
+        return response.data
+
     async def get_permalink(self, channel: str, message_ts: str) -> str | None:
         try:
             response = await self.client.chat_getPermalink(channel=channel, message_ts=message_ts)

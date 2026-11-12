@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import os
 import platform
+import stat
 import sys
 import tempfile
 from functools import lru_cache
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+_HANDOFFS_ROOT_DENIED = stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH | stat.S_IWOTH
 
 
 def get_persistent_data_path() -> Path:
@@ -99,4 +101,8 @@ def handoffs_root() -> Path:
     )
     path = _resolve_path(os.getenv("HANDOFFS_STORAGE_DIR"), default)
     path.mkdir(parents=True, exist_ok=True)
+    # The agent user may enter its own workspace but must not list the others
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & _HANDOFFS_ROOT_DENIED:
+        path.chmod(mode & ~_HANDOFFS_ROOT_DENIED)
     return path

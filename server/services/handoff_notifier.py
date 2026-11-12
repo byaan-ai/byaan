@@ -413,7 +413,7 @@ def build_card_blocks(handoff: Handoff, context: dict[str, Any]) -> list[dict]:
     if handoff.untested and handoff.pr_url:
         details.append("UNTESTED")
     if handoff.ci_fix_round and handoff.status in ("fixing", "ci_running"):
-        details.append(f"CI fix round {handoff.ci_fix_round}/3")
+        details.append(f"CI fix round {handoff.ci_fix_round}")
     if context.get("progress") and handoff.status in WORKING_STATUSES:
         details.append(f"last update: {context['progress'][:200]}")
     if handoff.error and handoff.status in TERMINAL_STATUSES:

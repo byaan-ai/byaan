@@ -71,6 +71,9 @@ COPY pyproject.toml uv.lock /app/
 
 RUN .venv/bin/python -m compileall -q /app/server/ || true
 
+# Keep the handoff agent user out of Byaan's code and data; the server runs as root and the Claude CLI lives outside /app
+RUN chmod 750 /app
+
 EXPOSE 8000
 
 ENV PYTHONPATH=/app
