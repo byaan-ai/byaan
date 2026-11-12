@@ -264,3 +264,4 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "error_handling: mark test as error handling test")
     config.addinivalue_line("markers", "conversation: mark test as conversation-related")
     config.addinivalue_line("markers", "streaming: mark test as streaming response test")
+    config.addinivalue_line("markers", "handoff: mark test as Byaan Handoffs related")

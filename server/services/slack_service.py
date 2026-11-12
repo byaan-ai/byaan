@@ -106,10 +106,13 @@ class SlackService:
         thread_ts: str | None = None,
         blocks: list | None = None,
         reply_broadcast: bool = False,
+        attachments: list | None = None,
     ) -> dict:
         """Post a message to a Slack channel."""
         try:
             kwargs = {"channel": channel, "text": text, "thread_ts": thread_ts, "blocks": blocks}
+            if attachments is not None:
+                kwargs["attachments"] = attachments
             if thread_ts and reply_broadcast:
                 kwargs["reply_broadcast"] = True
             response = await self.client.chat_postMessage(**kwargs)
@@ -120,6 +123,34 @@ class SlackService:
         except SlackApiError as e:
             logger.error(f"Slack API error posting message: {e.response['error']}")
             raise
+
+    async def update_message(
+        self, channel: str, ts: str, text: str, blocks: list | None = None, attachments: list | None = None
+    ) -> dict:
+        kwargs: dict = {"channel": channel, "ts": ts, "text": text, "blocks": blocks}
+        if attachments is not None:
+            kwargs["attachments"] = attachments
+        response = await self.client.chat_update(**kwargs)
+        return response.data
+
+    async def post_ephemeral(self, channel: str, user: str, text: str, thread_ts: str | None = None) -> bool:
+        try:
+            await self.client.chat_postEphemeral(channel=channel, user=user, text=text, thread_ts=thread_ts)
+            return True
+        except SlackApiError as e:
+            logger.warning(f"Slack ephemeral post failed: {e.response.get('error', 'unknown')}")
+            return False
+
+    async def open_view(self, trigger_id: str, view: dict) -> dict:
+        response = await self.client.views_open(trigger_id=trigger_id, view=view)
+        return response.data
+
+    async def get_permalink(self, channel: str, message_ts: str) -> str | None:
+        try:
+            response = await self.client.chat_getPermalink(channel=channel, message_ts=message_ts)
+            return response.get("permalink")
+        except SlackApiError:
+            return None
 
     async def set_assistant_status(self, channel: str, thread_ts: str, status: str) -> bool:
         """
@@ -178,6 +209,9 @@ class SlackService:
                 "id": user.get("id", user_id),
                 "name": name,
                 "email": profile.get("email"),
+                "team_id": user.get("team_id"),
+                "is_bot": bool(user.get("is_bot")),
+                "deleted": bool(user.get("deleted")),
             }
         except SlackApiError as e:
             logger.warning(f"Slack API error fetching user info: {e.response.get('error', 'unknown')}")

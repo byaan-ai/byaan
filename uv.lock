@@ -10,7 +10,7 @@ resolution-markers = [
 ]
 
 [options]
-exclude-newer = "2026-10-27T18:54:28.441991331Z"
+exclude-newer = "2026-10-28T14:53:55.617344263Z"
 exclude-newer-span = "P7D"
 
 [options.exclude-newer-package]
@@ -1040,6 +1040,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d7/3a/8331e95fa78ed8241090c157b7d3d75f8e86ebab77972346bfc4d0ac4ca6/databricks_sql_connector-4.7.0.tar.gz", hash = "sha256:c8193aacaaf4778e468dbcb85b861c960991436db164f6f55a9eb255270ea45a", size = 246471, upload-time = "2026-10-20T05:41:23.067Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/69/f4/9af042774fc4cb6e301913c79a512b4a0f5cc134046fb94a540c0a559ebe/databricks_sql_connector-4.7.0-py3-none-any.whl", hash = "sha256:2dedd8a5e4574dd3fac12fd6c8c1076a5d4292d7e87a9ffec5fd513253477df9", size = 272664, upload-time = "2026-10-20T05:41:21.407Z" },
+]
+
+[[package]]
+name = "detect-secrets"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyyaml" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/69/67/382a863fff94eae5a0cf05542179169a1c49a4c8784a9480621e2066ca7d/detect_secrets-1.5.0.tar.gz", hash = "sha256:6bb46dcc553c10df51475641bb30fd69d25645cc12339e46c824c1e0c388898a", size = 97351, upload-time = "2024-05-06T17:46:19.721Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/5e/4f5fe4b89fde1dc3ed0eb51bd4ce4c0bca406246673d370ea2ad0c58d747/detect_secrets-1.5.0-py3-none-any.whl", hash = "sha256:e24e7b9b5a35048c313e983f76c4bd09dad89f045ff059e354f9943bf45aa060", size = 120341, upload-time = "2024-05-06T17:46:16.628Z" },
 ]
 
 [[package]]
@@ -2652,6 +2665,7 @@ dependencies = [
     { name = "croniter" },
     { name = "cryptography" },
     { name = "databricks-sql-connector" },
+    { name = "detect-secrets" },
     { name = "duckdb" },
     { name = "duckdb-extension-excel" },
     { name = "duckdb-extensions" },
@@ -2716,6 +2730,7 @@ requires-dist = [
     { name = "croniter", specifier = ">=2.0.0" },
     { name = "cryptography", specifier = ">=48.0.1" },
     { name = "databricks-sql-connector", specifier = ">=4.7.0,<5.0.0" },
+    { name = "detect-secrets", specifier = ">=1.5.0" },
     { name = "duckdb", specifier = ">=1.1.0" },
     { name = "duckdb-extension-excel", specifier = ">=0.1.0" },
     { name = "duckdb-extensions", specifier = ">=0.1.0" },

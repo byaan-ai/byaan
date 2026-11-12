@@ -17,11 +17,15 @@ def _get_local_repo(ctx: RunContextWrapper, repo_id: str) -> dict | None:
 async def read_local_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) -> str:
     """Read a file's content from a connected local repository.
 
+    Each line starts with its line number and a tab. Cite these numbers as file:line, and leave them out when
+    quoting code.
+
     Args:
         repo_id: The local repository ID
         path: Relative file path within the repository
     """
     from server.services.local_repo_service import get_local_file_content
+    from server.tools.github_tools import number_lines
 
     repo_data = _get_local_repo(ctx, repo_id)
     if not repo_data:
@@ -34,7 +38,7 @@ async def read_local_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) 
     if content is None:
         return json.dumps({"error": f"File not found, too large, or unreadable: {path}"})
 
-    return json.dumps({"path": path, "content": content})
+    return json.dumps({"path": path, "content": number_lines(content)})
 
 
 @function_tool
