@@ -663,7 +663,6 @@ def test_stop_and_failure_replies_leave_actions_to_the_card(status):
 
 
 async def test_start_handoff_tool_needs_a_draft_the_person_has_seen(test_session, nb_ctx, monkeypatch):
-    import json
 
     from server.tools import handoffs as tools
 
@@ -842,7 +841,6 @@ async def test_slack_name_lookup_failure_falls_back_to_the_byaan_name(test_sessi
 
 @pytest.mark.parametrize("scheduled", [False, True])
 async def test_scheduled_proposals_leave_the_card_to_byaan(test_session, nb_ctx, monkeypatch, scheduled):
-    import json
 
     from server.tools import handoffs as tools
 

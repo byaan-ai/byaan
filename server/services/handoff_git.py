@@ -222,34 +222,39 @@ async def _collect_work_files(work: Path, repo: Path) -> tuple[list[tuple[str, i
     dir_fds: list[int] = [os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)]
     pending: list[tuple[str, int]] = [("", dir_fds[0])]
     total = 0
-    while pending:
-        rel_dir, dir_fd = pending.pop()
-        entries = []
-        for name in os.listdir(dir_fd):
-            if name == ".git":
-                continue
-            st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-            rel = f"{rel_dir}/{name}" if rel_dir else name
-            entries.append((rel, name, st, stat.S_ISDIR(st.st_mode)))
-        ignored = await _ignored(repo, [f"{rel}/" if is_dir else rel for rel, _, _, is_dir in entries])
-        for rel, name, st, is_dir in entries:
-            if is_dir:
-                if f"{rel}/" in ignored or rel in ignored:
+    try:
+        while pending:
+            rel_dir, dir_fd = pending.pop()
+            entries = []
+            for name in os.listdir(dir_fd):
+                if name == ".git":
                     continue
-                try:
-                    child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
-                except OSError:
-                    continue  # swapped for a symlink or removed since we listed it; skip it
-                dir_fds.append(child_fd)
-                pending.append((rel, child_fd))
-                continue
-            if rel in ignored:
-                continue
-            if stat.S_ISLNK(st.st_mode) or stat.S_ISREG(st.st_mode):
-                total += st.st_size
-                if total > MAX_SYNC_BYTES:
-                    raise GitError("Changes are larger than 200 MB; refusing to sync")
-                collected.append((rel, dir_fd, name, stat.S_ISLNK(st.st_mode)))
+                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+                rel = f"{rel_dir}/{name}" if rel_dir else name
+                entries.append((rel, name, st, stat.S_ISDIR(st.st_mode)))
+            ignored = await _ignored(repo, [f"{rel}/" if is_dir else rel for rel, _, _, is_dir in entries])
+            for rel, name, st, is_dir in entries:
+                if is_dir:
+                    if f"{rel}/" in ignored or rel in ignored:
+                        continue
+                    try:
+                        child_fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=dir_fd)
+                    except OSError:
+                        continue  # swapped for a symlink or removed since we listed it; skip it
+                    dir_fds.append(child_fd)
+                    pending.append((rel, child_fd))
+                    continue
+                if rel in ignored:
+                    continue
+                if stat.S_ISLNK(st.st_mode) or stat.S_ISREG(st.st_mode):
+                    total += st.st_size
+                    if total > MAX_SYNC_BYTES:
+                        raise GitError("Changes are larger than 200 MB; refusing to sync")
+                    collected.append((rel, dir_fd, name, stat.S_ISLNK(st.st_mode)))
+    except BaseException:
+        for fd in dir_fds:
+            os.close(fd)
+        raise
     return collected, dir_fds
 
 
