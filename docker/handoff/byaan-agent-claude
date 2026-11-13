@@ -1,0 +1,2 @@
+#!/bin/sh
+exec sudo -n -u byaan-agent -- /usr/local/bin/byaan-agent-exec "$@"

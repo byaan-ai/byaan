@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import ClientDisconnect
 
@@ -18,6 +19,7 @@ from server.repositories.llm_connections import LLMConnectionRepository
 from server.repositories.slack_workspace import SlackWorkspaceRepository
 from server.schemas.slack import SlackConfigCreate, SlackConfigResponse, SlackConfigUpdate
 from server.schemas.standard_response import success_response
+from server.services import handoff_slack
 from server.services.crypto_service import CryptoService
 from server.services.slack_agent_service import SlackAgentService
 from server.services.slack_service import SlackService
@@ -351,9 +353,25 @@ async def slack_interactivity(
             logger.warning(f"Slack signature verification failed: {e}")
             return JSONResponse(status_code=401, content={"error": "Invalid signature"})
 
+    if payload.get("type") == "view_submission" and handoff_slack.is_handoff_view(
+        (payload.get("view") or {}).get("callback_id")
+    ):
+        background_tasks.add_task(handoff_slack.handle_view, team_id, payload)
+        return Response(status_code=200)
+
     if payload.get("type") == "block_actions":
         action = payload.get("actions", [{}])[0]
         action_id = action.get("action_id")
+
+        if handoff_slack.is_handoff_action(action_id):
+            if handoff_slack.needs_modal(action_id):
+                try:
+                    await asyncio.wait_for(handoff_slack.open_modal(team_id, payload, action), timeout=2.5)
+                except Exception as e:
+                    logger.warning(f"Could not open handoff modal: {e}")
+            else:
+                background_tasks.add_task(handoff_slack.handle_action, team_id, payload, action)
+            return JSONResponse(status_code=200, content={"ok": True})
 
         if action_id == "generate_dashboard":
             value_data = json.loads(action.get("value", "{}"))

@@ -22,12 +22,13 @@ from server.repositories.queries import QueryRepository
 from server.repositories.schedules import ScheduleRunRepository
 from server.repositories.threads import ThreadRepository
 from server.schemas.agent import AgentRequest
+from server.services.chat_delivery import ensure_thread_id
 from server.services.completion_service import CompletionError, CompletionService
 from server.services.crypto_service import CryptoService
 from server.services.query_service import QueryService
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
 from server.services.slack_service import SlackService
-from server.services.unified_agent import stream_handoff_agent_response
+from server.services.unified_agent import _load_github_repos_for_agent, stream_handoff_agent_response
 from server.utils.custom_logger import get_logger
 from server.utils.slack_formatter import markdown_to_slack_blocks
 from server.utils.slack_table_parser import SlackTableParser
@@ -164,6 +165,7 @@ class ScheduleService:
         current_datetime = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
         last_findings_block = await ScheduleService._format_last_findings(session, schedule)
+        handoff_step = await ScheduleService._handoff_step(session, schedule)
 
         scheduled_run_prompt = f"""## SCHEDULED MONITOR RUN
 
@@ -184,7 +186,7 @@ Date handling:
 - "this week" = start of current week to today
 - "last month" = previous calendar month
 - "past 30 days" = last 30 days
-
+{handoff_step}
 When you are done, call ``record_monitor_findings`` exactly once:
 - ``outcome='alert'`` when something in the instruction's alert criteria matches.
 - ``outcome='no_change'`` when the data looks the same as the previous run.
@@ -460,7 +462,7 @@ in the final text.
         }.get(trigger_label, "fired on its scheduled cron")
         header = f"[[MONITOR_RUN_HEADER:{schedule.id}|{schedule.name}|{when}|{trigger_phrase}]]"
 
-        thread_id = await ScheduleService._ensure_thread_id(session, schedule.notebook_id)
+        thread_id = await ensure_thread_id(session, schedule.notebook_id)
 
         message_repo = MessageRepository(session)
         await message_repo.create(
@@ -473,30 +475,11 @@ in the final text.
         )
 
     @staticmethod
-    async def _ensure_thread_id(session: AsyncSession, notebook_id) -> Any:
-        """Return the thread id for ``notebook_id``, creating a thread row if none exists.
-
-        Prevents FK violations when writing assistant messages for monitors whose
-        notebook has never seen a chat turn.
-        """
-        from server.repositories.threads import ThreadRepository
-
-        thread_repo = ThreadRepository(session)
-        thread = await thread_repo.get(notebook_id)
-        if thread:
-            return notebook_id
-        existing = await thread_repo.list(filters={"notebook_id": notebook_id})
-        if existing:
-            return existing[0].id
-        await thread_repo.create({"id": notebook_id, "notebook_id": notebook_id, "thread_title": None})
-        return notebook_id
-
-    @staticmethod
     async def _write_run_summary(session: AsyncSession, schedule: Schedule, content: str) -> None:
         """Write a synthesized assistant message when the agent produced no prose."""
         from server.repositories.messages import MessageRepository
 
-        thread_id = await ScheduleService._ensure_thread_id(session, schedule.notebook_id)
+        thread_id = await ensure_thread_id(session, schedule.notebook_id)
 
         message_repo = MessageRepository(session)
         await message_repo.create(
@@ -507,6 +490,21 @@ in the final text.
                 "metadata_": {"source": "monitor_run_summary"},
             }
         )
+
+    @staticmethod
+    async def _handoff_step(session: AsyncSession, schedule: Schedule) -> str:
+        from server.utils.deployment import is_feature_enabled
+
+        if not is_feature_enabled("handoffs_enabled"):
+            return ""
+        repos = await _load_github_repos_for_agent(schedule.tenant_id, schedule.created_by, session)
+        if not any(data.get("handoff_enabled") for data in repos.values()):
+            return ""
+        return """
+If this run traces a problem to code in a connected repository with handoffs ON, read the file to confirm the
+bug, then call ``propose_handoff`` (cite file:line, give a check that fails today) before
+``record_monitor_findings``. A person must click Start. Skip this for data-only problems or guesses.
+"""
 
     @staticmethod
     async def _format_last_findings(session: AsyncSession, schedule: Schedule) -> str:
@@ -862,6 +860,7 @@ Focus on what the data shows, not technical details about queries."""
 
             posted_channel: str | None = None
             posted_ts: str | None = None
+            fell_back = False
             if has_dashboard and schedule.notebook_id:
                 posted_channel, posted_ts = await ScheduleService._upload_dashboard_screenshot_to_slack(
                     slack_client=slack_client,
@@ -891,7 +890,7 @@ Focus on what the data shows, not technical details about queries."""
 
                 all_blocks = all_blocks + ScheduleService._monitor_run_action_blocks(schedule)
 
-                posted_channel, posted_ts = await ScheduleService._post_with_thread_fallback(
+                posted_channel, posted_ts, fell_back = await ScheduleService._post_with_thread_fallback(
                     slack_client=slack_client,
                     schedule=schedule,
                     session=session,
@@ -901,6 +900,21 @@ Focus on what the data shows, not technical details about queries."""
                     reply_broadcast=reply_broadcast,
                     channel_id=effective_channel_id,
                 )
+            from server.utils.deployment import is_feature_enabled
+
+            if posted_channel and is_feature_enabled("handoffs_enabled"):
+                from server.services.handoff_notifier import deliver_monitor_proposals
+
+                try:
+                    await deliver_monitor_proposals(
+                        session,
+                        schedule_id=schedule.id,
+                        workspace=workspace,
+                        channel_id=posted_channel,
+                        thread_ts=posted_ts if fell_back or not thread_ts else thread_ts,
+                    )
+                except Exception as exc:
+                    logger.warning(f"Could not attach handoff proposals for schedule {schedule.id}: {exc}")
             return True, None, posted_channel, posted_ts
         except Exception as e:
             logger.error(f"Error posting to Slack: {e}", exc_info=True)
@@ -936,40 +950,30 @@ Focus on what the data shows, not technical details about queries."""
         thread_ts: str | None,
         reply_broadcast: bool,
         channel_id: str | None = None,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, bool]:
         """Post to thread; on thread_not_found fall back to channel root.
 
-        Returns ``(posted_channel_id, posted_message_ts)`` so callers can record
+        Returns ``(posted_channel_id, posted_message_ts, fell_back)`` so callers can record
         where the monitor's output actually landed. This lets us route Slack
         follow-up threads back to the monitor's home notebook.
         """
-        from slack_sdk.errors import SlackApiError
-
         from server.repositories.schedules import ScheduleRepository
+        from server.services.chat_delivery import post_slack_with_fallback
 
         target_channel = channel_id or schedule.slack_channel_id
-        try:
-            response = await slack_client.post_message(
-                channel=target_channel,
-                text=text,
-                blocks=blocks,
-                thread_ts=thread_ts,
-                reply_broadcast=reply_broadcast if thread_ts else False,
-            )
-            return target_channel, response.get("ts") if isinstance(response, dict) else None
-        except SlackApiError as e:
-            err = (e.response or {}).get("error", "")
-            if thread_ts and err in {"thread_not_found", "not_in_channel", "channel_not_found"}:
-                logger.warning(f"Thread post failed for schedule {schedule.id} ({err}); falling back to channel root")
-                if target_channel == schedule.slack_channel_id:
-                    await ScheduleRepository(session).clear_lost_thread(schedule.id)
-                response = await slack_client.post_message(
-                    channel=target_channel,
-                    text=text,
-                    blocks=blocks,
-                )
-                return target_channel, response.get("ts") if isinstance(response, dict) else None
-            raise
+        posted_channel, posted_ts, fell_back = await post_slack_with_fallback(
+            slack_client,
+            channel=target_channel,
+            text=text,
+            blocks=blocks,
+            thread_ts=thread_ts,
+            reply_broadcast=reply_broadcast,
+        )
+        if fell_back:
+            logger.warning(f"Thread post failed for schedule {schedule.id}; fell back to channel root")
+            if target_channel == schedule.slack_channel_id:
+                await ScheduleRepository(session).clear_lost_thread(schedule.id)
+        return posted_channel, posted_ts, fell_back
 
     @staticmethod
     def preview_fire_times(cron_expression: str, tz: str, count: int = 3) -> list[datetime]:

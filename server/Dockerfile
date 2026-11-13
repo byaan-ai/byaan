@@ -54,6 +54,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && npm install -g @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
+# Byaan Handoffs: git for clone/push, sudo to run Claude as the isolated agent user
+RUN apt-get update && apt-get install -y --no-install-recommends git sudo \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/handoff/ /tmp/handoff/
+RUN sh /tmp/handoff/setup-agent-user.sh
+ENV HANDOFF_AGENT_CLI=/usr/local/bin/byaan-agent-claude
+ENV HANDOFF_AGENT_GROUP=byaan-handoff
+
 COPY --from=ghcr.io/astral-sh/uv:0.11.3 /uv /usr/local/bin/uv
 
 COPY --from=deps /app/.venv /app/.venv
@@ -62,6 +70,9 @@ COPY server/ /app/server/
 COPY pyproject.toml uv.lock /app/
 
 RUN .venv/bin/python -m compileall -q /app/server/ || true
+
+# Keep the handoff agent user out of Byaan's code and data; the server runs as root and the Claude CLI lives outside /app
+RUN chmod 750 /app
 
 EXPOSE 8000
 

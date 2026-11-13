@@ -39,6 +39,13 @@ COPY pyproject.toml uv.lock /app/
 ENV UV_HTTP_TIMEOUT=300
 RUN --mount=type=cache,target=/root/.cache/uv UV_LINK_MODE=copy uv sync --frozen --no-install-project
 
+# Move the Claude CLI bundled with claude-agent-sdk out of /app so the handoff agent user can run it without reading /app
+RUN CLAUDE_BIN="$(/app/.venv/bin/python -c 'import claude_agent_sdk, os; print(os.path.join(os.path.dirname(claude_agent_sdk.__file__), "_bundled", "claude"))')" \
+    && test -x "$CLAUDE_BIN" \
+    && mkdir -p /opt/claude \
+    && mv "$CLAUDE_BIN" /opt/claude/claude \
+    && ln -s /opt/claude/claude "$CLAUDE_BIN"
+
 # Stage 3: Runtime image
 FROM python:3.11-slim
 
@@ -81,6 +88,7 @@ COPY --from=frontend-builder /build/client/dist /app/client/dist
 
 # Copy pre-built Python venv and server code
 COPY --from=python-builder /app/.venv /app/.venv
+COPY --from=python-builder /opt/claude /opt/claude
 COPY pyproject.toml uv.lock /app/
 COPY server/ /app/server/
 
@@ -98,6 +106,13 @@ RUN chmod +x /usr/local/bin/entrypoint.sh /app/start-backend.sh
 # Create non-root user for backend
 RUN useradd --create-home --shell /bin/bash byaan
 
+# Byaan Handoffs: git for clone/push, sudo plus an isolated agent user running the Claude CLI bundled with claude-agent-sdk
+RUN apt-get update && apt-get install -y --no-install-recommends git sudo \
+    && rm -rf /var/lib/apt/lists/*
+RUN test -x /opt/claude/claude && ln -s /opt/claude/claude /usr/local/bin/claude
+COPY docker/handoff/ /tmp/handoff/
+RUN sh /tmp/handoff/setup-agent-user.sh
+
 # Create data directory and cache for byaan user
 RUN mkdir -p /data/postgres /data/uploads /data/backups /data/logs /home/byaan/.cache/uv
 
@@ -106,11 +121,14 @@ RUN mkdir -p /run/postgresql && chown -R postgres:postgres /run/postgresql
 RUN mkdir -p /var/lib/postgresql/15/main && chown -R postgres:postgres /var/lib/postgresql
 
 # Set ownership for byaan user
-RUN chown -R byaan:byaan /app /data/uploads /data/backups /data/logs /home/byaan
+RUN chown -R byaan:byaan /app /data/uploads /data/backups /data/logs /home/byaan && chmod 750 /app
 
 # Environment variables
 ENV PYTHONPATH=/app
 ENV DATA_DIR=/data
+ENV HANDOFFS_STORAGE_DIR=/data/handoffs
+ENV HANDOFF_AGENT_CLI=/usr/local/bin/byaan-agent-claude
+ENV HANDOFF_AGENT_GROUP=byaan-handoff
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 

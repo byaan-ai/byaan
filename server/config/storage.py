@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import os
 import platform
+import stat
 import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
+_HANDOFFS_ROOT_DENIED = stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH | stat.S_IWOTH
 
 
 def get_persistent_data_path() -> Path:
@@ -86,3 +89,20 @@ def dataset_directory(dataset_id: str) -> Path:
     (base / "raw").mkdir(parents=True, exist_ok=True)
     (base / "duckdb").mkdir(parents=True, exist_ok=True)
     return base
+
+
+@lru_cache(maxsize=1)
+def handoffs_root() -> Path:
+    """Per-handoff workspaces; outside the frozen app they live in the temp dir so dev hot-reload never sees the clones."""
+    default = (
+        DEFAULT_DATA_DIR / "handoffs"
+        if getattr(sys, "frozen", False)
+        else Path(tempfile.gettempdir()) / "byaan-handoffs"
+    )
+    path = _resolve_path(os.getenv("HANDOFFS_STORAGE_DIR"), default)
+    path.mkdir(parents=True, exist_ok=True)
+    # The agent user may enter its own workspace but must not list the others
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & _HANDOFFS_ROOT_DENIED:
+        path.chmod(mode & ~_HANDOFFS_ROOT_DENIED)
+    return path

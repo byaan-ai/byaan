@@ -28,6 +28,7 @@ from server.schemas.agent import AgentRequest
 from server.services.completion_service import CompletionError, CompletionService
 from server.services.crypto_service import CryptoService
 from server.services.export_service import CompiledHtmlExportService
+from server.services.handoff_notifier import MARKER_RE as HANDOFF_MARKER_RE
 from server.services.screenshot_service import ScreenshotService, ScreenshotServiceError
 from server.services.slack_context import SlackContext, slack_context_scope
 from server.services.slack_intent_classifier import (
@@ -174,6 +175,24 @@ class SlackAgentService:
                 _time.monotonic() + _ASSISTANT_CAPABILITY_NEGATIVE_TTL_SECONDS,
             )
         return ok
+
+    @staticmethod
+    async def _settle_status(
+        slack_client: SlackService, channel_id: str, thread_ts: str, conversation_id: UUID
+    ) -> None:
+        """Clear Byaan's reply status, or keep the thread working indicator while a handoff works."""
+        from server.db.session import AsyncSessionFactory
+        from server.services.handoff_notifier import thread_indicator_status
+        from server.utils.deployment import is_feature_enabled
+
+        status = ""
+        if is_feature_enabled("handoffs_enabled"):
+            try:
+                async with AsyncSessionFactory() as session:
+                    status = await thread_indicator_status(session, conversation_id)
+            except Exception as exc:
+                logger.warning(f"Could not read handoff status for thread {thread_ts}: {exc}")
+        await slack_client.set_assistant_status(channel=channel_id, thread_ts=thread_ts, status=status)
 
     @staticmethod
     async def _resolve_classifier_model(
@@ -399,7 +418,7 @@ class SlackAgentService:
             finally:
                 if assistant_enabled:
                     asyncio.create_task(
-                        slack_client.set_assistant_status(channel=channel_id, thread_ts=status_thread_ts, status="")
+                        SlackAgentService._settle_status(slack_client, channel_id, status_thread_ts, conversation.id)
                     )
 
             await SlackAgentService._maybe_post_monitor_card(
@@ -409,6 +428,7 @@ class SlackAgentService:
                 thread_ts=thread_ts or event_ts,
                 session=session,
             )
+            await SlackAgentService._post_handoff_cards(conversation.id, session)
 
             conversation.bot_owned = True
             await session.commit()
@@ -442,16 +462,10 @@ class SlackAgentService:
     @staticmethod
     async def _get_bot_token(workspace: SlackWorkspace, session: AsyncSession) -> str:
         """Decrypt and return the bot token, using a short-lived memory cache."""
-        from server.services.slack_service import cache_bot_token, cached_bot_token
+        from server.services.chat_delivery import slack_client_for_workspace
 
-        workspace_id = str(workspace.id)
-        cached = cached_bot_token(workspace_id)
-        if cached:
-            return cached
-        decrypted = await CryptoService.decrypt_config(workspace.bot_token_encrypted, session)
-        token = decrypted.get("bot_token", decrypted) if isinstance(decrypted, dict) else decrypted
-        cache_bot_token(workspace_id, token)
-        return token
+        client = await slack_client_for_workspace(workspace, session)
+        return client.client.token
 
     @staticmethod
     async def _get_signing_secret(workspace: SlackWorkspace, session: AsyncSession) -> str:
@@ -824,7 +838,7 @@ Output only the cleaned message in Markdown, nothing else."""
                 flags=re.DOTALL,
             )
             cleaned = re.sub(r"Tool executed successfully", "", cleaned)
-            cleaned = cleaned.strip()
+            cleaned = HANDOFF_MARKER_RE.sub("", cleaned).strip()
 
             if append_mention_hint:
                 cleaned += SlackAgentService.SLACK_MENTION_HINT
@@ -852,7 +866,9 @@ Output only the cleaned message in Markdown, nothing else."""
 
         except Exception as e:
             logger.error(f"Error summarizing for Slack: {e}", exc_info=True)
-            text = raw_response + (SlackAgentService.SLACK_MENTION_HINT if append_mention_hint else "")
+            text = HANDOFF_MARKER_RE.sub("", raw_response) + (
+                SlackAgentService.SLACK_MENTION_HINT if append_mention_hint else ""
+            )
             return markdown_to_slack_blocks(text)
 
     @staticmethod
@@ -903,6 +919,48 @@ When processing this request:
 
 User's question:
 {question}"""
+
+    @staticmethod
+    async def _post_handoff_cards(conversation_id: UUID, session: AsyncSession) -> None:
+        from server.utils.deployment import is_feature_enabled
+
+        if not is_feature_enabled("handoffs_enabled"):
+            return
+        from server.services.handoff_notifier import post_pending_cards
+
+        try:
+            await post_pending_cards(session, conversation_id)
+        except Exception as exc:
+            logger.warning(f"Could not post handoff card for conversation {conversation_id}: {exc}")
+
+    @staticmethod
+    async def resolve_slack_actor(
+        workspace: SlackWorkspace,
+        slack_user_id: str,
+        user_team_id: str | None,
+        slack_client: SlackService,
+        session: AsyncSession,
+    ) -> tuple[UUID | None, str | None, str | None]:
+        """Returns ``(user_id, display_name, rejection)``; membership comes from the signed payload's user team."""
+        from sqlalchemy import select
+
+        from server.models.tenant_member import TenantMember
+
+        if user_team_id != workspace.slack_team_id:
+            return None, None, "Handoffs can only be controlled by members of this Slack workspace."
+        info = await slack_client.get_user_info(slack_user_id) or {}
+        if info.get("is_bot") or info.get("deleted"):
+            return None, info.get("name"), "This Slack account can't control handoffs."
+        user_id = None
+        if email := info.get("email"):
+            result = await session.execute(
+                select(User.id)
+                .join(TenantMember, TenantMember.user_id == User.id)
+                .where(User.email == email, TenantMember.tenant_id == workspace.tenant_id)
+                .limit(1)
+            )
+            user_id = result.scalar_one_or_none()
+        return user_id, info.get("name"), None
 
     @staticmethod
     async def _maybe_post_monitor_card(
@@ -1519,7 +1577,7 @@ User's question:
                 finally:
                     if assistant_enabled:
                         asyncio.create_task(
-                            slack_client.set_assistant_status(channel=channel_id, thread_ts=thread_ts, status="")
+                            SlackAgentService._settle_status(slack_client, channel_id, thread_ts, conversation.id)
                         )
 
                 await SlackAgentService._maybe_post_monitor_card(
@@ -1529,6 +1587,7 @@ User's question:
                     thread_ts=thread_ts,
                     session=session,
                 )
+                await SlackAgentService._post_handoff_cards(conversation.id, session)
 
             event_log.processing_status = "completed"
             await session.commit()
