@@ -295,6 +295,7 @@ def test_handoff_tools_registered_in_both_modes(monkeypatch):
     assert {
         "propose_handoff",
         "get_handoff_status",
+        "get_handoff_changes",
         "start_handoff",
         "message_handoff",
         "restart_handoff",
@@ -583,6 +584,55 @@ async def test_status_drops_an_old_ci_failure_once_ci_passes(test_session, nb_ct
 
     await record(test_session, handoff_id, "ci", "ci", "CI success", {"state": "success"}, notify=False)
     assert (await handoff_service.status_summary(test_session, handoff))["last_ci_failure"] is None
+
+
+async def test_chat_sees_what_the_handoff_changed(test_session, nb_ctx, monkeypatch):
+    from server.services import github_app_service, github_service
+    from server.services.github_app_service import HandoffGitHubAuth
+
+    handoff_id = (await _draft(test_session, nb_ctx)).handoff.id
+    repo = HandoffRepository(test_session)
+    handoff = await repo.get_unscoped(handoff_id)
+    assert await handoff_service.branch_changes(test_session, handoff) == {
+        "pushed": False,
+        "message": "Nothing has been pushed for this handoff yet.",
+    }
+
+    result = {"title": "Reject off-menu items", "summary": "Both confirm paths reject them", "tests": "t", "risks": ""}
+    await handoff_service.record(test_session, handoff_id, "agent", "result", result["title"], result, notify=False)
+    await repo.update_fields(handoff_id, branch="byaan/h-1-fix", head_sha="abc123")
+    handoff = await repo.get_unscoped(handoff_id)
+    status = await handoff_service.status_summary(test_session, handoff)
+    assert status["work_pushed"] is True and status["claude_result"] == result
+
+    async def fake_auth(*_args, **_kwargs):
+        return HandoffGitHubAuth(token="tok", kind="org")
+
+    small, large = "+fixed", "+" + "x" * handoff_service.BRANCH_PATCH_BUDGET
+    compare = {
+        "files": [
+            {"filename": "app.py", "status": "modified", "patch": small, "additions": 1, "deletions": 0},
+            {"filename": "big.py", "status": "modified", "patch": large, "additions": 9, "deletions": 0},
+        ],
+        "commits": [{"sha": "abc123", "message": "Reject off-menu items"}],
+        "truncated": False,
+    }
+    calls = []
+
+    async def fake_compare(token, repo_full_name, base, head, max_patch_bytes):
+        calls.append((base, head))
+        return compare
+
+    monkeypatch.setattr(github_app_service, "resolve_auth", fake_auth)
+    monkeypatch.setattr(github_service, "compare_commits", fake_compare)
+    changes = await handoff_service.branch_changes(test_session, handoff)
+    assert calls == [(handoff.base_branch, "byaan/h-1-fix")]
+    assert changes["commits"] == compare["commits"]
+    assert [(f["filename"], f["patch"], f["patch_omitted"]) for f in changes["files"]] == [
+        ("app.py", small, False),
+        ("big.py", None, True),
+    ]
+    assert changes["incomplete_patches"] == ["big.py"] and changes["repo_id"] == str(handoff.github_repository_id)
 
 
 class FakeSlackThread:
