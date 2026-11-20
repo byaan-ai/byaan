@@ -49,8 +49,18 @@ class FakeGitHub:
     async def has_ci(self, repo, sha):
         return self.has_ci_value
 
+    find_pull_error: Exception | None = None
+
     async def find_open_pull(self, repo, head):
+        if FakeGitHub.find_pull_error:
+            error, FakeGitHub.find_pull_error = FakeGitHub.find_pull_error, None
+            raise error
         return None
+
+    async def compare(self, repo, base, head):
+        numstat = _git(FakeGitHub.remote, "diff", "--numstat", f"{base}...{head}")
+        rows = [line.split("\t") for line in numstat.splitlines()]
+        return {"files": [{"filename": name, "additions": int(a), "deletions": int(d)} for a, d, name in rows]}
 
     async def create_pull(self, repo, *, head, base, title, body):
         number = len(FakeGitHub.created) + 1
@@ -134,6 +144,7 @@ async def env(tmp_path, monkeypatch):
     FakeGitHub.remote = bare
     FakeGitHub.pulls, FakeGitHub.created, FakeGitHub.updated, FakeGitHub.checks = {}, [], [], []
     FakeGitHub.has_ci_value = True
+    FakeGitHub.find_pull_error = None
 
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'db.sqlite'}")
     async with engine.begin() as conn:
@@ -493,6 +504,32 @@ async def test_restart_after_unpushed_failure_reuses_clone_branch_and_session(en
     assert runner.adapter.resume == "sess-1"
     assert runner.adapter.partial == "half done\n"
     assert marker.exists()
+
+
+async def test_restart_after_pushing_without_a_pr_opens_the_pr_without_rerunning_claude(env):
+    factory, ids = env
+    handoff_id = await _queued(factory, ids)
+    runner = handoff_runner.HandoffRunner()
+    runner._running = True
+    runner.adapter = FakeAdapter({"app/scheduler.py": "pushed once\n"})
+    FakeGitHub.find_pull_error = handoff_runner.GitHubError(502, "Server disconnected")
+    await runner._claim()
+    await _drain(runner)
+    failed = await _get(factory, handoff_id)
+    assert failed.status == "failed" and failed.head_sha and failed.pr_number is None
+
+    async with factory() as session:
+        await session.execute(update(Handoff).where(Handoff.id == handoff_id).values(status="queued"))
+        await session.commit()
+    runner.adapter = FakeAdapter({})
+    await runner._claim()
+    await _drain(runner)
+
+    handoff = await _get(factory, handoff_id)
+    assert handoff.status == "ci_running" and handoff.pr_number == 1, handoff.error
+    assert runner.adapter.prompts == []
+    assert "Falls back to the clinic tz." in FakeGitHub.created[0]["body"]
+    assert "1 files, +1 −2" in FakeGitHub.created[0]["body"]
 
 
 async def test_rerun_with_no_new_changes_on_an_open_pr_ends_done(env):

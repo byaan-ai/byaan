@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
+import httpx
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from server.repositories.handoffs import (
     utcnow,
 )
 from server.schemas.handoff import HandoffBrief, HandoffRepoConfig, HandoffTeamSettings
+from server.services import github_service
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,6 +31,7 @@ PROPOSAL_COOLDOWN = timedelta(days=7)
 RESTARTABLE_STATUSES = ("done", "ci_failed", "failed", "cancelled")
 _FILE_LINE = re.compile(r"[\w./-]+\.\w+:\d+")
 TEAM_SETTINGS_KEY = "handoff_team_settings"
+BRANCH_PATCH_BUDGET = 40_000
 
 
 class HandoffError(Exception):
@@ -647,6 +650,8 @@ async def status_summary(session: AsyncSession, handoff: Handoff) -> dict[str, A
         "branch": handoff.branch,
         "pr_url": handoff.pr_url,
         "untested": handoff.untested,
+        "work_pushed": bool(handoff.head_sha),
+        "claude_result": await latest_result(session, handoff.id),
         "ci_fix_round": handoff.ci_fix_round,
         "error": handoff.error,
         "heartbeat_age_seconds": heartbeat_age,
@@ -669,6 +674,64 @@ async def status_summary(session: AsyncSession, handoff: Handoff) -> dict[str, A
     if handoff.status == "queued":
         summary["queue_position"] = await HandoffRepository(session).queue_position(handoff)
     return summary
+
+
+async def latest_result(session: AsyncSession, handoff_id: UUID) -> dict[str, Any] | None:
+    event = await HandoffEventRepository(session).latest_of_kind(handoff_id, "result")
+    if not event or not event.data:
+        return None
+    return {k: event.data.get(k) for k in ("title", "summary", "tests", "risks")}
+
+
+async def branch_changes(session: AsyncSession, handoff: Handoff) -> dict[str, Any]:
+    """Diff of the handoff branch against its base, read from GitHub so it survives the local clone's cleanup."""
+    from server.services.github_app_service import resolve_auth
+
+    if not handoff.branch or not handoff.head_sha:
+        return {"pushed": False, "message": "Nothing has been pushed for this handoff yet."}
+    auth = await resolve_auth(
+        session,
+        tenant_id=handoff.tenant_id,
+        repo_full_name=handoff.repo_full_name,
+        requester_id=handoff.requested_by,
+        origin=handoff.origin,
+    )
+    if not auth:
+        raise HandoffError("No GitHub credentials are available to read the handoff branch.")
+    try:
+        compare = await github_service.compare_commits(
+            auth.token, handoff.repo_full_name, handoff.base_branch, handoff.branch, BRANCH_PATCH_BUDGET
+        )
+    except httpx.HTTPError as exc:
+        raise HandoffError(f"GitHub didn't return the branch diff: {exc}") from exc
+    if compare is None:
+        raise HandoffError(f"Branch {handoff.branch} wasn't found on GitHub or its diff is too large to read.")
+    budget = BRANCH_PATCH_BUDGET
+    files = []
+    for file in compare["files"]:
+        size = len(file.get("patch") or "")
+        include = size <= budget
+        budget -= size if include else 0
+        files.append({**file, "patch": file.get("patch") if include else None, "patch_omitted": not include})
+    incomplete = [f["filename"] for f in files if f["patch_omitted"] or f.get("patch_truncated")]
+    changes = {
+        "pushed": True,
+        "repo": handoff.repo_full_name,
+        "repo_id": str(handoff.github_repository_id) if handoff.github_repository_id else None,
+        "base": handoff.base_branch,
+        "branch": handoff.branch,
+        "pr_url": handoff.pr_url,
+        "commits": compare["commits"],
+        "files": files,
+        "files_truncated": compare["truncated"],
+    }
+    if incomplete:
+        changes["incomplete_patches"] = incomplete
+        changes["next_step"] = (
+            "These patches are incomplete. Read each file with get_repo_file(repo_id, path, ref=branch) "
+            "before explaining it."
+        )
+    return changes
 
 
 async def _reload(session: AsyncSession, handoff_id: UUID) -> Handoff:

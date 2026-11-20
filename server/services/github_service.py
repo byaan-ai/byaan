@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import os
 import secrets
@@ -36,6 +37,31 @@ AUTH_METHOD_PAT_CLASSIC = "pat_classic"
 AUTH_METHOD_PAT_FINE_GRAINED = "pat_fine_grained"
 
 _device_code_store: dict[str, dict] = {}  # device_code → {tenant_id, user_id}
+
+_RETRY_DELAYS = (0.5, 2.0)
+_IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_DROPPED_RESPONSE_ERRORS = (httpx.RemoteProtocolError, httpx.ReadError)
+_NEVER_SENT_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout)
+
+
+class _RetryingTransport(httpx.AsyncHTTPTransport):
+    """Retries GitHub requests the network dropped. A request that may have reached GitHub is only retried when
+    repeating it is safe (idempotent methods); one whose connection never opened is always retried."""
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        for delay in _RETRY_DELAYS:
+            try:
+                return await super().handle_async_request(request)
+            except (*_NEVER_SENT_ERRORS, *_DROPPED_RESPONSE_ERRORS) as exc:
+                if not isinstance(exc, _NEVER_SENT_ERRORS) and request.method not in _IDEMPOTENT_METHODS:
+                    raise
+                logger.warning(f"[GITHUB] {request.method} {request.url.path} failed ({exc!r}), retrying")
+                await asyncio.sleep(delay)
+        return await super().handle_async_request(request)
+
+
+def github_client(timeout: float, **kwargs) -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=timeout, transport=_RetryingTransport(), **kwargs)
 
 
 def _get_frontend_url() -> str:
@@ -128,7 +154,7 @@ async def exchange_code(
 
     logger.info("[GITHUB OAUTH] Exchanging code for token...")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with github_client(timeout=30.0) as client:
         response = await client.post(
             GITHUB_TOKEN_URL,
             json={
@@ -226,7 +252,7 @@ async def delete_github_token(tenant_id: UUID, user_id: UUID, session: AsyncSess
 
 
 async def _fetch_github_user(token: str) -> tuple[dict, list[str]]:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         response = await client.get(
             f"{GITHUB_API_BASE}/user",
             headers={**GITHUB_HEADERS, "Authorization": f"Bearer {token}"},
@@ -250,7 +276,7 @@ async def validate_token_scopes(token: str) -> list[str]:
 
 
 async def list_user_repos(token: str, page: int = 1, per_page: int = 30, search: str | None = None) -> list[dict]:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         if search:
             user = await get_authenticated_user(token)
             response = await client.get(
@@ -296,7 +322,7 @@ async def list_user_repos(token: str, page: int = 1, per_page: int = 30, search:
 
 
 async def get_repo_tree(token: str, owner: str, repo: str, branch: str, recursive: bool = True) -> list[dict]:
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with github_client(timeout=30.0) as client:
         params = {"recursive": "1"} if recursive else {}
         response = await client.get(
             f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{branch}",
@@ -309,7 +335,7 @@ async def get_repo_tree(token: str, owner: str, repo: str, branch: str, recursiv
 
 
 async def get_file_content(token: str, owner: str, repo: str, path: str, ref: str | None = None) -> str | None:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         params = {"ref": ref} if ref else {}
         response = await client.get(
             f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{path}",
@@ -332,7 +358,7 @@ async def get_file_content(token: str, owner: str, repo: str, path: str, ref: st
 
 
 async def get_repo_languages(token: str, owner: str, repo: str) -> dict:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         response = await client.get(
             f"{GITHUB_API_BASE}/repos/{owner}/{repo}/languages",
             headers={**GITHUB_HEADERS, "Authorization": f"Bearer {token}"},
@@ -343,7 +369,7 @@ async def get_repo_languages(token: str, owner: str, repo: str) -> dict:
 
 
 async def get_latest_commit_sha(token: str, owner: str, repo: str, branch: str) -> str:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         response = await client.get(
             f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{branch}",
             headers={**GITHUB_HEADERS, "Authorization": f"Bearer {token}"},
@@ -356,14 +382,16 @@ COMPARE_MAX_FILES = 300
 COMPARE_MAX_PATCH_BYTES = 4096
 
 
-async def compare_commits(token: str, repo_full_name: str, base_sha: str, head_sha: str) -> dict | None:
+async def compare_commits(
+    token: str, repo_full_name: str, base_sha: str, head_sha: str, max_patch_bytes: int = COMPARE_MAX_PATCH_BYTES
+) -> dict | None:
     """Compare two commits via the GitHub compare API.
 
-    Returns a dict of changed files (patches capped at ~4KB each, file list capped at 300
+    Returns a dict of changed files (patches capped at ``max_patch_bytes`` each, ~4KB by default, file list capped at 300
     with a ``truncated`` flag), or ``None`` when the compare cannot be resolved (404, base/head
     not found, or a too-large diff GitHub refuses to serve).
     """
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with github_client(timeout=30.0) as client:
         response = await client.get(
             f"{GITHUB_API_BASE}/repos/{repo_full_name}/compare/{base_sha}...{head_sha}",
             headers={**GITHUB_HEADERS, "Authorization": f"Bearer {token}"},
@@ -383,13 +411,15 @@ async def compare_commits(token: str, repo_full_name: str, base_sha: str, head_s
         files = []
         for raw in raw_files[:COMPARE_MAX_FILES]:
             patch = raw.get("patch")
-            if patch is not None and len(patch.encode("utf-8")) > COMPARE_MAX_PATCH_BYTES:
-                patch = patch.encode("utf-8")[:COMPARE_MAX_PATCH_BYTES].decode("utf-8", errors="ignore")
+            patch_truncated = patch is not None and len(patch.encode("utf-8")) > max_patch_bytes
+            if patch_truncated:
+                patch = patch.encode("utf-8")[:max_patch_bytes].decode("utf-8", errors="ignore")
             files.append(
                 {
                     "filename": raw.get("filename"),
                     "status": raw.get("status"),
                     "patch": patch,
+                    "patch_truncated": patch_truncated,
                     "additions": raw.get("additions", 0),
                     "deletions": raw.get("deletions", 0),
                 }
@@ -397,6 +427,10 @@ async def compare_commits(token: str, repo_full_name: str, base_sha: str, head_s
 
         return {
             "files": files,
+            "commits": [
+                {"sha": c.get("sha", "")[:7], "message": (c.get("commit") or {}).get("message", "").split("\n", 1)[0]}
+                for c in data.get("commits") or []
+            ],
             "total_commits": data.get("total_commits", 0),
             "html_url": data.get("html_url", ""),
             "truncated": truncated,
@@ -413,7 +447,7 @@ async def initiate_device_flow(
     tenant_id: UUID | None = None,
     user_id: UUID | None = None,
 ) -> dict:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         response = await client.post(
             GITHUB_DEVICE_CODE_URL,
             json={"client_id": client_id, "scope": GITHUB_SCOPES},
@@ -433,7 +467,7 @@ async def initiate_device_flow(
 
 
 async def poll_device_token(device_code: str, client_id: str) -> dict:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         response = await client.post(
             GITHUB_TOKEN_URL,
             json={
@@ -466,7 +500,7 @@ async def poll_device_token(device_code: str, client_id: str) -> dict:
 
 async def _validate_fine_grained_pat(token: str) -> dict:
     user_info = await get_authenticated_user(token)
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         response = await client.get(
             f"{GITHUB_API_BASE}/user/repos",
             params={"per_page": 1},
