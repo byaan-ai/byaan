@@ -112,7 +112,7 @@ class QueryWithFilters(BaseModel):
     filters: list[QueryFilter] = Field(default_factory=list, description="Filters to apply to this specific query")
     filter_values: dict[str, Any] | None = Field(
         None,
-        description="Optional UI/filter-intent map keyed by filter id (or id suffixes like _start/_end).",
+        description="Optional UI/filter-intent map keyed by filter id (or id suffixes like _start/_end). Range filters also accept [lower, upper] lists or start/end and min/max bounds objects.",
     )
 
 

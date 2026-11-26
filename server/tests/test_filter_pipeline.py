@@ -419,6 +419,242 @@ def test_filter_compiler_number_range_ignores_transient_minus_input() -> None:
     assert compiled[0].value == 20
 
 
+DATE_RANGE_CONTRACT = json.dumps(
+    {
+        "filters": [
+            {
+                "id": "filter_date",
+                "field_name": "orders.created_at",
+                "display_label": "Created Date",
+                "filter_type": "date_range",
+                "data_type": "date",
+                "allowed_operators": ["between", "gte", "lte", "eq"],
+                "default_operator": "between",
+            }
+        ]
+    }
+)
+
+NUMBER_RANGE_CONTRACT = json.dumps(
+    {
+        "filters": [
+            {
+                "id": "filter_amount",
+                "field_name": "orders.amount",
+                "display_label": "Amount",
+                "filter_type": "number_range",
+                "data_type": "number",
+                "allowed_operators": ["between", "gte", "lte", "eq", "gt", "lt"],
+                "default_operator": "between",
+            }
+        ]
+    }
+)
+
+
+def test_filter_compiler_date_range_two_value_list_compiles_to_between() -> None:
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_date": ["2025-01-01", "2025-01-31"]},
+        filter_contract_json=DATE_RANGE_CONTRACT,
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].field == "orders.created_at"
+    assert compiled[0].operator == "between"
+    assert compiled[0].value == ["2025-01-01", "2025-01-31T23:59:59.999999"]
+
+
+def test_filter_compiler_number_range_two_value_list_compiles_to_between() -> None:
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_amount": ["10", "20.5"]},
+        filter_contract_json=NUMBER_RANGE_CONTRACT,
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].field == "orders.amount"
+    assert compiled[0].operator == "between"
+    assert compiled[0].value == [10, 20.5]
+
+
+@pytest.mark.parametrize("empty_endpoint", [None, "", "   "])
+@pytest.mark.parametrize("missing_lower", [False, True])
+@pytest.mark.parametrize(
+    "contract,filter_key,endpoint,expected_value",
+    [
+        (DATE_RANGE_CONTRACT, "filter_date", "2025-01-01", "2025-01-01"),
+        (NUMBER_RANGE_CONTRACT, "filter_amount", "10", 10),
+        (NUMBER_RANGE_CONTRACT, "filter_amount", 0, 0),
+    ],
+)
+def test_filter_compiler_range_list_with_empty_endpoint_compiles_single_bound(
+    empty_endpoint, missing_lower, contract, filter_key, endpoint, expected_value
+) -> None:
+    value = [empty_endpoint, endpoint] if missing_lower else [endpoint, empty_endpoint]
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={filter_key: value},
+        filter_contract_json=contract,
+    )
+
+    operator = "lte" if missing_lower else "gte"
+    if missing_lower and filter_key == "filter_date":
+        expected_value += "T23:59:59.999999"
+    assert len(compiled) == 1
+    assert compiled[0].operator == operator
+    assert compiled[0].value == expected_value
+    query, params = DatabaseOperationsService.apply_filters_to_sql("SELECT * FROM orders", compiled, "pg")
+    assert "BETWEEN" not in query
+    assert ("<= :p1" if missing_lower else ">= :p1") in query
+    expected_param = datetime.fromisoformat(expected_value) if filter_key == "filter_date" else expected_value
+    assert params == {"p1": expected_param}
+
+
+@pytest.mark.parametrize(
+    "contract,filter_key", [(DATE_RANGE_CONTRACT, "filter_date"), (NUMBER_RANGE_CONTRACT, "filter_amount")]
+)
+def test_filter_compiler_range_list_with_both_endpoints_empty_is_ignored(contract, filter_key) -> None:
+    assert (
+        FilterCompilerService.compile_with_contract(
+            query_id="query-1",
+            filter_values={filter_key: [None, "   "]},
+            filter_contract_json=contract,
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("value,operator", [([10, None], "gte"), ([None, 20], "lte")])
+def test_filter_compiler_open_range_list_respects_allowed_operators(value, operator) -> None:
+    contract = json.loads(NUMBER_RANGE_CONTRACT)
+    contract["filters"][0]["allowed_operators"] = ["between"]
+    with pytest.raises(FilterCompilationError, match=f"Operator '{operator}' is not allowed"):
+        FilterCompilerService.compile_with_contract(
+            query_id="query-1",
+            filter_values={"filter_amount": value},
+            filter_contract_json=json.dumps(contract),
+        )
+
+
+@pytest.mark.parametrize("value,operator,expected_value", [([10, "-"], "gte", 10), (["-", 20], "lte", 20)])
+def test_filter_compiler_number_range_list_ignores_transient_endpoint(value, operator, expected_value) -> None:
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_amount": value},
+        filter_contract_json=NUMBER_RANGE_CONTRACT,
+    )
+    assert len(compiled) == 1
+    assert compiled[0].operator == operator
+    assert compiled[0].value == expected_value
+
+
+def test_filter_compiler_range_list_rejects_single_endpoint() -> None:
+    with pytest.raises(FilterCompilationError, match="exactly 2 values"):
+        FilterCompilerService.compile_with_contract(
+            query_id="query-1",
+            filter_values={"filter_amount": ["10"]},
+            filter_contract_json=NUMBER_RANGE_CONTRACT,
+        )
+
+
+def test_filter_compiler_range_list_rejects_three_endpoints() -> None:
+    with pytest.raises(FilterCompilationError, match="exactly 2 values"):
+        FilterCompilerService.compile_with_contract(
+            query_id="query-1",
+            filter_values={"filter_date": ["2025-01-01", "2025-01-15", "2025-01-31"]},
+            filter_contract_json=DATE_RANGE_CONTRACT,
+        )
+
+
+def test_filter_compiler_date_range_dict_bounds_stay_on_gte_lte() -> None:
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_date": {"start": "2025-01-01", "end": "2025-01-31"}},
+        filter_contract_json=DATE_RANGE_CONTRACT,
+    )
+
+    assert len(compiled) == 2
+    assert any(item.operator == "gte" and item.value == "2025-01-01" for item in compiled)
+    assert any(item.operator == "lte" and item.value == "2025-01-31T23:59:59.999999" for item in compiled)
+
+
+def test_filter_compiler_date_range_open_ended_dict_compiles_single_bound() -> None:
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_date": {"start": "2025-01-01"}},
+        filter_contract_json=DATE_RANGE_CONTRACT,
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].operator == "gte"
+    assert compiled[0].value == "2025-01-01"
+
+
+def test_filter_compiler_date_range_scalar_compiles_to_eq() -> None:
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_date": "2025-01-01"},
+        filter_contract_json=DATE_RANGE_CONTRACT,
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].operator == "eq"
+    assert compiled[0].value == "2025-01-01"
+
+
+def test_filter_compiler_multiselect_list_still_compiles_to_in() -> None:
+    contract = {
+        "filters": [
+            {
+                "id": "filter_status",
+                "field_name": "orders.status",
+                "display_label": "Status",
+                "filter_type": "multiselect",
+                "data_type": "string",
+                "allowed_operators": ["in"],
+                "default_operator": "in",
+            }
+        ]
+    }
+
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_status": ["open", "paid"]},
+        filter_contract_json=json.dumps(contract),
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].operator == "in"
+    assert compiled[0].value == ["open", "paid"]
+
+
+def test_filter_compiler_select_list_still_compiles_to_in() -> None:
+    contract = {
+        "filters": [
+            {
+                "id": "filter_status",
+                "field_name": "orders.status",
+                "display_label": "Status",
+                "filter_type": "select",
+                "data_type": "string",
+                "allowed_operators": ["eq", "ne", "in"],
+                "default_operator": "eq",
+            }
+        ]
+    }
+
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_status": ["open", "paid"]},
+        filter_contract_json=json.dumps(contract),
+    )
+
+    assert len(compiled) == 1
+    assert compiled[0].operator == "in"
+    assert compiled[0].value == ["open", "paid"]
+
+
 def test_filter_compiler_rejects_unknown_filter_key() -> None:
     contract = {
         "filters": [
@@ -737,3 +973,14 @@ async def test_preflight_batch_query_filters_reports_per_query_diagnostics(monke
     assert q2["query_id"] == "q2"
     assert q2["success"] is False
     assert "Invalid filters" in (q2["error"] or "")
+
+
+def test_list_range_reaches_sql_as_between_with_bound_values() -> None:
+    compiled = FilterCompilerService.compile_with_contract(
+        query_id="query-1",
+        filter_values={"filter_amount": ["10", "20.5"]},
+        filter_contract_json=NUMBER_RANGE_CONTRACT,
+    )
+    query, params = DatabaseOperationsService.apply_filters_to_sql("SELECT * FROM orders", compiled, "pg")
+    assert '"orders"."amount" BETWEEN :p1 AND :p2' in query
+    assert params == {"p1": 10, "p2": 20.5}
