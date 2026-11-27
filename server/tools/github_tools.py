@@ -82,7 +82,7 @@ def number_lines(content: str) -> str:
 
 
 @function_tool
-async def get_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) -> str:
+async def get_repo_file(ctx: RunContextWrapper, repo_id: str, path: str, ref: str | None = None) -> str:
     """Fetch a file's content from a connected GitHub repository via the GitHub API.
 
     Each line starts with its line number and a tab. Cite these numbers as file:line, and leave them out when
@@ -91,6 +91,7 @@ async def get_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) -> str:
     Args:
         repo_id: The repository ID
         path: The file path within the repository
+        ref: Optional branch, tag or commit to read from, such as a handoff's branch. Defaults to the default branch.
     """
     from server.services import github_service
 
@@ -106,11 +107,11 @@ async def get_repo_file(ctx: RunContextWrapper, repo_id: str, path: str) -> str:
         return json.dumps({"error": f"Invalid repo name: {repo_full_name}"})
 
     owner, repo_name = repo_full_name.split("/", 1)
-    content = await github_service.get_file_content(token, owner, repo_name, path)
+    content = await github_service.get_file_content(token, owner, repo_name, path, ref)
     if content is None:
-        return json.dumps({"error": f"File not found or too large: {path}"})
+        return json.dumps({"error": f"File not found or too large: {path}" + (f" on {ref}" if ref else "")})
 
-    return json.dumps({"path": path, "content": number_lines(content)})
+    return json.dumps({"path": path, "ref": ref, "content": number_lines(content)})
 
 
 @function_tool

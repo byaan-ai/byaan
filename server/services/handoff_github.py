@@ -5,9 +5,7 @@ import re
 from collections import OrderedDict
 from typing import Any
 
-import httpx
-
-from server.services.github_service import GITHUB_API_BASE, GITHUB_HEADERS, _check_rate_limit
+from server.services.github_service import GITHUB_API_BASE, GITHUB_HEADERS, _check_rate_limit, github_client
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
@@ -43,7 +41,7 @@ class HandoffGitHub:
         if cached_entry:
             headers["If-None-Match"] = cached_entry[0]
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
+        async with github_client(timeout=self._timeout) as client:
             response = await client.request(method, url, headers=headers, **kwargs)
 
         if response.status_code == 304 and cached_entry:
@@ -92,9 +90,11 @@ class HandoffGitHub:
     async def get_pull(self, repo: str, number: int) -> dict[str, Any]:
         return await self._request("GET", f"/repos/{repo}/pulls/{number}", cached=True)
 
+    async def compare(self, repo: str, base: str, head: str) -> dict[str, Any]:
+        return await self._request("GET", f"/repos/{repo}/compare/{base}...{head}")
+
     async def compare_status(self, repo: str, base: str, head: str) -> str:
-        data = await self._request("GET", f"/repos/{repo}/compare/{base}...{head}")
-        return data.get("status", "")
+        return (await self.compare(repo, base, head)).get("status", "")
 
     async def add_labels(self, repo: str, number: int, labels: list[str]) -> None:
         await self._request("POST", f"/repos/{repo}/issues/{number}/labels", json={"labels": labels})
@@ -133,7 +133,7 @@ class HandoffGitHub:
 
     async def job_log_failure(self, repo: str, job_id: int, limit: int = 12_000) -> str | None:
         url = f"{GITHUB_API_BASE}/repos/{repo}/actions/jobs/{job_id}/logs"
-        async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as client:
+        async with github_client(timeout=self._timeout, follow_redirects=True) as client:
             response = await client.get(url, headers=self._headers())
         if response.status_code != 200:
             logger.info(f"[HANDOFF] Job log {job_id} unavailable: HTTP {response.status_code}")

@@ -29,7 +29,7 @@ from server.services.github_app_service import HandoffGitHubAuth, can_push, crea
 from server.services.handoff_agent import AgentRunSpec, AgentUnavailable, ClaudeCodeAdapter
 from server.services.handoff_checks import disallowed_paths, scan_added_lines, scan_text
 from server.services.handoff_github import GitHubError, HandoffGitHub, summarize_checks
-from server.services.handoff_service import activity_summary, move, record, team_settings
+from server.services.handoff_service import activity_summary, latest_result, move, record, team_settings
 from server.utils.custom_logger import get_logger
 
 logger = get_logger(__name__)
@@ -442,6 +442,10 @@ class HandoffRunner:
             )
             handoff = await repo_store.refresh(handoff)
 
+        inbox = HandoffMessageRepository(session)
+        followups = await inbox.pending(handoff.id, "followup")
+        publish_only = not is_fix and bool(handoff.head_sha) and not handoff.pr_number and not followups
+
         from_status = "fixing" if is_fix else "preparing"
         if not is_fix:
             first_start = not handoff.pr_number
@@ -452,12 +456,15 @@ class HandoffRunner:
                 from_statuses=(from_status,),
                 source="executor",
                 data={"first_start": first_start},
-                message="Claude Code started",
+                message="Opening the pull request for the work already pushed"
+                if publish_only
+                else "Claude Code started",
             ):
                 return
+        if publish_only:
+            await self._push(session, handoff, workspace, auth, github, None, None, is_fix)
+            return
 
-        inbox = HandoffMessageRepository(session)
-        followups = await inbox.pending(handoff.id, "followup")
         requests = "\n".join(f"- {m.author_label or 'A teammate'}: {m.body}" for m in followups)
         prompt = self._user_prompt(handoff, plan, requests)
         if not is_fix and handoff.pr_number and handoff.head_sha:
@@ -634,7 +641,6 @@ class HandoffRunner:
         is_fix: bool,
         failing: list[str] | None = None,
     ) -> None:
-        new_pr = not handoff.pr_number
         source_status = "fixing" if is_fix else "running"
         if not await move(
             session,
@@ -652,6 +658,11 @@ class HandoffRunner:
         await handoff_git.sync_work_into_repo(workspace)
         changes = await handoff_git.staged_changes(workspace.repo)
         if not changes:
+            if not is_fix and handoff.head_sha and not handoff.pr_number:
+                stats = await self._branch_stats(github, handoff)
+                result = result or await latest_result(session, handoff.id)
+                await self._publish(session, handoff, github, result, final_text, is_fix, stats)
+                return
             explanation = ((result or {}).get("summary") or final_text or "").strip()[:800]
             if handoff.pr_number and not is_fix:
                 message = f"No new changes were needed; PR #{handoff.pr_number} already covers this request."
@@ -720,13 +731,36 @@ class HandoffRunner:
             new_sha = await handoff_git.commit(workspace.repo, commit_message, author_name, author_email)
             await handoff_git.push(workspace.repo, handoff.repo_full_name, handoff.branch, auth.token)
 
-        now = utcnow()
-        await HandoffRepository(session).update_fields(handoff.id, head_sha=new_sha, pushed_at=now)
+        await HandoffRepository(session).update_fields(handoff.id, head_sha=new_sha, pushed_at=utcnow())
         stats = {
             "files": len(changes),
             "added": sum(c.added for c in changes),
             "removed": sum(c.removed for c in changes),
         }
+        await self._publish(session, handoff, github, result, final_text, is_fix, stats)
+
+    async def _branch_stats(self, github: HandoffGitHub, handoff: Handoff) -> dict[str, int]:
+        compare = await github.compare(handoff.repo_full_name, handoff.base_sha or handoff.base_branch, handoff.branch)
+        files = compare.get("files") or []
+        return {
+            "files": len(files),
+            "added": sum(f.get("additions", 0) for f in files),
+            "removed": sum(f.get("deletions", 0) for f in files),
+        }
+
+    async def _publish(
+        self,
+        session: AsyncSession,
+        handoff: Handoff,
+        github: HandoffGitHub,
+        result: dict[str, Any] | None,
+        final_text: str | None,
+        is_fix: bool,
+        stats: dict[str, int],
+    ) -> None:
+        """Open the PR if there isn't one yet, then hand the pushed branch to CI (or finish when the repo has no CI)."""
+        new_pr = not handoff.pr_number
+        now = utcnow()
         fields: dict[str, Any] = {"error": None}
 
         if not handoff.pr_number:

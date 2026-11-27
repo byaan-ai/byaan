@@ -186,6 +186,8 @@ async def stream_claude_with_mcp_tools(
         # so the CLI can resolve node/npm at runtime (e.g. for MCP servers).
         expanded_path = build_expanded_path()
         cli_env["PATH"] = expanded_path
+        # A self-update rewrites the CLI package in place, so concurrent spawns fail until it finishes.
+        cli_env["DISABLE_AUTOUPDATER"] = "1"
 
         # Set CLAUDE_CODE_OAUTH_TOKEN from active token (long-term or OAuth access token)
         # This also refreshes expired OAuth tokens automatically

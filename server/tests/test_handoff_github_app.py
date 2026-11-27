@@ -117,3 +117,40 @@ async def test_push_check_uses_the_app_installation_permissions():
     read = app_service.HandoffGitHubAuth(token="t", kind="app", app_permissions={"contents": "read"})
     assert await app_service.can_push(write, None, "acme/api") is True
     assert await app_service.can_push(read, None, "acme/api") is False
+
+
+@pytest.mark.parametrize(
+    ("method", "error", "expected_calls", "succeeds"),
+    [
+        ("GET", "dropped", 2, True),
+        ("POST", "dropped", 1, False),
+        ("POST", "refused", 2, True),
+    ],
+)
+async def test_github_client_retries_only_requests_safe_to_repeat(monkeypatch, method, error, expected_calls, succeeds):
+    import httpx
+
+    from server.services import github_service
+
+    calls = []
+
+    async def flaky(self, request):
+        calls.append(request.method)
+        if len(calls) == 1:
+            if error == "dropped":
+                raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+            raise httpx.ConnectError("Connection refused")
+        return httpx.Response(200, json={"ok": True})
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", flaky)
+    monkeypatch.setattr(github_service.asyncio, "sleep", no_sleep)
+    async with github_service.github_client(timeout=5) as client:
+        if succeeds:
+            assert (await client.request(method, "https://api.github.com/repos/acme/api")).status_code == 200
+        else:
+            with pytest.raises(httpx.RemoteProtocolError):
+                await client.request(method, "https://api.github.com/repos/acme/api/pulls")
+    assert len(calls) == expected_calls

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from server.repositories.skill_credentials import SkillCredentialRepository
 from server.services import github_service
-from server.services.github_service import GITHUB_API_BASE, GITHUB_HEADERS
+from server.services.github_service import GITHUB_API_BASE, GITHUB_HEADERS, github_client
 from server.services.handoff_git import FileChange
 from server.utils.config_loader import get_auth_secret
 from server.utils.custom_logger import get_logger
@@ -96,7 +96,7 @@ def verify_state(state: str) -> tuple[UUID, UUID]:
 
 
 async def convert_manifest(code: str) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with github_client(timeout=30.0) as client:
         response = await client.post(f"{GITHUB_API_BASE}/app-manifests/{code}/conversions", headers=GITHUB_HEADERS)
     if response.status_code != 201:
         raise GitHubAppError(f"GitHub App creation failed: HTTP {response.status_code}")
@@ -139,7 +139,7 @@ def _app_jwt(app: dict[str, Any]) -> str:
 
 async def _app_request(app: dict[str, Any], method: str, path: str, **kwargs: Any) -> httpx.Response:
     headers = {**GITHUB_HEADERS, "Authorization": f"Bearer {_app_jwt(app)}"}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with github_client(timeout=30.0) as client:
         return await client.request(method, f"{GITHUB_API_BASE}{path}", headers=headers, **kwargs)
 
 
@@ -173,7 +173,7 @@ async def installation_token(app: dict[str, Any], repo_full_name: str) -> tuple[
 
 
 async def _bot_user_id(slug: str, token: str) -> int | None:
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    async with github_client(timeout=15.0) as client:
         response = await client.get(
             f"{GITHUB_API_BASE}/users/{slug}[bot]", headers={**GITHUB_HEADERS, "Authorization": f"Bearer {token}"}
         )
@@ -269,7 +269,7 @@ async def create_signed_commit(
     headers = {**GITHUB_HEADERS, "Authorization": f"Bearer {token}"}
     base = f"{GITHUB_API_BASE}/repos/{repo_full_name}/git"
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with github_client(timeout=60.0) as client:
 
         async def call(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
             response = await client.request(method, f"{base}{path}", headers=headers, json=payload)

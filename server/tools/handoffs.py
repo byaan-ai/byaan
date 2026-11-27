@@ -274,6 +274,29 @@ async def get_handoff_status(ctx: RunContextWrapper[Any], handoff_id: str | None
 
 
 @function_tool
+async def get_handoff_changes(ctx: RunContextWrapper[Any], handoff_id: str | None = None) -> str:
+    """Get the code a handoff changed: its branch's commits and per-file diff against the base branch, from GitHub.
+
+    Use it for "what did Claude change?", "show the code" or "how does the fix work?". The diff is the source of
+    truth for a handoff's work, whether or not a PR is open. Patches flagged patch_truncated or patch_omitted are
+    incomplete: read the whole file with get_repo_file and ref set to the returned branch before explaining it.
+
+    Args:
+        handoff_id: Optional handoff id. Defaults to the most recent handoff in this thread or notebook.
+    """
+    tenant_id, error = _guard(ctx)
+    if error:
+        return error
+    async for session in get_async_session():
+        try:
+            handoff = await _target(session, ctx, tenant_id, handoff_id)
+            return _ok(await handoff_service.branch_changes(session, handoff))
+        except HandoffError as exc:
+            return _err(str(exc), code="unavailable")
+    return _err("Could not open a database session.", code="session_error")
+
+
+@function_tool
 async def message_handoff(ctx: RunContextWrapper[Any], text: str, handoff_id: str | None = None) -> str:
     """Send a follow-up or an answer to a handoff that is still in progress ("also flag the patient", answers).
 
@@ -468,6 +491,7 @@ async def list_handoffs(ctx: RunContextWrapper[Any], status: str | None = None, 
 HANDOFF_INTERACTIVE_TOOLS = [
     propose_handoff,
     get_handoff_status,
+    get_handoff_changes,
     start_handoff,
     message_handoff,
     restart_handoff,
