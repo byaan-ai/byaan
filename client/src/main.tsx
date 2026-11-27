@@ -140,6 +140,23 @@ function AppWithConfig() {
     api_host: config?.host || "https://us.i.posthog.com",
     autocapture: true, // Explicitly enable autocapture for Tauri
     persistence: "localStorage", // Use localStorage for persistence in desktop app
+    capture_exceptions: {
+      capture_unhandled_errors: true,
+      capture_unhandled_rejections: true,
+      capture_console_errors: false,
+    },
+    before_send: (event: any) => {
+      if (event?.event === "$exception") {
+        const values = (event.properties?.$exception_list ?? [])
+          .map((e: any) => String(e?.value ?? ""))
+          .join(" ");
+        // Drop network noise: backend still booting or machine offline
+        if (/Load failed|Failed to fetch|NetworkError|Could not connect|status: 404/i.test(values)) {
+          return null;
+        }
+      }
+      return event;
+    },
     loaded: (posthog: any) => {
       console.log("PostHog loaded successfully", {
         api_host: posthog.config.api_host,
